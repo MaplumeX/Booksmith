@@ -171,7 +171,7 @@ input {
 }
 
 .btn-ghost:hover:not(:disabled) {
-  background: var(--surface-raised);
+  background: var(--hover-bg);
   color: var(--text);
 }
 
@@ -535,7 +535,7 @@ input {
 }
 
 .tree-item:hover {
-  background: var(--surface-sunken);
+  background: var(--hover-bg);
 }
 
 .tree-item.on {
@@ -610,13 +610,19 @@ input {
   background: transparent;
   color: var(--text-muted);
   cursor: pointer;
-  padding: 0 6px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 auto;
+  width: 18px;
+  height: 18px;
+  margin-right: var(--space-1);
+  border-radius: var(--radius);
   line-height: 1;
-  height: 100%;
 }
 
 .tab-close:hover {
-  background: var(--surface-sunken);
+  background: var(--hover-bg);
   color: var(--text);
 }
 
@@ -976,7 +982,7 @@ input {
 }
 
 .search-hit:hover {
-  background: var(--accent-subtle);
+  background: var(--hover-bg);
 }
 
 .search-line {
@@ -1086,7 +1092,7 @@ input {
 }
 
 .toc-item:hover {
-  background: var(--surface-raised);
+  background: var(--hover-bg);
 }
 
 .toc-item.broken {
@@ -1128,6 +1134,7 @@ input {
 
 .toc-actions button {
   border: none;
+  border-radius: var(--radius);
   background: transparent;
   color: var(--text-muted);
   cursor: pointer;
@@ -1137,6 +1144,7 @@ input {
 }
 
 .toc-actions button:hover {
+  background: var(--hover-bg);
   color: var(--text);
 }
 
