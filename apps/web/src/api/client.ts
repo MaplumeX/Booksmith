@@ -4,8 +4,9 @@ export interface UserDto {
   role: string
 }
 
-export interface VersionDto {
-  versionNo: number
+export interface PageSnapshotDto {
+  id: string
+  path: string
   byteSize: number
   sha256: string
   createdAt: string
@@ -60,13 +61,15 @@ export const api = {
 
   books: () => request<{ books: BookDto[] }>('/books'),
 
-  save: async (id: string, version: number, bytes: Uint8Array): Promise<{ version: number }> => {
+  save: async (id: string, version: number, bytes: Uint8Array, options: { checkpoint?: boolean } = {}): Promise<{ version: number }> => {
     const copy = new Uint8Array(bytes.length)
     copy.set(bytes)
+    const headers: Record<string, string> = { 'content-type': 'application/epub+zip', 'if-match': `"${version}"` }
+    if (options.checkpoint) headers['x-booksmith-checkpoint'] = 'manual'
     const response = await fetch(`/api/books/${id}/epub`, {
       method: 'PUT',
       credentials: 'include',
-      headers: { 'content-type': 'application/epub+zip', 'if-match': `"${version}"` },
+      headers,
       body: copy.buffer,
     })
     const payload = await response.json().catch(() => ({}))
@@ -76,21 +79,19 @@ export const api = {
     return payload as { version: number }
   },
 
-  versions: (id: string) => request<{ versions: VersionDto[] }>(`/books/${id}/versions`),
+  pageVersions: (id: string) => request<{ snapshots: PageSnapshotDto[] }>(`/books/${id}/page-versions`),
 
-  restore: (id: string, versionNo: number) =>
-    request<{ version: number; restoredFrom: number }>(`/books/${id}/versions/${versionNo}/restore`, {
-      method: 'POST',
-    }),
-
-  versionEpub: async (id: string, versionNo: number): Promise<Uint8Array> => {
-    const response = await fetch(`/api/books/${id}/versions/${versionNo}/epub`, { credentials: 'include' })
+  pageVersionText: async (id: string, snapshotId: string): Promise<string> => {
+    const response = await fetch(`/api/books/${id}/page-versions/${snapshotId}`, { credentials: 'include' })
     if (!response.ok) {
       const payload = await response.json().catch(() => ({}))
       throw new ApiError(response.status, (payload as { error?: string }).error ?? 'http_error', payload)
     }
-    return new Uint8Array(await response.arrayBuffer())
+    return response.text()
   },
+
+  restorePage: (id: string, snapshotId: string) =>
+    request<{ version: number; path: string }>(`/books/${id}/page-versions/${snapshotId}/restore`, { method: 'POST' }),
 
   upload: (file: File) =>
     request<{ book: BookDto }>('/books', {

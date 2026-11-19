@@ -63,7 +63,7 @@ const REWRITTEN_CHAPTER = [
   '<body><h1>序言</h1><p>这段文字被测试改写了，用来验证快照差异。</p></body></html>',
 ].join('\n')
 
-test('lists snapshots and restores an older one', async ({ page }) => {
+test('restores one page from its own snapshot history', async ({ page }) => {
   await openChapter(page)
   await page.locator('.cm-content').click()
   await page.keyboard.press('Control+a')
@@ -72,11 +72,51 @@ test('lists snapshots and restores an older one', async ({ page }) => {
   await expect(page.locator('.appbar-meta')).toHaveText('v2')
 
   await page.locator('.appbar-history').click()
+  // The chapter has the snapshot taken at import plus the one this test just saved.
   await expect(page.locator('.snapshot-item')).toHaveCount(2)
-  await expect(page.locator('.snapshot-item').first()).toContainText('当前')
+  await expect(page.locator('.snapshot-item').first()).toContainText('最新')
 
   await page.locator('.snapshot-item').last().click()
-  await page.getByRole('button', { name: '恢复到此快照' }).click()
+  await page.getByRole('button', { name: '恢复这一版' }).click()
   await page.getByRole('button', { name: '确认恢复' }).click()
   await expect(page.locator('.appbar-meta')).toHaveText('v3')
+
+  await page.reload()
+  await expect(page.getByLabel('书籍文件')).toBeVisible()
+  await page.getByRole('button', { name: 'ch003.xhtml', exact: true }).click()
+  await expect(page.locator('.cm-content')).not.toContainText('这段文字被测试改写了')
+})
+
+test('saves by itself once typing stops', async ({ page }) => {
+  test.setTimeout(70_000)
+  await openChapter(page)
+  await page.locator('.cm-content').click()
+  await page.keyboard.type('自动保存')
+  await expect(page.locator('.statusbar')).toContainText('1 个文件未保存')
+
+  await expect(page.locator('.appbar-save')).toHaveText(/已保存 \d{2}:\d{2}/, { timeout: 40_000 })
+  await expect(page.locator('.appbar-meta')).toHaveText('v2')
+
+  // Nothing was edited after the save, so the timer must not produce another version.
+  await page.waitForTimeout(5000)
+  await expect(page.locator('.appbar-meta')).toHaveText('v2')
+})
+
+test('brings back an unsaved draft after a reload', async ({ page }) => {
+  await openChapter(page)
+  await page.locator('.cm-content').click()
+  await page.keyboard.insertText('本地草稿标记')
+  // The draft lands in IndexedDB a second after the last keystroke, long before the 20s autosave.
+  await page.waitForTimeout(1500)
+
+  await page.reload()
+  await expect(page.getByLabel('书籍文件')).toBeVisible()
+
+  const banner = page.locator('.banner-info')
+  await expect(banner).toContainText('本地草稿')
+  await banner.getByRole('button', { name: '恢复草稿' }).click()
+
+  await page.getByRole('button', { name: 'ch003.xhtml', exact: true }).click()
+  await expect(page.locator('.cm-content')).toContainText('本地草稿标记')
+  await expect(page.locator('.statusbar')).toContainText('未保存')
 })

@@ -1,4 +1,4 @@
-import { browserXmlParser, openEpub, type EpubArchive, type EpubPackage } from '@booksmith/core'
+import { browserXmlParser, isTextEntry, openEpub, type EpubArchive, type EpubPackage } from '@booksmith/core'
 import { api } from '../api/client'
 
 export type FileGroup = 'Text' | 'Styles' | 'Images' | 'Other'
@@ -12,15 +12,9 @@ export interface LoadedBook {
   groups: Array<{ group: FileGroup; label: string; paths: string[] }>
 }
 
-const TEXT_EXTENSIONS = new Set(['xhtml', 'html', 'htm', 'css', 'opf', 'ncx', 'xml', 'svg', 'txt', 'js'])
-
 export function extensionOf(path: string): string {
   const index = path.lastIndexOf('.')
   return index < 0 ? '' : path.slice(index + 1).toLowerCase()
-}
-
-export function isTextPath(path: string): boolean {
-  return TEXT_EXTENSIONS.has(extensionOf(path))
 }
 
 export function basename(path: string): string {
@@ -89,7 +83,7 @@ export async function loadBook(id: string): Promise<LoadedBook> {
   const texts = new Map<string, string>()
   const decoder = new TextDecoder('utf-8')
   for (const [path, data] of archive.entries) {
-    if (isTextPath(path)) texts.set(path, decoder.decode(data))
+    if (isTextEntry(path)) texts.set(path, decoder.decode(data))
   }
 
   return { id, version, archive, pkg, texts, groups: groupFiles(pkg, archive) }

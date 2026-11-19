@@ -2,6 +2,9 @@
 
 Status: implemented
 
+Superseded in part by: [page-level snapshots](2026-11-19-page-level-snapshots.md) — 粒度与保留策略已被取代；
+时间轴呈现、破坏性确认文案与「否决命名快照」的结论仍然有效。
+
 ## Problem
 
 > 以下描述的是本次改造之前的实现状态。

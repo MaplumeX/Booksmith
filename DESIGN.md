@@ -37,17 +37,19 @@
 | 组件 | 路径 | 状态 |
 |---|---|---|
 | `Button` | `src/ui/Button.tsx` | default / hover / active / focus-visible / disabled / loading |
-| `FileTree` | `src/ui/FileTree.tsx` | default / empty（无图片组）/ loading / error / edge（长名截断） |
+| `FileTree` | `src/ui/FileTree.tsx` | default / empty（无图片组）/ loading / error / edge（长名截断）/ 右键菜单 |
 | `TabBar` | `src/ui/TabBar.tsx` | default / active / dirty / overflow（横向滚动） |
 | `CodePane` | `src/ui/CodePane.tsx` | default / loading / error（语法错误）/ edge（174KB 单章） |
 | `PreviewPane` | `src/ui/PreviewPane.tsx` | default / empty / loading / error / edge（MathML、缺图） |
 | `MetadataPanel` | `src/ui/MetadataPanel.tsx` | default / dirty / error（字段非法） |
 | `TocPanel` | `src/ui/TocPanel.tsx` | default / empty / error（锚点失效）/ edge（标题含内联 MathML） |
 | `SearchPanel` | `src/ui/SearchPanel.tsx` | default / empty / loading |
-| `VersionHistory` | `src/ui/VersionHistory.tsx` | default / empty（两版无差异）/ loading / error / edge（整章增删、非正文改动、长行折行） |
+| `VersionHistory` | `src/ui/VersionHistory.tsx` | default（单文件时间轴 + diff）/ empty（这一版和现在相同）/ loading（列表与 diff 骨架）/ error（重试）/ edge（单文件 100 条、长行折行） |
+| `FileTree` 右键菜单 | `src/ui/FileTree.tsx` `.context-menu` | default / disabled（二进制与容器条目无历史）/ hover / 键盘 `Escape` 与点击外部关闭 |
 | `MetadataPanel` | `src/ui/MetadataPanel.tsx` | default / dirty |
 | `Dialog` | 书库新建书 | default / pending / error |
 | `StatusBar` | `src/ui/StatusBar.tsx` | 已保存 / 保存中 / 冲突 |
+| 保存状态（顶栏） | `src/routes/Editor.tsx` `.appbar-save` | dirty（N 处未保存）/ saving（保存中…）/ saved（已保存 HH:MM）/ error（保存失败 · 重试） |
 | `BookCard` | `src/ui/BookCard.tsx` | default / hover / loading（骨架）|
 | `EmptyState` | `src/ui/EmptyState.tsx` | 图形 + 标题 + 说明 + 一个主操作 |
 

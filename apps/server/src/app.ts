@@ -8,7 +8,7 @@ import { createDb } from './db/client'
 import type { User } from './db/schema'
 import { registerAuthRoutes } from './routes/auth'
 import { registerBookRoutes } from './routes/books'
-import { registerVersionRoutes } from './routes/versions'
+import { registerPageVersionRoutes } from './routes/pageVersions'
 import { createPostgresFileStore } from './storage/fileStore'
 
 declare module 'fastify' {
@@ -63,7 +63,7 @@ export async function createApp(options: CreateAppOptions = {}): Promise<Fastify
 
   registerAuthRoutes(app, { db, config, sessions, loginLimiter })
   registerBookRoutes(app, { db, fileStore })
-  registerVersionRoutes(app, { db, fileStore })
+  registerPageVersionRoutes(app, { db, fileStore })
 
   return app
 }

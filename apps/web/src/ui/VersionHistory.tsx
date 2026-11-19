@@ -1,17 +1,17 @@
-import { browserXmlParser, openEpub, type EpubArchive, type EpubPackage } from '@booksmith/core'
+import type { EpubPackage } from '@booksmith/core'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { ApiError, api, type VersionDto } from '../api/client'
-import { changedNonProseFiles, diffLines, sourceDocument, spinePaths, type LineDiff } from '../diff/document'
+import { ApiError, api, type PageSnapshotDto } from '../api/client'
+import { diffLines, spinePaths, type LineDiff } from '../diff/document'
 import { formatBytes } from '../format'
-import { isTextPath } from '../state/bookStore'
+import { basename } from '../state/bookStore'
 import { Button } from './Button'
 import { EmptyState } from './EmptyState'
 
 interface VersionHistoryProps {
   bookId: string
-  currentVersion: number
+  /** The entry whose history is open; snapshots are per file, so the surface is one file's timeline. */
+  path: string
   dirtyCount: number
-  archive: EpubArchive
   pkg: EpubPackage
   texts: Map<string, string>
   onRestored: () => void
@@ -36,18 +36,15 @@ function timeLabel(iso: string): string {
   return new Date(iso).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit', hour12: false })
 }
 
-function groupByDay(versions: VersionDto[]): Array<{ key: string; label: string; items: VersionDto[] }> {
+function groupByDay(snapshots: PageSnapshotDto[]): Array<{ key: string; label: string; items: PageSnapshotDto[] }> {
   const today = new Date()
-  const groups: Array<{ key: string; label: string; items: VersionDto[] }> = []
-  for (const version of versions) {
-    const date = new Date(version.createdAt)
+  const groups: Array<{ key: string; label: string; items: PageSnapshotDto[] }> = []
+  for (const snapshot of snapshots) {
+    const date = new Date(snapshot.createdAt)
     const key = `${date.getFullYear()}-${date.getMonth()}-${date.getDate()}`
     const last = groups.at(-1)
-    if (last?.key === key) {
-      last.items.push(version)
-    } else {
-      groups.push({ key, label: dayLabel(date, today), items: [version] })
-    }
+    if (last?.key === key) last.items.push(snapshot)
+    else groups.push({ key, label: dayLabel(date, today), items: [snapshot] })
   }
   return groups
 }
@@ -60,38 +57,34 @@ function messageFor(error: unknown, action: string): string {
   return `${action}失败`
 }
 
-export function VersionHistory({
-  bookId,
-  currentVersion,
-  dirtyCount,
-  archive,
-  pkg,
-  texts,
-  onRestored,
-  onClose,
-}: VersionHistoryProps) {
-  const [versions, setVersions] = useState<VersionDto[] | null>(null)
+export function VersionHistory({ bookId, path, dirtyCount, pkg, texts, onRestored, onClose }: VersionHistoryProps) {
+  const [snapshots, setSnapshots] = useState<PageSnapshotDto[] | null>(null)
   const [listError, setListError] = useState<string | null>(null)
-  const [selected, setSelected] = useState<number | null>(null)
+  const [selected, setSelected] = useState<PageSnapshotDto | null>(null)
   const [diffs, setDiffs] = useState<LineDiff[] | null>(null)
   const [diffState, setDiffState] = useState<DiffState>('idle')
   const [diffError, setDiffError] = useState<string | null>(null)
-  const [otherFiles, setOtherFiles] = useState<string[]>([])
   const [confirming, setConfirming] = useState(false)
   const [restoring, setRestoring] = useState(false)
   const [restoreError, setRestoreError] = useState<string | null>(null)
   const diffBox = useRef<HTMLDivElement>(null)
 
   const loadList = useCallback(async () => {
-    setVersions(null)
+    setSnapshots(null)
     setListError(null)
     try {
-      const result = await api.versions(bookId)
-      setVersions(result.versions)
+      const { snapshots: all } = await api.pageVersions(bookId)
+      const mine = all
+        .filter((entry) => entry.path === path)
+        .sort((a, b) => b.createdAt.localeCompare(a.createdAt))
+      setSnapshots(mine)
+      // The newest snapshot is what the editor already holds unless it is dirty, so opening on it
+      // would greet the user with "identical". Start at the previous version instead.
+      setSelected((dirtyCount > 0 ? mine[0] : (mine[1] ?? mine[0])) ?? null)
     } catch (cause) {
       setListError(messageFor(cause, '读取快照'))
     }
-  }, [bookId])
+  }, [bookId, path, dirtyCount])
 
   useEffect(() => {
     void loadList()
@@ -106,39 +99,24 @@ export function VersionHistory({
   }, [onClose])
 
   useEffect(() => {
-    if (selected === null) return
+    if (!selected) return
     let cancelled = false
 
     setDiffState('loading')
     setDiffError(null)
-    setOtherFiles([])
     setDiffs(null)
+    setConfirming(false)
 
     api
-      .versionEpub(bookId, selected)
-      .then((bytes) => {
+      .pageVersionText(bookId, selected.id)
+      .then((text) => {
         if (cancelled) return
-        const opened = openEpub(bytes, browserXmlParser)
-        const decoder = new TextDecoder('utf-8')
-        const snapshotTexts = new Map<string, string>()
-        for (const [path, data] of opened.archive.entries) {
-          if (isTextPath(path)) snapshotTexts.set(path, decoder.decode(data))
-        }
-
-        const paths = spinePaths(pkg)
-        const next = diffLines(
-          sourceDocument(paths, snapshotTexts),
-          sourceDocument(paths, texts),
-        )
-        const others = changedNonProseFiles(opened.archive, archive, new Set(paths))
-        setOtherFiles(others)
+        const current = texts.get(path) ?? ''
+        const next = diffLines(text, current)
         if (next.every((entry) => entry.kind === 'same')) {
-          // A snapshot can differ only in the OPF or a stylesheet; calling that "no difference"
-          // would hide the one change that was made.
           setDiffState('empty')
           return
         }
-
         setDiffs(next)
         setDiffState('ready')
       })
@@ -151,14 +129,21 @@ export function VersionHistory({
     return () => {
       cancelled = true
     }
-  }, [selected, bookId, archive, pkg, texts])
+  }, [selected, bookId, path, texts])
+
+  useEffect(() => {
+    if (diffState !== 'ready') return
+    // A 174KB chapter puts the first change far below the fold.
+    const first = diffBox.current?.querySelector('.diff-removed, .diff-added, .diff-changed')
+    first?.scrollIntoView({ block: 'center' })
+  }, [diffs, diffState])
 
   const restore = useCallback(async () => {
-    if (selected === null) return
+    if (!selected) return
     setRestoring(true)
     setRestoreError(null)
     try {
-      await api.restore(bookId, selected)
+      await api.restorePage(bookId, selected.id)
       onRestored()
     } catch (cause) {
       setRestoreError(messageFor(cause, '恢复'))
@@ -167,40 +152,36 @@ export function VersionHistory({
     }
   }, [selected, bookId, onRestored])
 
-  useEffect(() => {
-    if (diffState !== 'ready') return
-    // The dump covers all 28 documents, so the first change can sit thousands of lines in.
-    const first = diffBox.current?.querySelector('.diff-removed, .diff-added, .diff-changed')
-    first?.scrollIntoView({ block: 'center' })
-  }, [diffs, diffState])
+  const groups = useMemo(() => (snapshots ? groupByDay(snapshots) : []), [snapshots])
+  const spineIndex = spinePaths(pkg).indexOf(path)
+  const subtitle =
+    spineIndex >= 0 ? `${path} · 正文第 ${spineIndex + 1} 篇` : path
 
-  const groups = useMemo(() => (versions ? groupByDay(versions) : []), [versions])
-  const selectedVersion = versions?.find((version) => version.versionNo === selected) ?? null
-  const selectedLabel = selectedVersion
-    ? `${dayLabel(new Date(selectedVersion.createdAt), new Date())} ${timeLabel(selectedVersion.createdAt)}`
-    : ''
+  const selectedLabel = selected ? `${dayLabel(new Date(selected.createdAt), new Date())} ${timeLabel(selected.createdAt)}` : ''
 
   return (
     <div
       className="dialog-backdrop"
       role="dialog"
       aria-modal="true"
-      aria-label="快照历史"
+      aria-label={`${basename(path)} 的版本历史`}
       onMouseDown={(event) => {
         if (event.target === event.currentTarget) onClose()
       }}
     >
       <div className="snapshot-dialog">
         <header className="snapshot-head">
-          <h2>快照</h2>
-          <span className="snapshot-sub">每次保存留一版，最近 10 版全留，更早的每天留最后一版</span>
+          <h2>{basename(path)}</h2>
+          <span className="snapshot-path-label" title={path}>
+            {subtitle}
+          </span>
           <Button variant="ghost" onClick={onClose}>
             关闭
           </Button>
         </header>
 
         <div className="snapshot-body">
-          <nav className="snapshot-timeline" aria-label="快照列表">
+          <nav className="snapshot-timeline" aria-label="版本列表">
             {listError ? (
               <p className="banner banner-error" role="alert">
                 {listError}
@@ -208,43 +189,38 @@ export function VersionHistory({
                   重试
                 </button>
               </p>
-            ) : !versions ? (
+            ) : !snapshots ? (
               <div className="snapshot-timeline-skeleton" aria-busy="true" />
-            ) : versions.length === 0 ? (
-              <p className="snapshot-note">这本书还没有快照。</p>
+            ) : snapshots.length === 0 ? (
+              <p className="snapshot-note">这个文件还没有快照。</p>
             ) : (
               groups.map((group) => (
                 <section key={group.key} className="snapshot-group">
                   <h3 className="snapshot-group-label">{group.label}</h3>
-                  {group.items.map((version) => {
-                    const isCurrent = version.versionNo === currentVersion
-                    return (
-                      <button
-                        key={version.versionNo}
-                        type="button"
-                        className={`snapshot-item${selected === version.versionNo ? ' on' : ''}`}
-                        aria-pressed={selected === version.versionNo}
-                        title={`v${version.versionNo}`}
-                        onClick={() => {
-                          setSelected(version.versionNo)
-                          setConfirming(false)
-                          setRestoreError(null)
-                        }}
-                      >
-                        <span className="snapshot-time">{timeLabel(version.createdAt)}</span>
-                        {isCurrent ? <span className="snapshot-badge">当前</span> : null}
-                        <span className="snapshot-size">{formatBytes(version.byteSize)}</span>
-                      </button>
-                    )
-                  })}
+                  {group.items.map((item, index) => (
+                    <button
+                      key={item.id}
+                      type="button"
+                      className={`snapshot-item${selected?.id === item.id ? ' on' : ''}`}
+                      aria-pressed={selected?.id === item.id}
+                      title={`${timeLabel(item.createdAt)} · ${formatBytes(item.byteSize)}`}
+                      onClick={() => setSelected(item)}
+                    >
+                      <span className="snapshot-time">{timeLabel(item.createdAt)}</span>
+                      {index === 0 && group.key === groups[0]?.key ? (
+                        <span className="snapshot-badge">最新</span>
+                      ) : null}
+                      <span className="snapshot-size">{formatBytes(item.byteSize)}</span>
+                    </button>
+                  ))}
                 </section>
               ))
             )}
           </nav>
 
-          <section className="snapshot-pane" aria-label="快照差异">
+          <section className="snapshot-pane" aria-label="版本差异">
             {diffState === 'idle' ? (
-              <p className="snapshot-note">从左侧选一个快照，查看它和现在的差别。</p>
+              <p className="snapshot-note">从左侧选一个版本，查看它和现在的差别。</p>
             ) : diffState === 'loading' ? (
               <div className="snapshot-diff-skeleton" aria-busy="true" />
             ) : diffState === 'error' ? (
@@ -252,23 +228,14 @@ export function VersionHistory({
                 {diffError}
               </p>
             ) : diffState === 'empty' ? (
-              <EmptyState
-                title={otherFiles.length > 0 ? '正文没有改动' : '两版没有差异'}
-                description={
-                  otherFiles.length > 0
-                    ? `这个快照只改了正文以外的文件：${otherFiles.join('、')}`
-                    : '这个快照和现在的内容完全相同。'
-                }
-              />
+              <EmptyState title="这一版和现在相同" description="这个快照的内容与编辑器里现在的文件完全一致。" />
             ) : (
               <>
                 <div className="snapshot-toolbar">
                   <span className="snapshot-label">{selectedLabel}</span>
-                  {selected !== currentVersion ? (
-                    <Button variant="primary" onClick={() => setConfirming(true)}>
-                      恢复到此快照
-                    </Button>
-                  ) : null}
+                  <Button variant="primary" onClick={() => setConfirming(true)}>
+                    恢复这一版
+                  </Button>
                 </div>
                 <div className="snapshot-diff-wrap">
                   <div className="diff-view" ref={diffBox} role="region" aria-label="源码差异">
@@ -277,18 +244,15 @@ export function VersionHistory({
                     ))}
                   </div>
                 </div>
-                {otherFiles.length > 0 ? (
-                  <p className="snapshot-other" title={otherFiles.join('、')}>
-                    另改动：{otherFiles.join('、')}
-                  </p>
-                ) : null}
               </>
             )}
 
             {confirming ? (
               <div className="snapshot-confirm" role="alertdialog" aria-label="确认恢复">
                 <div className="snapshot-confirm-copy">
-                  <p>恢复到 {selectedLabel}？当前内容会被这个快照覆盖，并作为一个新快照保留。</p>
+                  <p>
+                    把 {basename(path)} 恢复到 {selectedLabel}？当前内容会被这个快照覆盖，并作为一条新快照保留。
+                  </p>
                   {dirtyCount > 0 ? (
                     <p className="snapshot-warn">编辑器里 {dirtyCount} 处未保存的改动将被丢弃。</p>
                   ) : null}
@@ -310,8 +274,6 @@ export function VersionHistory({
     </div>
   )
 }
-
-const FILE_MARKER = /^<!-- .+ -->$/
 
 function DiffRow({ entry }: { entry: LineDiff }) {
   if (entry.kind === 'changed') {
@@ -337,9 +299,8 @@ function DiffRow({ entry }: { entry: LineDiff }) {
     )
   }
 
-  const marker = entry.kind === 'same' && FILE_MARKER.test(entry.text)
   return (
-    <div className={`diff-row diff-${entry.kind}${marker ? ' diff-file' : ''}`}>
+    <div className={`diff-row diff-${entry.kind}`}>
       <span className="diff-sign">{entry.kind === 'removed' ? '-' : entry.kind === 'added' ? '+' : ' '}</span>
       <span className="diff-code">{entry.text.length > 0 ? entry.text : '\u00a0'}</span>
     </div>
