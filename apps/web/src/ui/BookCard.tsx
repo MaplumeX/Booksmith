@@ -1,4 +1,4 @@
-import { coverUrl, type BookDto } from '../api/client'
+import { coverUrl, downloadUrl, type BookDto } from '../api/client'
 import { formatBytes, formatRelative } from '../format'
 
 interface BookCardProps {
@@ -8,7 +8,8 @@ interface BookCardProps {
 
 export function BookCard({ book, onOpen }: BookCardProps) {
   return (
-    <button type="button" className="book-card" onClick={() => onOpen(book.id)}>
+    <div className="book-card-wrap">
+      <button type="button" className="book-card" onClick={() => onOpen(book.id)}>
       <span className="book-cover">
         {book.hasCover ? (
           <img src={coverUrl(book.id)} alt="" loading="lazy" />
@@ -25,6 +26,10 @@ export function BookCard({ book, onOpen }: BookCardProps) {
       <span className="book-meta">
         {book.chapterCount} 章 · {formatBytes(book.byteSize)} · {formatRelative(book.updatedAt)}
       </span>
-    </button>
+      </button>
+      <a className="book-download" href={downloadUrl(book.id)} download title={`下载 ${book.title} 的 EPUB`}>
+        下载
+      </a>
+    </div>
   )
 }

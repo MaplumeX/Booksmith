@@ -25,6 +25,11 @@ export interface PreviewDocument {
   revoke: () => void
 }
 
+/** Media type implied by the file extension alone, ignoring what the manifest claims. */
+export function mediaTypeFromExtension(path: string): string {
+  return MIME_BY_EXTENSION[path.slice(path.lastIndexOf('.') + 1).toLowerCase()] ?? 'application/octet-stream'
+}
+
 /** Media type from the manifest, falling back to the file extension. */
 export function mediaTypeOf(path: string, pkg: EpubPackage): string {
   const manifestItem = pkg.manifest.find((item) => item.path === path)

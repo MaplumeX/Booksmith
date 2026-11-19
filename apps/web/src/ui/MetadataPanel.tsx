@@ -1,10 +1,21 @@
-import type { MetadataDraft, PackageMetadata } from '@booksmith/core'
+import {
+  browserXmlCodec,
+  readOpfMeta,
+  type MetadataDraft,
+  type OpfMetaRow,
+  type PackageMetadata,
+} from '@booksmith/core'
 import { useEffect, useState } from 'react'
 import { Button } from './Button'
 
 interface MetadataPanelProps {
   metadata: PackageMetadata
+  /** The package document as it stands, so `<meta>` rows read from the current text. */
+  opfXml: string
+  /** Changes after a save or restore, which is when the rows should be re-read. */
+  version: number
   onApply: (draft: MetadataDraft) => void
+  onApplyMeta: (rows: OpfMetaRow[]) => void
 }
 
 interface DraftState {
@@ -52,13 +63,25 @@ const FIELDS: Array<{ key: keyof DraftState; label: string; multiline?: boolean 
   { key: 'rights', label: '版权' },
 ]
 
-export function MetadataPanel({ metadata, onApply }: MetadataPanelProps) {
+export function MetadataPanel({ metadata, opfXml, version, onApply, onApplyMeta }: MetadataPanelProps) {
   const [draft, setDraft] = useState<DraftState>(() => toDraft(metadata))
+  const [rows, setRows] = useState<OpfMetaRow[]>(() => readOpfMeta(opfXml, browserXmlCodec))
 
   // The package document can change underneath us (reload, restore), so resync.
   useEffect(() => {
     setDraft(toDraft(metadata))
   }, [metadata])
+
+  // Resync on a reload or a structural change, not on every keystroke: writing the OPF back on each
+  // input would re-read the file and drop the half-filled row the user is typing into.
+  useEffect(() => {
+    setRows(readOpfMeta(opfXml, browserXmlCodec))
+  }, [metadata, version])
+
+  function applyRows(next: OpfMetaRow[]) {
+    setRows(next)
+    onApplyMeta(next)
+  }
 
   function apply(next: DraftState) {
     setDraft(next)
@@ -99,6 +122,68 @@ export function MetadataPanel({ metadata, onApply }: MetadataPanelProps) {
       <Button variant="ghost" onClick={() => setDraft(toDraft(metadata))}>
         还原未修改的值
       </Button>
+
+      <section className="meta-section">
+        <h3 className="meta-section-label">
+          meta
+          <span className="meta-count">{rows.length}</span>
+        </h3>
+        <p className="panel-note">
+          `dcterms:modified` 在你改动 OPF 任意字段后自动更新；只改正文的保存不会动它。
+        </p>
+        <ul className="meta-rows">
+          {rows.map((row, index) => (
+            <li className="meta-row" key={index}>
+              <div className="meta-row-head">
+                <input
+                  aria-label={`meta ${index + 1} property`}
+                  value={row.property}
+                  placeholder="property"
+                  onChange={(event) => {
+                    const next = [...rows]
+                    next[index] = { ...row, property: event.target.value }
+                    applyRows(next)
+                  }}
+                />
+                <input
+                  aria-label={`meta ${index + 1} refines`}
+                  value={row.refines}
+                  placeholder="#creator"
+                  onChange={(event) => {
+                    const next = [...rows]
+                    next[index] = { ...row, refines: event.target.value }
+                    applyRows(next)
+                  }}
+                />
+                <button
+                  type="button"
+                  className="meta-remove"
+                  aria-label={`删除 meta ${index + 1}`}
+                  onClick={() => applyRows(rows.filter((_, at) => at !== index))}
+                >
+                  ✕
+                </button>
+              </div>
+              <input
+                aria-label={`meta ${index + 1} 值`}
+                value={row.value}
+                placeholder="值"
+                onChange={(event) => {
+                  const next = [...rows]
+                  next[index] = { ...row, value: event.target.value }
+                  applyRows(next)
+                }}
+              />
+            </li>
+          ))}
+        </ul>
+        <Button
+          variant="ghost"
+          onClick={() => applyRows([...rows, { property: '', refines: '', value: '' }])}
+        >
+          加一行 meta
+        </Button>
+      </section>
     </div>
   )
 }

@@ -138,6 +138,23 @@ export function VersionHistory({ bookId, path, dirtyCount, pkg, texts, onRestore
     first?.scrollIntoView({ block: 'center' })
   }, [diffs, diffState])
 
+  const togglePin = useCallback(
+    async (snapshot: PageSnapshotDto) => {
+      const next = !snapshot.pinned
+      const apply = (value: boolean) =>
+        setSnapshots((list) => list?.map((entry) => (entry.id === snapshot.id ? { ...entry, pinned: value } : entry)) ?? list)
+
+      apply(next)
+      try {
+        await api.setPinned(bookId, snapshot.id, next)
+      } catch (cause) {
+        apply(!next)
+        setListError(messageFor(cause, '置顶'))
+      }
+    },
+    [bookId],
+  )
+
   const restore = useCallback(async () => {
     if (!selected) return
     setRestoring(true)
@@ -182,6 +199,7 @@ export function VersionHistory({ bookId, path, dirtyCount, pkg, texts, onRestore
 
         <div className="snapshot-body">
           <nav className="snapshot-timeline" aria-label="版本列表">
+            <p className="snapshot-pin-note">置顶的快照不占 100 条上限，也不会被按天清理。</p>
             {listError ? (
               <p className="banner banner-error" role="alert">
                 {listError}
@@ -198,20 +216,31 @@ export function VersionHistory({ bookId, path, dirtyCount, pkg, texts, onRestore
                 <section key={group.key} className="snapshot-group">
                   <h3 className="snapshot-group-label">{group.label}</h3>
                   {group.items.map((item, index) => (
-                    <button
-                      key={item.id}
-                      type="button"
-                      className={`snapshot-item${selected?.id === item.id ? ' on' : ''}`}
-                      aria-pressed={selected?.id === item.id}
-                      title={`${timeLabel(item.createdAt)} · ${formatBytes(item.byteSize)}`}
-                      onClick={() => setSelected(item)}
-                    >
-                      <span className="snapshot-time">{timeLabel(item.createdAt)}</span>
-                      {index === 0 && group.key === groups[0]?.key ? (
-                        <span className="snapshot-badge">最新</span>
-                      ) : null}
-                      <span className="snapshot-size">{formatBytes(item.byteSize)}</span>
-                    </button>
+                    <div key={item.id} className={`snapshot-row${selected?.id === item.id ? ' on' : ''}`}>
+                      <button
+                        type="button"
+                        className="snapshot-item"
+                        aria-pressed={selected?.id === item.id}
+                        title={`${timeLabel(item.createdAt)} · ${formatBytes(item.byteSize)}`}
+                        onClick={() => setSelected(item)}
+                      >
+                        <span className="snapshot-time">{timeLabel(item.createdAt)}</span>
+                        {index === 0 && group.key === groups[0]?.key ? (
+                          <span className="snapshot-badge">最新</span>
+                        ) : null}
+                        <span className="snapshot-size">{formatBytes(item.byteSize)}</span>
+                      </button>
+                      <button
+                        type="button"
+                        className={`snapshot-pin${item.pinned ? ' on' : ''}`}
+                        aria-pressed={item.pinned}
+                        aria-label={`${item.pinned ? '取消置顶' : '置顶'} ${timeLabel(item.createdAt)}`}
+                        title={item.pinned ? '已置顶：自动清理不会删除它' : '置顶这条，自动清理时保留'}
+                        onClick={() => void togglePin(item)}
+                      >
+                        {item.pinned ? '◆' : '◇'}
+                      </button>
+                    </div>
                   ))}
                 </section>
               ))

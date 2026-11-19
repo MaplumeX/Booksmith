@@ -9,6 +9,8 @@ export interface PageSnapshotDto {
   path: string
   byteSize: number
   sha256: string
+  /** Protected from automatic pruning. */
+  pinned: boolean
   createdAt: string
 }
 
@@ -90,6 +92,13 @@ export const api = {
     return response.text()
   },
 
+  setPinned: (id: string, snapshotId: string, pinned: boolean) =>
+    request<{ snapshot: PageSnapshotDto }>(`/books/${id}/page-versions/${snapshotId}`, {
+      method: 'PATCH',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ pinned }),
+    }),
+
   restorePage: (id: string, snapshotId: string) =>
     request<{ version: number; path: string }>(`/books/${id}/page-versions/${snapshotId}/restore`, { method: 'POST' }),
 
@@ -115,3 +124,6 @@ export const api = {
 }
 
 export const coverUrl = (id: string): string => `/api/books/${id}/cover`
+
+/** Direct link so the browser's download manager streams the pack instead of JS buffering it. */
+export const downloadUrl = (id: string): string => `/api/books/${id}/download`

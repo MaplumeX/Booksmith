@@ -125,6 +125,28 @@ describe('upload and read', () => {
     expect(response.rawPayload.byteLength).toBeGreaterThan(1000)
   })
 
+  it('downloads the pack as an attachment with a readable filename', async () => {
+    const id = await uploadBook(libCookie)
+    const response = await app.inject({
+      method: 'GET',
+      url: `/api/books/${id}/download`,
+      headers: { cookie: libCookie },
+    })
+    expect(response.statusCode).toBe(200)
+    expect(response.headers['content-type']).toBe('application/epub+zip')
+
+    const disposition = String(response.headers['content-disposition'])
+    expect(disposition).toContain('attachment;')
+    expect(decodeURIComponent(disposition.split("filename*=UTF-8''")[1] ?? '')).toBe('马克思经济学与数理分析.epub')
+    expect(createHash('sha256').update(response.rawPayload).digest('hex')).toBe(FIXTURE_SHA)
+  })
+
+  it('requires a session to download', async () => {
+    const id = await uploadBook(libCookie)
+    const response = await app.inject({ method: 'GET', url: `/api/books/${id}/download` })
+    expect(response.statusCode).toBe(401)
+  })
+
   it('rejects uploads that are not epubs', async () => {
     const response = await app.inject({
       method: 'POST',

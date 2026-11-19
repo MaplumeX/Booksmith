@@ -41,12 +41,13 @@
 | `TabBar` | `src/ui/TabBar.tsx` | default / active / dirty / overflow（横向滚动） |
 | `CodePane` | `src/ui/CodePane.tsx` | default / loading / error（语法错误）/ edge（174KB 单章） |
 | `PreviewPane` | `src/ui/PreviewPane.tsx` | default / empty / loading / error / edge（MathML、缺图） |
-| `MetadataPanel` | `src/ui/MetadataPanel.tsx` | default / dirty / error（字段非法） |
-| `TocPanel` | `src/ui/TocPanel.tsx` | default / empty / error（锚点失效）/ edge（标题含内联 MathML） |
+| `MetadataPanel` | `src/ui/MetadataPanel.tsx` | default / dirty / error（字段非法）/ meta 行编辑（空 property 不落盘）/ edge（同一 property+refines 重复行） |
+| `TocPanel` | `src/ui/TocPanel.tsx` | default / empty / error（锚点失效）/ 新增表单（目标文件 + 自动标题）/ 缩进禁用（首项、顶层取消缩进）/ edge（标题含内联 MathML） |
+| `MediaPane` | `src/ui/MediaPane.tsx` | default / 非图片（纯说明）/ 替换确认（不可回滚提示）/ 删除入口 / edge（缺文件） |
 | `SearchPanel` | `src/ui/SearchPanel.tsx` | default / empty / loading |
-| `VersionHistory` | `src/ui/VersionHistory.tsx` | default（单文件时间轴 + diff）/ empty（这一版和现在相同）/ loading（列表与 diff 骨架）/ error（重试）/ edge（单文件 100 条、长行折行） |
-| `FileTree` 右键菜单 | `src/ui/FileTree.tsx` `.context-menu` | default / disabled（二进制与容器条目无历史）/ hover / 键盘 `Escape` 与点击外部关闭 |
-| `MetadataPanel` | `src/ui/MetadataPanel.tsx` | default / dirty |
+| `VersionHistory` | `src/ui/VersionHistory.tsx` | default（单文件时间轴 + diff）/ empty（这一版和现在相同）/ loading（列表与 diff 骨架）/ error（重试）/ 置顶（钉住 ◇→◆，乐观更新后回滚）/ edge（单文件 100 条、长行折行） |
+| `FileTree` 右键菜单 | `src/ui/FileTree.tsx` `.context-menu` | default / disabled（非 spine 条目不能上移下移、二进制无历史）/ edge（贴视口边缘时向内收）/ hover / 键盘 `Escape` 与点击外部关闭 |
+| 结构操作对话框 | `src/routes/Editor.tsx` `.dialog` | default / error（重名或含斜杠）/ 引用清单（0 条与 N 条）/ edge（打开瞬间的滚动不误关菜单） |
 | `Dialog` | 书库新建书 | default / pending / error |
 | `StatusBar` | `src/ui/StatusBar.tsx` | 已保存 / 保存中 / 冲突 |
 | 保存状态（顶栏） | `src/routes/Editor.tsx` `.appbar-save` | dirty（N 处未保存）/ saving（保存中…）/ saved（已保存 HH:MM）/ error（保存失败 · 重试） |

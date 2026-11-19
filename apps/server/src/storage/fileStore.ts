@@ -10,6 +10,7 @@ export interface PageVersionMeta {
   path: string
   byteSize: number
   sha256: string
+  pinned: boolean
   createdAt: Date
 }
 
@@ -21,6 +22,8 @@ export interface FileStore {
   /** Newest snapshot of one entry, used to decide whether the throttle window is still open. */
   newestFor(bookId: string, path: string): Promise<{ sha256: string; createdAt: Date } | null>
   putPageVersion(bookId: string, path: string, bytes: Buffer, sha256: string): Promise<void>
+  /** Marks a snapshot as protected from pruning. Returns null when the snapshot is not in this book. */
+  setPinned(bookId: string, id: string, pinned: boolean): Promise<PageVersionMeta | null>
   prunePages(bookId: string): Promise<number>
 }
 
@@ -55,6 +58,7 @@ export function createPostgresFileStore(db: Db): FileStore {
           path: pageVersions.path,
           byteSize: pageVersions.byteSize,
           sha256: pageVersions.sha256,
+          pinned: pageVersions.pinned,
           createdAt: pageVersions.createdAt,
         })
         .from(pageVersions)
@@ -81,6 +85,22 @@ export function createPostgresFileStore(db: Db): FileStore {
       return rows[0] ?? null
     },
 
+    async setPinned(bookId, id, pinned) {
+      const rows = await db
+        .update(pageVersions)
+        .set({ pinned })
+        .where(and(eq(pageVersions.bookId, bookId), eq(pageVersions.id, id)))
+        .returning({
+          id: pageVersions.id,
+          path: pageVersions.path,
+          byteSize: pageVersions.byteSize,
+          sha256: pageVersions.sha256,
+          pinned: pageVersions.pinned,
+          createdAt: pageVersions.createdAt,
+        })
+      return rows[0] ?? null
+    },
+
     async putPageVersion(bookId, path, bytes, sha256) {
       await db.insert(pageVersions).values({
         bookId,
@@ -102,7 +122,12 @@ export function createPostgresFileStore(db: Db): FileStore {
      */
     async prunePages(bookId) {
       const rows = await db
-        .select({ id: pageVersions.id, path: pageVersions.path, createdAt: pageVersions.createdAt })
+        .select({
+          id: pageVersions.id,
+          path: pageVersions.path,
+          pinned: pageVersions.pinned,
+          createdAt: pageVersions.createdAt,
+        })
         .from(pageVersions)
         .where(eq(pageVersions.bookId, bookId))
         .orderBy(sql`${pageVersions.path} asc, ${pageVersions.createdAt} desc`)
@@ -117,6 +142,12 @@ export function createPostgresFileStore(db: Db): FileStore {
           path = row.path
           index = 0
           seenDays = new Set<string>()
+        }
+
+        // A pinned snapshot costs no slot in the cap and is never a sparse-day victim.
+        if (row.pinned) {
+          keep.add(row.id)
+          continue
         }
 
         const day = row.createdAt.toISOString().slice(0, 10)
@@ -134,7 +165,7 @@ export function createPostgresFileStore(db: Db): FileStore {
         keep.add(row.id)
       }
 
-      const removable = rows.filter((row) => !keep.has(row.id)).map((row) => row.id)
+      const removable = rows.filter((row) => !row.pinned && !keep.has(row.id)).map((row) => row.id)
       if (removable.length === 0) return 0
 
       await db

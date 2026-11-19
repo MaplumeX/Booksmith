@@ -54,6 +54,7 @@ export function registerPageVersionRoutes(app: FastifyInstance, deps: PageVersio
         path: entry.path,
         byteSize: entry.byteSize,
         sha256: entry.sha256,
+        pinned: entry.pinned,
         createdAt: entry.createdAt.toISOString(),
       })),
     })
@@ -72,6 +73,37 @@ export function registerPageVersionRoutes(app: FastifyInstance, deps: PageVersio
     if (!stored) return reply.code(404).send({ error: 'snapshot_not_found' })
 
     return reply.header('content-type', 'text/plain; charset=utf-8').send(stored.bytes)
+  })
+
+  /**
+   * Protects a snapshot from the per-entry cap. Pinned snapshots cost no slot and are never
+   * thinned by the sparse-day rule. See ADR 2026-11-19-snapshot-pinning.
+   */
+  app.patch('/api/books/:id/page-versions/:snapshot', async (request, reply) => {
+    const user = requireUser(request, reply)
+    if (!user) return
+
+    const { id, snapshot } = request.params as { id: string; snapshot: string }
+    if (!UUID.test(snapshot)) return reply.code(404).send({ error: 'not_found' })
+    const book = await findOwnedBook(db, id, user.id)
+    if (!book) return reply.code(404).send({ error: 'not_found' })
+
+    const body = request.body as { pinned?: unknown } | null
+    if (typeof body?.pinned !== 'boolean') return reply.code(400).send({ error: 'invalid_body' })
+
+    const updated = await fileStore.setPinned(book.id, snapshot, body.pinned)
+    if (!updated) return reply.code(404).send({ error: 'snapshot_not_found' })
+
+    return reply.send({
+      snapshot: {
+        id: updated.id,
+        path: updated.path,
+        byteSize: updated.byteSize,
+        sha256: updated.sha256,
+        pinned: updated.pinned,
+        createdAt: updated.createdAt.toISOString(),
+      },
+    })
   })
 
   app.post('/api/books/:id/page-versions/:snapshot/restore', async (request, reply) => {
