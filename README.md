@@ -63,8 +63,8 @@ pnpm playwright test                   # 端到端，需要 API 已在 8787 运�
 node e2e/audit-shots.mjs               # 1440 / 400 截图与溢出、断图、console 审计
 ```
 
-端到端使用 `e2e@booksmith.local` 账号，需要把它加进 `ALLOWED_EMAILS`。真实书样本放在
-`fixtures/`（`.gitignore` 已排除，获取方式见 `fixtures/README.md`）。
+端到端使用 `e2e@booksmith.local` 账号，需要把它加进 `ALLOWED_EMAILS`。真实书样本随仓库提交在
+`fixtures/`，无需额外准备。
 
 ## 部署
 

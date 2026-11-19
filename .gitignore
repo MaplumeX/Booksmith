@@ -6,7 +6,6 @@ shots/
 coverage/
 test-results/
 playwright-report/
-fixtures/*.epub
 *.log
 .DS_Store
 .env
