@@ -8,7 +8,6 @@ export interface VersionDto {
   versionNo: number
   byteSize: number
   sha256: string
-  pinned: boolean
   createdAt: string
 }
 
@@ -83,6 +82,15 @@ export const api = {
     request<{ version: number; restoredFrom: number }>(`/books/${id}/versions/${versionNo}/restore`, {
       method: 'POST',
     }),
+
+  versionEpub: async (id: string, versionNo: number): Promise<Uint8Array> => {
+    const response = await fetch(`/api/books/${id}/versions/${versionNo}/epub`, { credentials: 'include' })
+    if (!response.ok) {
+      const payload = await response.json().catch(() => ({}))
+      throw new ApiError(response.status, (payload as { error?: string }).error ?? 'http_error', payload)
+    }
+    return new Uint8Array(await response.arrayBuffer())
+  },
 
   upload: (file: File) =>
     request<{ book: BookDto }>('/books', {

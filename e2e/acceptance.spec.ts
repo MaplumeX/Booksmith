@@ -6,6 +6,13 @@ const PNG_1X1 = Buffer.from(
   'base64',
 )
 
+const REWRITTEN_CHAPTER = [
+  '<?xml version="1.0" encoding="UTF-8"?>',
+  '<!DOCTYPE html>',
+  '<html xmlns="http://www.w3.org/1999/xhtml"><head><title>序言</title></head>',
+  '<body><h1>序言</h1><p>这段文字被测试改写了，用来验证快照差异。</p></body></html>',
+].join('\n')
+
 test.beforeEach(async () => {
   await resetLibrary()
 })
@@ -58,7 +65,7 @@ test('imports an image asset into the package', async ({ page }) => {
   await expect(page.getByRole('button', { name: 'cover.png', exact: true })).toBeVisible()
 })
 
-test('restores a version from the versions tab', async ({ page }) => {
+test('restores a snapshot from the history overlay', async ({ page }) => {
   await login(page)
   await expectLoggedIn(page)
 
@@ -68,10 +75,11 @@ test('restores a version from the versions tab', async ({ page }) => {
   await expect(page.locator('.cm-content')).toBeVisible()
 
   await page.locator('.cm-content').click()
-  await page.keyboard.type('第一次修改。')
+  await page.keyboard.press('Control+a')
+  await page.keyboard.insertText(REWRITTEN_CHAPTER)
   await page.getByRole('button', { name: '保存', exact: true }).click()
   await expect(page.locator('.appbar-meta')).toHaveText('v2')
 
-  await page.getByRole('tab', { name: '版本' }).click()
-  await expect(page.locator('.version-item')).toHaveCount(2)
+  await page.locator('.appbar-history').click()
+  await expect(page.locator('.snapshot-item')).toHaveCount(2)
 })

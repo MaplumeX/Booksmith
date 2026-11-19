@@ -1,4 +1,4 @@
-import { chromium } from '@playwright/test'
+import { chromium, expect } from '@playwright/test'
 import { fileURLToPath } from 'node:url'
 import { mkdirSync } from 'node:fs'
 
@@ -116,15 +116,49 @@ await page.getByLabel('全书查找').fill('置盐定理')
 await page.waitForTimeout(600)
 await page.screenshot({ path: `${OUT}/editor-search-1440.png` })
 
-await page.getByRole('tab', { name: '版本' }).click()
+// Two saves that differ by one word, so the history overlay has a real character-level diff to show.
+const SNAPSHOT_DOC_A = [
+  '<?xml version="1.0" encoding="UTF-8"?>',
+  '<!DOCTYPE html>',
+  '<html xmlns="http://www.w3.org/1999/xhtml"><head><title>置盐定理</title></head><body>',
+  '<h2>置盐定理</h2>',
+  '<p>置盐定理表明，在特定条件下，均衡利润率不会随资本有机构成的提高而下降。</p>',
+  '<p>这一结论依赖于实际工资不变的假设。</p>',
+  '</body></html>',
+].join('\n')
+const SNAPSHOT_DOC_B = SNAPSHOT_DOC_A.replace('利润率不会随', '利润率未必会随')
+
+await page.locator('.cm-content').click()
+await page.keyboard.press('Control+a')
+await page.keyboard.insertText(SNAPSHOT_DOC_A)
+await page.waitForTimeout(300)
+await page.getByRole('button', { name: '保存', exact: true }).click()
+await expect(page.locator('.appbar-meta')).toHaveText('v2')
+await page.locator('.cm-content').click()
+await page.keyboard.press('Control+a')
+await page.keyboard.insertText(SNAPSHOT_DOC_B)
+await page.waitForTimeout(300)
+await page.getByRole('button', { name: '保存', exact: true }).click()
+await expect(page.locator('.appbar-meta')).toHaveText('v3')
+
+await page.locator('.appbar-history').click()
 await page.waitForTimeout(500)
-await page.screenshot({ path: `${OUT}/editor-versions-1440.png` })
-await page.getByRole('tab', { name: '预览' }).click()
+await page.screenshot({ path: `${OUT}/editor-snapshots-1440.png` })
+await page.locator('.snapshot-item').nth(1).click()
+await page.waitForTimeout(1500)
+await page.screenshot({ path: `${OUT}/editor-snapshot-diff-1440.png` })
+await page.getByRole('button', { name: '关闭', exact: true }).click()
 
 await page.setViewportSize({ width: 400, height: 860 })
 await page.waitForTimeout(200)
 await page.screenshot({ path: `${OUT}/editor-400.png` })
 await overflow('editor-400')
+
+await page.locator('.appbar-history').click()
+await page.waitForTimeout(800)
+await page.screenshot({ path: `${OUT}/editor-snapshot-400.png` })
+await overflow('editor-snapshot-400')
+await page.getByRole('button', { name: '关闭', exact: true }).click()
 
 await page.getByRole('button', { name: '文件' }).click()
 await page.waitForTimeout(200)

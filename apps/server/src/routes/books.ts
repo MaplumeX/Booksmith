@@ -5,7 +5,6 @@ import { books, type Book, type User } from '../db/schema'
 import { IngestError, ingestEpub } from '../epub/ingest'
 import type { FileStore } from '../storage/fileStore'
 
-const KEEP_VERSIONS = 20
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
 
 interface BookDeps {
@@ -199,7 +198,7 @@ export function registerBookRoutes(app: FastifyInstance, deps: BookDeps): void {
       return row
     })
 
-    await fileStore.prune(book.id, KEEP_VERSIONS)
+    await fileStore.prune(book.id)
 
     return reply.send({ book: toBookDto(updated), version: nextVersion })
   })

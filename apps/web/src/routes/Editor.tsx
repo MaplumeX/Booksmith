@@ -26,10 +26,10 @@ import { TocPanel } from '../ui/TocPanel'
 import type { RevealTarget } from '../ui/CodePane'
 import { StatusBar } from '../ui/StatusBar'
 import { TabBar } from '../ui/TabBar'
-import { VersionsPanel } from '../ui/VersionsPanel'
+import { VersionHistory } from '../ui/VersionHistory'
 
 type LoadState = { status: 'loading' } | { status: 'error'; message: string } | { status: 'ready' }
-type SidebarTab = 'preview' | 'search' | 'metadata' | 'toc' | 'versions'
+type SidebarTab = 'preview' | 'search' | 'metadata' | 'toc'
 
 const SIDEBAR_MIN = 400
 const SIDEBAR_MAX = 560
@@ -38,7 +38,6 @@ const SIDEBAR_TABS: Array<[SidebarTab, string]> = [
   ['search', '查找'],
   ['metadata', '元数据'],
   ['toc', '目录'],
-  ['versions', '版本'],
 ]
 
 function messageFor(error: unknown): string {
@@ -72,6 +71,7 @@ export function Editor({ bookId }: { bookId: string }) {
   const [saving, setSaving] = useState(false)
   const [conflict, setConflict] = useState(false)
   const [saveError, setSaveError] = useState<string | null>(null)
+  const [historyOpen, setHistoryOpen] = useState(false)
   const texts = useRef<Map<string, string>>(new Map())
 
   const applyBook = useCallback((loaded: LoadedBook) => {
@@ -323,17 +323,6 @@ export function Editor({ bookId }: { bookId: string }) {
         />
       )
     }
-    if (sidebarTab === 'versions') {
-      return (
-        <VersionsPanel
-          bookId={book.id}
-          currentVersion={book.version}
-          onRestored={() => {
-            void reload()
-          }}
-        />
-      )
-    }
     if (sidebarTab === 'metadata') {
       return (
         <MetadataPanel
@@ -382,7 +371,14 @@ export function Editor({ bookId }: { bookId: string }) {
         <span className="appbar-title" title={book.pkg.metadata.title}>
           {book.pkg.metadata.title}
         </span>
-        <span className="appbar-meta">v{book.version}</span>
+        <button
+          type="button"
+          className="appbar-meta appbar-history"
+          title="快照历史"
+          onClick={() => setHistoryOpen(true)}
+        >
+          v{book.version}
+        </button>
         <span className="appbar-spacer" />
         {dirty.size > 0 ? <span className="appbar-flag">{dirty.size} 处未保存</span> : null}
         <Button
@@ -480,6 +476,22 @@ export function Editor({ bookId }: { bookId: string }) {
           <div className="sidebar-body">{sidebarBody()}</div>
         </aside>
       </div>
+
+      {historyOpen ? (
+        <VersionHistory
+          bookId={book.id}
+          currentVersion={book.version}
+          dirtyCount={dirty.size}
+          archive={book.archive}
+          pkg={book.pkg}
+          texts={texts.current}
+          onClose={() => setHistoryOpen(false)}
+          onRestored={() => {
+            setHistoryOpen(false)
+            void reload()
+          }}
+        />
+      ) : null}
 
       <StatusBar
         path={active}

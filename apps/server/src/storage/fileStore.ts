@@ -2,12 +2,14 @@ import { and, eq, inArray, sql } from 'drizzle-orm'
 import type { Db } from '../db/client'
 import { bookVersions } from '../db/schema'
 
+const RECENT_KEEP = 10
+const TOTAL_CAP = 40
+
 export interface FileStore {
   put(bookId: string, versionNo: number, bytes: Buffer, sha256: string, note?: string): Promise<void>
   get(bookId: string, versionNo: number): Promise<Buffer | null>
-  list(bookId: string): Promise<Array<{ versionNo: number; byteSize: number; sha256: string; pinned: boolean; createdAt: Date }>>
-  markPinned(bookId: string, versionNo: number, pinned: boolean): Promise<void>
-  prune(bookId: string, keep: number): Promise<number>
+  list(bookId: string): Promise<Array<{ versionNo: number; byteSize: number; sha256: string; createdAt: Date }>>
+  prune(bookId: string): Promise<number>
 }
 
 /** Postgres-backed storage. Everything the app needs from a file layer lives here,
@@ -41,7 +43,6 @@ export function createPostgresFileStore(db: Db): FileStore {
           versionNo: bookVersions.versionNo,
           byteSize: bookVersions.byteSize,
           sha256: bookVersions.sha256,
-          pinned: bookVersions.pinned,
           createdAt: bookVersions.createdAt,
         })
         .from(bookVersions)
@@ -49,25 +50,37 @@ export function createPostgresFileStore(db: Db): FileStore {
         .orderBy(sql`${bookVersions.versionNo} desc`)
     },
 
-    async markPinned(bookId, versionNo, pinned) {
-      await db
-        .update(bookVersions)
-        .set({ pinned })
-        .where(and(eq(bookVersions.bookId, bookId), eq(bookVersions.versionNo, versionNo)))
-    },
-
-    /** Keeps the newest `keep` versions plus every pinned one. Returns rows removed. */
-    async prune(bookId, keep) {
+    /**
+     * Keeps the newest `RECENT_KEEP` snapshots, then one more per UTC day for everything
+     * older, capped at `TOTAL_CAP`.
+     *
+     * Counting snapshots alone let a run of typo fixes evict the only history of a quiet
+     * period; keeping the last save of each day preserves that shape. Returns rows removed.
+     * See ADR 2026-11-19-snapshot-history.
+     */
+    async prune(bookId) {
       const rows = await db
-        .select({ versionNo: bookVersions.versionNo, pinned: bookVersions.pinned })
+        .select({ versionNo: bookVersions.versionNo, createdAt: bookVersions.createdAt })
         .from(bookVersions)
         .where(eq(bookVersions.bookId, bookId))
         .orderBy(sql`${bookVersions.versionNo} desc`)
 
-      const removable = rows
-        .slice(keep)
-        .filter((row) => !row.pinned)
-        .map((row) => row.versionNo)
+      const keep = new Set<number>()
+      const seenDays = new Set<string>()
+      for (const [index, row] of rows.entries()) {
+        const day = row.createdAt.toISOString().slice(0, 10)
+        if (index < RECENT_KEEP) {
+          keep.add(row.versionNo)
+          seenDays.add(day)
+          continue
+        }
+        if (seenDays.has(day)) continue
+        seenDays.add(day)
+        if (keep.size >= TOTAL_CAP) continue
+        keep.add(row.versionNo)
+      }
+
+      const removable = rows.filter((row) => !keep.has(row.versionNo)).map((row) => row.versionNo)
       if (removable.length === 0) return 0
 
       await db

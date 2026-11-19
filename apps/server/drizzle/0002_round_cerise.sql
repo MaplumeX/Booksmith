@@ -1,0 +1,1 @@
+ALTER TABLE "book_versions" DROP COLUMN "pinned";
