@@ -637,6 +637,40 @@ input {
   background: var(--surface);
 }
 
+.media-pane {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: var(--space-3);
+  padding: var(--space-6);
+  background: var(--surface-sunken);
+}
+
+.media-image {
+  max-width: 100%;
+  max-height: 100%;
+  object-fit: contain;
+  border-radius: var(--radius);
+  background: var(--surface);
+}
+
+.media-note {
+  margin: 0;
+  color: var(--text-muted);
+}
+
+.media-meta {
+  margin: 0;
+  font-size: 12px;
+  color: var(--text-muted);
+  overflow-wrap: anywhere;
+  text-align: center;
+}
+
 .status-path {
   max-width: 40ch;
   overflow: hidden;

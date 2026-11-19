@@ -3,6 +3,11 @@ import { expectLoggedIn, login, seedBook } from './helpers'
 
 let bookId: string
 
+const PNG_1X1 = Buffer.from(
+  'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==',
+  'base64',
+)
+
 test.beforeAll(async () => {
   bookId = await seedBook()
 })
@@ -54,4 +59,24 @@ test('closes a tab and falls back to the remaining one', async ({ page }) => {
   await page.getByRole('button', { name: '关闭 ch003.xhtml' }).click()
   await expect(page.locator('.tab')).toHaveCount(1)
   await expect(page.locator('.tab.on')).toContainText('cover.xhtml')
+})
+
+test('shows an image entry in the content area instead of an empty editor', async ({ page }) => {
+  await openWorkbench(page)
+
+  await page.setInputFiles('[data-testid=asset-input]', {
+    name: 'cover.png',
+    mimeType: 'image/png',
+    buffer: PNG_1X1,
+  })
+  await page.getByRole('button', { name: 'cover.png', exact: true }).click()
+
+  await expect(page.locator('.tab.on')).toContainText('cover.png')
+  await expect(page.locator('.code-pane')).toHaveCount(0)
+  const image = page.locator('.media-image')
+  await expect(image).toBeVisible()
+  await expect
+    .poll(async () => image.evaluate((img: HTMLImageElement) => img.naturalWidth))
+    .toBeGreaterThan(0)
+  await expect(page.locator('.statusbar')).not.toContainText('字')
 })

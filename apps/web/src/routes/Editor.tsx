@@ -13,12 +13,14 @@ import {
 } from '@booksmith/core'
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { ApiError, api } from '../api/client'
+import { mediaTypeOf } from '../preview/render'
 import { navigate } from '../router'
 import { extensionOf, groupFiles, loadBook, proseLength, type LoadedBook } from '../state/bookStore'
 import { Button } from '../ui/Button'
 import { CodePane } from '../ui/CodePane'
 import { EmptyState } from '../ui/EmptyState'
 import { FileTree } from '../ui/FileTree'
+import { MediaPane } from '../ui/MediaPane'
 import { PreviewPane } from '../ui/PreviewPane'
 import { MetadataPanel } from '../ui/MetadataPanel'
 import { SearchPanel } from '../ui/SearchPanel'
@@ -289,6 +291,15 @@ export function Editor({ bookId }: { bookId: string }) {
   }
 
   const content = active ? (texts.current.get(active) ?? '') : ''
+  // Binary entries (images, fonts) never live in `texts`, so they get a read-only view instead of the editor.
+  const editable = active !== null && texts.current.has(active)
+  const mediaPane = active ? (
+    <MediaPane
+      path={active}
+      bytes={book.archive.entries.get(active)}
+      mime={mediaTypeOf(active, book.pkg)}
+    />
+  ) : null
   const previewable = isPreviewable(active)
   const searchFiles: SearchFile[] = [...texts.current].map(([path, text]) => ({ path, text }))
   const tocPath = book.pkg.navPath ?? book.pkg.ncxPath ?? null
@@ -307,6 +318,7 @@ export function Editor({ bookId }: { bookId: string }) {
   const sidebarBody = () => {
     if (sidebarTab === 'preview') {
       if (!active) return <p className="sidebar-note">先打开一个文件。</p>
+      if (!editable) return mediaPane
       if (!previewable) {
         return <p className="sidebar-note">当前文件不是页面，切换到 .xhtml 文件查看预览。</p>
       }
@@ -441,12 +453,16 @@ export function Editor({ bookId }: { bookId: string }) {
         <div className="editor-column">
           <TabBar tabs={tabs} active={active} dirty={dirty} onSelect={setActive} onClose={close} />
           {active ? (
-            <CodePane
-              path={active}
-              content={content}
-              reveal={reveal}
-              onChange={(value) => handleChange(active, value)}
-            />
+            editable ? (
+              <CodePane
+                path={active}
+                content={content}
+                reveal={reveal}
+                onChange={(value) => handleChange(active, value)}
+              />
+            ) : (
+              mediaPane
+            )
           ) : (
             <div className="code-empty">
               <EmptyState title="没有可编辑的文件" description="这本 EPUB 里没有识别到文本文件。" />
@@ -483,7 +499,7 @@ export function Editor({ bookId }: { bookId: string }) {
 
       <StatusBar
         path={active}
-        characters={active ? proseLength(active, content) : 0}
+        characters={editable ? proseLength(active, content) : null}
         dirtyCount={dirty.size}
       />
     </div>

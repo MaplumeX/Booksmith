@@ -25,7 +25,8 @@ export interface PreviewDocument {
   revoke: () => void
 }
 
-function mimeOf(path: string, pkg: EpubPackage): string {
+/** Media type from the manifest, falling back to the file extension. */
+export function mediaTypeOf(path: string, pkg: EpubPackage): string {
   const manifestItem = pkg.manifest.find((item) => item.path === path)
   if (manifestItem?.mediaType) return manifestItem.mediaType
   const extension = path.slice(path.lastIndexOf('.') + 1).toLowerCase()
@@ -55,7 +56,7 @@ export function buildPreview(args: {
     if (!bytes) return null
     const copy = new Uint8Array(bytes.length)
     copy.set(bytes)
-    const url = URL.createObjectURL(new Blob([copy.buffer], { type: mimeOf(targetPath, pkg) }))
+    const url = URL.createObjectURL(new Blob([copy.buffer], { type: mediaTypeOf(targetPath, pkg) }))
     urls.push(url)
     return url
   }
