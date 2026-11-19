@@ -1,0 +1,225 @@
+import { createEmptyEpub } from '@booksmith/core'
+import { useCallback, useEffect, useRef, useState } from 'react'
+import { ApiError, api, type BookDto, type UserDto } from '../api/client'
+import { BookCard } from '../ui/BookCard'
+import { Button } from '../ui/Button'
+import { EmptyState } from '../ui/EmptyState'
+import { SearchBar } from '../ui/SearchBar'
+import { navigate } from '../router'
+
+function messageFor(error: unknown): string {
+  if (error instanceof ApiError) {
+    if (error.code === 'invalid_epub') return '这个文件不是有效的 EPUB，检查后重试'
+    if (error.code === 'unauthenticated') return '登录已过期，请重新登录'
+    return `导入失败（${error.code}）`
+  }
+  return '网络异常，请稍后重试'
+}
+
+export function Library({ user, onLogout }: { user: UserDto; onLogout: () => void }) {
+  const [books, setBooks] = useState<BookDto[]>([])
+  const [loading, setLoading] = useState(true)
+  const [error, setError] = useState<string | null>(null)
+  const [query, setQuery] = useState('')
+  const [uploading, setUploading] = useState(false)
+  const [dragging, setDragging] = useState(false)
+  const [creating, setCreating] = useState(false)
+  const [newTitle, setNewTitle] = useState('')
+  const [newAuthor, setNewAuthor] = useState('')
+  const [creatingPending, setCreatingPending] = useState(false)
+  const fileInput = useRef<HTMLInputElement>(null)
+
+  const load = useCallback(async () => {
+    setLoading(true)
+    setError(null)
+    try {
+      const result = await api.books()
+      setBooks(result.books)
+    } catch (cause) {
+      setError(messageFor(cause))
+    } finally {
+      setLoading(false)
+    }
+  }, [])
+
+  useEffect(() => {
+    void load()
+  }, [load])
+
+  async function upload(file: File) {
+    setUploading(true)
+    setError(null)
+    try {
+      const { book } = await api.upload(file)
+      setBooks((current) => [book, ...current])
+    } catch (cause) {
+      setError(messageFor(cause))
+    } finally {
+      setUploading(false)
+      if (fileInput.current) fileInput.current.value = ''
+    }
+  }
+
+  async function createBook() {
+    if (creatingPending) return
+    setCreatingPending(true)
+    setError(null)
+    try {
+      const title = newTitle.trim() || '未命名'
+      const bytes = createEmptyEpub({ title, author: newAuthor })
+      const file = new File([bytes as BlobPart], `${title}.epub`, { type: 'application/epub+zip' })
+      const { book } = await api.upload(file)
+      setBooks((current) => [book, ...current])
+      setCreating(false)
+      setNewTitle('')
+      setNewAuthor('')
+      navigate(`/books/${book.id}`)
+    } catch (cause) {
+      setError(messageFor(cause))
+    } finally {
+      setCreatingPending(false)
+    }
+  }
+
+  const needle = query.trim().toLowerCase()
+  const filtered = needle
+    ? books.filter(
+        (book) =>
+          book.title.toLowerCase().includes(needle) || book.author.toLowerCase().includes(needle),
+      )
+    : books
+
+  return (
+    <div
+      className="shell"
+      onDragOver={(event) => {
+        event.preventDefault()
+        setDragging(true)
+      }}
+      onDragLeave={() => setDragging(false)}
+      onDrop={(event) => {
+        event.preventDefault()
+        setDragging(false)
+        const file = event.dataTransfer.files[0]
+        if (file) void upload(file)
+      }}
+    >
+      <header className="appbar">
+        <span className="brand">Booksmith</span>
+        <SearchBar value={query} onChange={setQuery} placeholder="搜索书名或作者" />
+        <span className="appbar-spacer" />
+        <Button variant="secondary" onClick={() => setCreating(true)}>
+          新建书
+        </Button>
+        <Button variant="primary" onClick={() => fileInput.current?.click()} disabled={uploading}>
+          {uploading ? (
+            '导入中…'
+          ) : (
+            <>
+              <span className="btn-label-full">导入 EPUB</span>
+              <span className="btn-label-short">导入</span>
+            </>
+          )}
+        </Button>
+        <Button variant="ghost" onClick={onLogout}>
+          退出
+        </Button>
+        <input
+          ref={fileInput}
+          type="file"
+          accept=".epub,application/epub+zip"
+          hidden
+          data-testid="upload-input"
+          onChange={(event) => {
+            const file = event.target.files?.[0]
+            if (file) void upload(file)
+          }}
+        />
+      </header>
+
+      <main className={`library${dragging ? ' is-dragging' : ''}`}>
+        {error ? (
+          <p className="banner banner-error" role="alert">
+            {error}
+            <button type="button" className="banner-action" onClick={() => void load()}>
+              重试
+            </button>
+          </p>
+        ) : null}
+
+        {loading ? (
+          <div className="book-grid" aria-busy="true" aria-label="正在载入书库">
+            {Array.from({ length: 6 }).map((_, index) => (
+              <div className="book-card skeleton" key={index}>
+                <span className="book-cover skeleton-block" />
+                <span className="skeleton-line" />
+                <span className="skeleton-line short" />
+              </div>
+            ))}
+          </div>
+        ) : books.length === 0 ? (
+          <EmptyState
+            title="书库还是空的"
+            description="导入一本 EPUB 开始编辑，也可以直接把文件拖进这个窗口。"
+            action={
+              <Button variant="primary" onClick={() => fileInput.current?.click()}>
+                选择 EPUB 文件
+              </Button>
+            }
+          />
+        ) : filtered.length === 0 ? (
+          <EmptyState
+            title={`没有匹配「${query.trim()}」的书`}
+            description="试试书名的一部分，或者清空关键词。"
+            action={
+              <Button variant="secondary" onClick={() => setQuery('')}>
+                清空搜索
+              </Button>
+            }
+          />
+        ) : (
+          <div className="book-grid">
+            {filtered.map((book) => (
+              <BookCard key={book.id} book={book} onOpen={(id) => navigate(`/books/${id}`)} />
+            ))}
+          </div>
+        )}
+      </main>
+
+      {creating ? (
+        <div className="dialog-backdrop" role="dialog" aria-modal="true" aria-label="新建书">
+          <div className="dialog">
+            <h2>新建一本 EPUB</h2>
+            <p className="panel-note">生成一个最小可用的 EPUB 3 骨架，之后在编辑器里补内容。</p>
+            <label className="panel-field">
+              <span>书名</span>
+              <input
+                autoFocus
+                type="text"
+                value={newTitle}
+                onChange={(event) => setNewTitle(event.target.value)}
+              />
+            </label>
+            <label className="panel-field">
+              <span>作者（可留空）</span>
+              <input type="text" value={newAuthor} onChange={(event) => setNewAuthor(event.target.value)} />
+            </label>
+            <div className="dialog-actions">
+              <Button variant="primary" onClick={() => void createBook()} disabled={creatingPending}>
+                {creatingPending ? '创建中…' : '创建并打开'}
+              </Button>
+              <Button variant="ghost" onClick={() => setCreating(false)}>
+                取消
+              </Button>
+            </div>
+          </div>
+        </div>
+      ) : null}
+
+      <footer className="statusbar">
+        <span>{needle ? `${filtered.length} / ${books.length} 本` : `${books.length} 本`}</span>
+        <span className="status-right">{user.email}</span>
+      </footer>
+    </div>
+  )
+}
