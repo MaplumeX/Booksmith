@@ -1,0 +1,128 @@
+/*
+ * Booksmith design tokens.
+ * Components consume semantic aliases only; raw ramps exist for the palette page.
+ * See ADR 2026-11-19-workbench-design-system.
+ */
+:root {
+  color-scheme: light;
+
+  --neutral-100: #f2f4f7;
+  --neutral-200: #cdd4e0;
+  --neutral-300: #aab5c6;
+  --neutral-400: #8896aa;
+  --neutral-500: #69778c;
+  --neutral-600: #546175;
+  --neutral-700: #404c5e;
+  --neutral-800: #2d3746;
+  --neutral-900: #1b222c;
+  --neutral-950: #112436;
+
+  --primary-100: #eff5fa;
+  --primary-200: #b8d0e8;
+  --primary-300: #82abd3;
+  --primary-400: #4d86be;
+  --primary-500: #35618c;
+  --primary-600: #2b5277;
+  --primary-700: #224262;
+  --primary-800: #19334c;
+  --primary-900: #112436;
+
+  --surface: #ffffff;
+  --surface-raised: #f2f4f7;
+  --surface-sunken: #eef1f5;
+
+  --text: #1b222c;
+  --text-secondary: #404c5e;
+  --text-muted: #546175;
+
+  --border: #d6dbe0;
+  --border-strong: #aab5c6;
+
+  --accent: #35618c;
+  --accent-hover: #2b5277;
+  --accent-subtle: #eff5fa;
+  --accent-fg: #ffffff;
+
+  --selection-bg: #b8d0e8;
+  --selection-fg: #112436;
+
+  --status-ok-bg: #e6f2e8;
+  --status-ok-fg: #2c5b39;
+  --status-error-bg: #fbeae6;
+  --status-error-fg: #8f2f21;
+  --status-warn-bg: #fdf1dc;
+  --status-warn-fg: #8a5a12;
+
+  --focus-ring: #35618c;
+  --disabled-bg: #f2f4f7;
+  --disabled-fg: #8896aa;
+
+  --cm-tag: #2b5277;
+  --cm-attr: #8a5a12;
+  --cm-string: #2c5b39;
+  --cm-comment: #546175;
+  --cm-keyword: #224262;
+  --cm-number: #a0562a;
+
+  --radius: 4px;
+  --font-ui: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Noto Sans SC', 'Helvetica Neue',
+    sans-serif;
+  --font-mono: ui-monospace, SFMono-Regular, Menlo, Consolas, 'Noto Sans Mono CJK SC', monospace;
+
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-6: 24px;
+
+  --control-sm: 26px;
+  --control-md: 30px;
+  --control-lg: 36px;
+
+  --topbar-h: 44px;
+  --statusbar-h: 28px;
+  --tree-w: 240px;
+  --preview-min: 400px;
+  --preview-max: 560px;
+}
+
+[data-theme='dark'] {
+  color-scheme: dark;
+
+  --surface: #1b222c;
+  --surface-raised: #242d38;
+  --surface-sunken: #181f28;
+
+  --text: #e9edf2;
+  --text-secondary: #aab5c6;
+  --text-muted: #8896aa;
+
+  --border: #2d3746;
+  --border-strong: #404c5e;
+
+  --accent: #82abd3;
+  --accent-hover: #93b8dd;
+  --accent-subtle: #19334c;
+  --accent-fg: #112436;
+
+  --selection-bg: #2d3746;
+  --selection-fg: #b8d0e8;
+
+  --status-ok-bg: #16301f;
+  --status-ok-fg: #a8cdb4;
+  --status-error-bg: #3a1c17;
+  --status-error-fg: #e3a99b;
+  --status-warn-bg: #3a2c14;
+  --status-warn-fg: #dcb877;
+
+  --focus-ring: #82abd3;
+  --disabled-bg: #242d38;
+  --disabled-fg: #69778c;
+
+  --cm-tag: #93b8dd;
+  --cm-attr: #dcb877;
+  --cm-string: #a8cdb4;
+  --cm-comment: #8896aa;
+  --cm-keyword: #b8d0e8;
+  --cm-number: #e0a97c;
+}

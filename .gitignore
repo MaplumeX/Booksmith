@@ -1,0 +1,15 @@
+node_modules/
+dist/
+.pgdata/
+.pgdata-test/
+shots/
+coverage/
+test-results/
+playwright-report/
+fixtures/*.epub
+*.log
+.DS_Store
+.env
+.env.local
+backups/
+__pycache__/

@@ -1,0 +1,19 @@
+{
+  "name": "@booksmith/core",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "build": "tsc --noEmit",
+    "test": "vitest run --root ../.. packages/core/test"
+  },
+  "dependencies": {
+    "fflate": "^0.8.3"
+  },
+  "devDependencies": {
+    "@xmldom/xmldom": "^0.9.12"
+  }
+}

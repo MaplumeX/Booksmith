@@ -1,0 +1,33 @@
+# Deployment target. Not verified in the development environment (no Docker there).
+services:
+  db:
+    image: postgres:18
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: booksmith
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-booksmith}
+      POSTGRES_DB: booksmith
+    volumes:
+      - db-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U booksmith -d booksmith']
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  app:
+    build: .
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgres://booksmith:${POSTGRES_PASSWORD:-booksmith}@db:5432/booksmith
+      ALLOWED_EMAILS: ${ALLOWED_EMAILS:-}
+      COOKIE_SECURE: ${COOKIE_SECURE:-false}
+      PORT: 8787
+    ports:
+      - '8787:8787'
+
+volumes:
+  db-data:
