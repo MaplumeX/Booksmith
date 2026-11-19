@@ -15,6 +15,13 @@
       "when": 1795063017196,
       "tag": "0001_violet_mongu",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "7",
+      "when": 1795082504634,
+      "tag": "0002_round_cerise",
+      "breakpoints": true
     }
   ]
 }

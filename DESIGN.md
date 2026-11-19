@@ -44,7 +44,7 @@
 | `MetadataPanel` | `src/ui/MetadataPanel.tsx` | default / dirty / error（字段非法） |
 | `TocPanel` | `src/ui/TocPanel.tsx` | default / empty / error（锚点失效）/ edge（标题含内联 MathML） |
 | `SearchPanel` | `src/ui/SearchPanel.tsx` | default / empty / loading |
-| `VersionsPanel` | `src/ui/VersionsPanel.tsx` | default / current / empty / confirm / error |
+| `VersionHistory` | `src/ui/VersionHistory.tsx` | default / empty（两版无差异）/ loading / error / edge（整章增删、非正文改动、长行折行） |
 | `MetadataPanel` | `src/ui/MetadataPanel.tsx` | default / dirty |
 | `Dialog` | 书库新建书 | default / pending / error |
 | `StatusBar` | `src/ui/StatusBar.tsx` | 已保存 / 保存中 / 冲突 |

@@ -56,18 +56,27 @@ test('reports a conflict when another tab saved first', async ({ context, page }
   await expect(page.locator('.appbar-meta')).toHaveText('v1')
 })
 
-test('lists versions and restores an older one', async ({ page }) => {
+const REWRITTEN_CHAPTER = [
+  '<?xml version="1.0" encoding="UTF-8"?>',
+  '<!DOCTYPE html>',
+  '<html xmlns="http://www.w3.org/1999/xhtml"><head><title>序言</title></head>',
+  '<body><h1>序言</h1><p>这段文字被测试改写了，用来验证快照差异。</p></body></html>',
+].join('\n')
+
+test('lists snapshots and restores an older one', async ({ page }) => {
   await openChapter(page)
   await page.locator('.cm-content').click()
-  await page.keyboard.type('X')
+  await page.keyboard.press('Control+a')
+  await page.keyboard.insertText(REWRITTEN_CHAPTER)
   await page.getByRole('button', { name: '保存', exact: true }).click()
   await expect(page.locator('.appbar-meta')).toHaveText('v2')
 
-  await page.getByRole('tab', { name: '版本' }).click()
-  await expect(page.locator('.version-item')).toHaveCount(2)
-  await expect(page.locator('.version-item').first()).toContainText('v2')
+  await page.locator('.appbar-history').click()
+  await expect(page.locator('.snapshot-item')).toHaveCount(2)
+  await expect(page.locator('.snapshot-item').first()).toContainText('当前')
 
-  await page.getByRole('button', { name: '恢复此版本' }).last().click()
+  await page.locator('.snapshot-item').last().click()
+  await page.getByRole('button', { name: '恢复到此快照' }).click()
   await page.getByRole('button', { name: '确认恢复' }).click()
   await expect(page.locator('.appbar-meta')).toHaveText('v3')
 })

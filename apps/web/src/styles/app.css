@@ -84,6 +84,20 @@ input {
   max-width: 40ch;
 }
 
+/* The version number is the entry point to snapshot history, not decoration. */
+.appbar-history {
+  border: 1px solid transparent;
+  border-radius: var(--radius);
+  background: transparent;
+  padding: 2px var(--space-2);
+  cursor: pointer;
+}
+
+.appbar-history:hover {
+  border-color: var(--border);
+  color: var(--text-secondary);
+}
+
 .brand {
   font-weight: 600;
   letter-spacing: -0.01em;
@@ -818,47 +832,104 @@ input {
 }
 
 
-/* ---------- versions ---------- */
+/* ---------- snapshot history ---------- */
 
 .save-banner {
   flex: 0 0 auto;
   margin: var(--space-2) var(--space-4);
 }
 
-.version-list {
-  list-style: none;
-  margin: 0;
-  padding: 0;
-  overflow-y: auto;
-  flex: 1;
-  min-height: 0;
-}
-
-.version-item {
+.snapshot-dialog {
+  width: min(1180px, 100%);
+  height: min(760px, 100%);
   display: flex;
   flex-direction: column;
-  gap: var(--space-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface);
+  overflow: hidden;
+}
+
+.snapshot-head {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-3);
   padding: var(--space-3) var(--space-4);
+  border-bottom: 1px solid var(--border);
+  background: var(--surface-raised);
+}
+
+.snapshot-head h2 {
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.snapshot-head .btn {
+  margin-left: auto;
+}
+
+.snapshot-sub {
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+.snapshot-body {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+}
+
+.snapshot-timeline {
+  flex: 0 0 240px;
+  overflow-y: auto;
+  border-right: 1px solid var(--border);
+  background: var(--surface-raised);
+}
+
+.snapshot-group-label {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  margin: 0;
+  padding: var(--space-2) var(--space-3);
+  font-size: 11px;
+  font-weight: 500;
+  letter-spacing: 0.04em;
+  color: var(--text-muted);
+  background: var(--surface-raised);
   border-bottom: 1px solid var(--border);
 }
 
-.version-item.on {
-  background: var(--accent-subtle);
-}
-
-.version-main {
+.snapshot-item {
   display: flex;
   align-items: baseline;
   gap: var(--space-2);
-  flex-wrap: wrap;
+  width: 100%;
+  padding: var(--space-2) var(--space-3);
+  border: none;
+  border-bottom: 1px solid var(--border);
+  background: transparent;
+  color: var(--text);
+  font-size: 13px;
+  text-align: left;
+  cursor: pointer;
 }
 
-.version-no {
+.snapshot-item:hover {
+  background: var(--surface-sunken);
+}
+
+.snapshot-item.on {
+  background: var(--accent-subtle);
+  box-shadow: inset 2px 0 0 var(--accent);
+}
+
+.snapshot-time {
   font-family: var(--font-mono);
-  font-weight: 500;
+  font-variant-numeric: tabular-nums;
 }
 
-.version-badge {
+.snapshot-badge {
   font-size: 11px;
   padding: 1px 6px;
   border-radius: var(--radius);
@@ -866,12 +937,171 @@ input {
   color: var(--status-ok-fg);
 }
 
-.version-meta {
-  font-size: 12px;
+.snapshot-size {
+  margin-left: auto;
+  font-size: 11px;
   color: var(--text-muted);
 }
 
-.version-actions {
+.snapshot-timeline-skeleton,
+.snapshot-diff-skeleton {
+  flex: 1;
+  margin: var(--space-3);
+  border-radius: var(--radius);
+  background: var(--surface-sunken);
+}
+
+.snapshot-pane {
+  position: relative;
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.snapshot-note {
+  padding: var(--space-6) var(--space-4);
+  color: var(--text-muted);
+  max-width: 45ch;
+}
+
+.snapshot-toolbar {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  padding: var(--space-2) var(--space-4);
+  border-bottom: 1px solid var(--border);
+}
+
+.snapshot-label {
+  font-size: 12px;
+  color: var(--text-secondary);
+  font-variant-numeric: tabular-nums;
+}
+
+.snapshot-toolbar .btn {
+  margin-left: auto;
+}
+
+.snapshot-diff-wrap {
+  flex: 1;
+  min-height: 0;
+  padding: var(--space-3) var(--space-4);
+  background: var(--surface-sunken);
+  overflow: hidden;
+}
+
+/* Source view: monospace, one row per line, sign column kept out of the text flow. */
+.diff-view {
+  height: 100%;
+  overflow: auto;
+  border: 1px solid var(--border);
+  background: var(--surface);
+  font-family: var(--font-mono);
+  font-size: 12px;
+  line-height: 1.55;
+}
+
+.diff-row {
+  display: flex;
+  gap: var(--space-2);
+  padding: 0 var(--space-2);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.diff-sign {
+  flex: 0 0 1ch;
+  color: var(--text-muted);
+  user-select: none;
+}
+
+.diff-code {
+  flex: 1;
+  min-width: 0;
+}
+
+.diff-removed {
+  background: var(--status-error-bg);
+  color: var(--status-error-fg);
+}
+
+.diff-added {
+  background: var(--status-ok-bg);
+  color: var(--status-ok-fg);
+}
+
+.diff-changed {
+  background: var(--surface-raised);
+}
+
+/* The sign is the non-color cue; the inline marks carry the actual change. */
+.diff-changed .diff-sign {
+  color: var(--status-warn-fg);
+}
+
+.diff-file .diff-code {
+  color: var(--text-muted);
+}
+
+.diff-inline-removed {
+  text-decoration: line-through;
+  background: var(--status-error-bg);
+  color: var(--status-error-fg);
+}
+
+.diff-inline-added {
+  text-decoration: underline;
+  background: var(--status-ok-bg);
+  color: var(--status-ok-fg);
+}
+
+
+.snapshot-other {
+  flex: 0 0 auto;
+  margin: 0;
+  padding: var(--space-2) var(--space-4);
+  border-top: 1px solid var(--border);
+  font-size: 12px;
+  color: var(--text-muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.snapshot-confirm {
+  position: absolute;
+  left: var(--space-4);
+  right: var(--space-4);
+  bottom: var(--space-4);
+  display: flex;
+  gap: var(--space-3);
+  align-items: flex-end;
+  padding: var(--space-3);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius);
+  background: var(--surface-raised);
+}
+
+.snapshot-confirm-copy {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  font-size: 13px;
+}
+
+.snapshot-confirm-copy p {
+  margin: 0;
+}
+
+.snapshot-warn {
+  color: var(--status-warn-fg);
+}
+
+.snapshot-confirm-actions {
   display: flex;
   gap: var(--space-2);
 }
@@ -1199,6 +1429,45 @@ input {
 }
 
 /* ---------- responsive ---------- */
+
+@media (max-width: 760px) {
+  .snapshot-dialog {
+    height: 100%;
+  }
+
+  .snapshot-sub {
+    display: none;
+  }
+
+  /* A fixed 240px rail would leave the document a sliver on a phone. */
+  .snapshot-body {
+    flex-direction: column;
+  }
+
+  .snapshot-timeline {
+    flex: 0 0 auto;
+    max-height: 33vh;
+    border-right: none;
+    border-bottom: 1px solid var(--border);
+  }
+
+  .snapshot-diff-wrap {
+    padding: var(--space-2);
+  }
+
+  .diff-view {
+    border-left: none;
+    border-right: none;
+  }
+
+  .snapshot-confirm {
+    left: var(--space-2);
+    right: var(--space-2);
+    bottom: var(--space-2);
+    flex-direction: column;
+    align-items: stretch;
+  }
+}
 
 @media (max-width: 560px) {
   .appbar {
