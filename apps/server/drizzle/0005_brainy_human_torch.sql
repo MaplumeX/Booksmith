@@ -1,0 +1,1 @@
+ALTER TABLE "page_versions" ADD COLUMN "pinned" boolean DEFAULT false NOT NULL;

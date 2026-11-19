@@ -1,20 +1,26 @@
 import { groupMatches, searchBook, type SearchFile, type SearchResult } from '@booksmith/core'
 import { useEffect, useMemo, useState } from 'react'
 import { basename } from '../state/bookStore'
+import { planReplace, type ReplacePlan } from '../state/replacePlan'
 
 interface SearchPanelProps {
   files: SearchFile[]
   onOpen: (path: string, line: number, column: number) => void
+  onReplace: (plan: ReplacePlan) => void
+  onReplaceUndo: () => void
 }
 
 const DEBOUNCE_MS = 200
 
-export function SearchPanel({ files, onOpen }: SearchPanelProps) {
+export function SearchPanel({ files, onOpen, onReplace, onReplaceUndo }: SearchPanelProps) {
   const [query, setQuery] = useState('')
+  const [replacement, setReplacement] = useState('')
   const [regex, setRegex] = useState(false)
   const [caseSensitive, setCaseSensitive] = useState(false)
   const [result, setResult] = useState<SearchResult | null>(null)
   const [pending, setPending] = useState(false)
+  const [confirming, setConfirming] = useState<ReplacePlan | null>(null)
+  const [applied, setApplied] = useState<number | null>(null)
 
   useEffect(() => {
     if (!query.trim()) {
@@ -31,6 +37,31 @@ export function SearchPanel({ files, onOpen }: SearchPanelProps) {
   }, [query, regex, caseSensitive, files])
 
   const groups = useMemo(() => (result ? groupMatches(result.matches) : []), [result])
+
+  const plan = () => {
+    const texts = new Map(files.map((file) => [file.path, file.text]))
+    return planReplace(texts, { query, replacement, regex, caseSensitive })
+  }
+
+  const startReplace = () => {
+    const next = plan()
+    if (next.total === 0) return
+    setApplied(null)
+    setConfirming(next)
+  }
+
+  const runReplace = () => {
+    if (!confirming) return
+    const count = confirming.total
+    onReplace(confirming)
+    setConfirming(null)
+    setApplied(count)
+  }
+
+  const undoReplace = () => {
+    onReplaceUndo()
+    setApplied(null)
+  }
 
   return (
     <div className="search-panel">
@@ -61,6 +92,28 @@ export function SearchPanel({ files, onOpen }: SearchPanelProps) {
             正则
           </label>
         </div>
+        <div className="search-replace">
+          <input
+            type="text"
+            className="search-input"
+            value={replacement}
+            placeholder={regex ? '替换为（可用 $1）' : '替换为'}
+            aria-label="替换为"
+            onChange={(event) => {
+              setReplacement(event.target.value)
+              setConfirming(null)
+              setApplied(null)
+            }}
+          />
+          <button
+            type="button"
+            className="btn btn-secondary"
+            disabled={!query.trim()}
+            onClick={startReplace}
+          >
+            替换全部
+          </button>
+        </div>
         <p className="search-status" role="status">
           {pending
             ? '搜索中…'
@@ -68,6 +121,29 @@ export function SearchPanel({ files, onOpen }: SearchPanelProps) {
               ? `${result.matches.length} 处${result.truncated ? '（已截断）' : ''} · ${groups.length} 个文件`
               : '在当前书的全部文本文件中查找'}
         </p>
+        {confirming ? (
+          <p className="search-confirm" role="status">
+            将替换 {confirming.total} 处，涉及 {confirming.files.length} 个文件
+            <span className="search-confirm-actions">
+              <button type="button" className="banner-action" onClick={runReplace}>
+                执行
+              </button>
+              <button type="button" className="banner-action" onClick={() => setConfirming(null)}>
+                取消
+              </button>
+            </span>
+          </p>
+        ) : null}
+        {applied !== null ? (
+          <p className="search-confirm" role="status">
+            已替换 {applied} 处
+            <span className="search-confirm-actions">
+              <button type="button" className="banner-action" onClick={undoReplace}>
+                撤销
+              </button>
+            </span>
+          </p>
+        ) : null}
       </div>
 
       <div className="search-results">

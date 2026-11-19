@@ -172,6 +172,33 @@ describe('pruning', () => {
     expect(kept).toHaveLength(100)
   })
 
+  it('never prunes a pinned snapshot and does not spend a slot on it', async () => {
+    const id = await seedBook()
+    await seed(id, 'EPUB/text/ch001.xhtml', 120, 60_000)
+    const oldest = (await fileStore.listPageVersions(id)).at(-1)!
+    await fileStore.setPinned(id, oldest.id, true)
+
+    // One row survives only because it is pinned, so one fewer is removed than the cap implies.
+    const removed = await fileStore.prunePages(id)
+    expect(removed).toBe(109)
+
+    const kept = await fileStore.listPageVersions(id)
+    expect(kept).toHaveLength(11)
+    expect(kept.find((row) => row.id === oldest.id)?.pinned).toBe(true)
+  })
+
+  it('prunes a snapshot again once it is unpinned', async () => {
+    const id = await seedBook()
+    await seed(id, 'EPUB/text/ch001.xhtml', 120, 60_000)
+    const oldest = (await fileStore.listPageVersions(id)).at(-1)!
+    await fileStore.setPinned(id, oldest.id, true)
+    await fileStore.prunePages(id)
+    expect(await fileStore.listPageVersions(id)).toHaveLength(11)
+
+    await fileStore.setPinned(id, oldest.id, false)
+    expect(await fileStore.prunePages(id)).toBe(1)
+  })
+
   it('prunes each entry independently', async () => {
     const id = await seedBook()
     await seed(id, 'EPUB/text/ch001.xhtml', 40, 60_000)
@@ -296,6 +323,67 @@ describe('saving', () => {
     })
     expect(response.statusCode).toBe(409)
     expect(await fileStore.listPageVersions(id)).toHaveLength(baseline.length)
+  })
+})
+
+describe('pinning a snapshot', () => {
+  it('flips the flag and reports it in the list', async () => {
+    const id = await upload(syntheticBook(['第一章']))
+    const list = (await app.inject({ method: 'GET', url: `/api/books/${id}/page-versions`, headers: { cookie } })).json() as {
+      snapshots: Array<{ id: string; path: string; pinned: boolean }>
+    }
+    const target = list.snapshots.find((row) => row.path === 'EPUB/text/ch001.xhtml')!
+    expect(target.pinned).toBe(false)
+
+    const response = await app.inject({
+      method: 'PATCH',
+      url: `/api/books/${id}/page-versions/${target.id}`,
+      headers: { cookie, 'content-type': 'application/json' },
+      payload: { pinned: true },
+    })
+    expect(response.statusCode).toBe(200)
+    expect((response.json() as { snapshot: { pinned: boolean } }).snapshot.pinned).toBe(true)
+
+    const after = (await app.inject({ method: 'GET', url: `/api/books/${id}/page-versions`, headers: { cookie } })).json() as {
+      snapshots: Array<{ id: string; pinned: boolean }>
+    }
+    expect(after.snapshots.find((row) => row.id === target.id)?.pinned).toBe(true)
+  })
+
+  it('rejects a body that is not a boolean', async () => {
+    const id = await upload(syntheticBook(['第一章']))
+    const list = (await app.inject({ method: 'GET', url: `/api/books/${id}/page-versions`, headers: { cookie } })).json() as {
+      snapshots: Array<{ id: string }>
+    }
+    const response = await app.inject({
+      method: 'PATCH',
+      url: `/api/books/${id}/page-versions/${list.snapshots[0]!.id}`,
+      headers: { cookie, 'content-type': 'application/json' },
+      payload: { pinned: 'yes' },
+    })
+    expect(response.statusCode).toBe(400)
+  })
+
+  it('answers 404 for an unknown snapshot and 401 without a session', async () => {
+    const id = await upload(syntheticBook(['第一章']))
+    const missing = await app.inject({
+      method: 'PATCH',
+      url: `/api/books/${id}/page-versions/00000000-0000-0000-0000-000000000000`,
+      headers: { cookie, 'content-type': 'application/json' },
+      payload: { pinned: true },
+    })
+    expect(missing.statusCode).toBe(404)
+
+    const list = (await app.inject({ method: 'GET', url: `/api/books/${id}/page-versions`, headers: { cookie } })).json() as {
+      snapshots: Array<{ id: string }>
+    }
+    const anonymous = await app.inject({
+      method: 'PATCH',
+      url: `/api/books/${id}/page-versions/${list.snapshots[0]!.id}`,
+      headers: { 'content-type': 'application/json' },
+      payload: { pinned: true },
+    })
+    expect(anonymous.statusCode).toBe(401)
   })
 })
 

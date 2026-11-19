@@ -24,3 +24,12 @@ export function splitFragment(href: string): { path: string; fragment: string } 
     ? { path: href, fragment: '' }
     : { path: href.slice(0, index), fragment: href.slice(index + 1) }
 }
+
+/** Inverse of `resolvePath`: the href that reaches `targetPath` from a file in `fromDir`. */
+export function relativePath(fromDir: string, targetPath: string): string {
+  const from = fromDir ? fromDir.split('/') : []
+  const to = targetPath.split('/')
+  let shared = 0
+  while (shared < from.length && shared < to.length - 1 && from[shared] === to[shared]) shared += 1
+  return [...from.slice(shared).map(() => '..'), ...to.slice(shared)].join('/')
+}

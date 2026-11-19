@@ -1,4 +1,4 @@
-import { customType, index, integer, pgTable, text, timestamp, uuid } from 'drizzle-orm/pg-core'
+import { boolean, customType, index, integer, pgTable, text, timestamp, uuid } from 'drizzle-orm/pg-core'
 
 const bytea = customType<{ data: Buffer; driverData: Buffer }>({
   dataType: () => 'bytea',
@@ -73,6 +73,7 @@ export const pageVersions = pgTable(
     bytes: bytea('bytes').notNull(),
     byteSize: integer('byte_size').notNull(),
     sha256: text('sha256').notNull(),
+    pinned: boolean('pinned').notNull().default(false),
     createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
   },
   (table) => [index('page_versions_book_path_idx').on(table.bookId, table.path, table.createdAt)],

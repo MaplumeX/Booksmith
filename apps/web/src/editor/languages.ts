@@ -9,7 +9,7 @@ export function languageFor(path: string): Extension {
     case 'xhtml':
     case 'html':
     case 'htm':
-      return html()
+      return html({ autoCloseTags: true })
     case 'css':
       return css()
     case 'opf':

@@ -60,6 +60,13 @@ export function toBookDto(book: Book) {
   }
 }
 
+/** `filename` must stay latin-1 representable, so non-ASCII titles fall back to `book.epub`. */
+export function downloadName(title: string): { ascii: string; encoded: string } {
+  const cleaned = title.replace(/[/\\:*?"<>|\u0000-\u001f]+/g, ' ').replace(/\s+/g, ' ').trim() || 'book'
+  const ascii = /^[\x20-\x7E]+$/.test(cleaned) ? cleaned : 'book'
+  return { ascii: `${ascii}.epub`, encoded: encodeURIComponent(`${cleaned}.epub`) }
+}
+
 function requireUser(request: FastifyRequest, reply: FastifyReply): User | null {
   if (!request.currentUser) {
     reply.code(401).send({ error: 'unauthenticated' })
@@ -177,6 +184,29 @@ export function registerBookRoutes(app: FastifyInstance, deps: BookDeps): void {
     return reply
       .header('content-type', 'application/epub+zip')
       .header('etag', `"${book.currentVersion}"`)
+      .send(bytes)
+  })
+
+  /**
+   * The current saved pack as a download. Unsaved editor changes are not included: silently saving
+   * them would turn "give me the version I have" into a new revision.
+   * See ADR 2026-11-19-epub-export.
+   */
+  app.get('/api/books/:id/download', async (request, reply) => {
+    const user = requireUser(request, reply)
+    if (!user) return
+
+    const { id } = request.params as { id: string }
+    const book = await findOwnedBook(db, id, user.id)
+    if (!book) return reply.code(404).send({ error: 'not_found' })
+
+    const bytes = await fileStore.getCurrent(book.id)
+    if (!bytes) return reply.code(410).send({ error: 'version_missing' })
+
+    const name = downloadName(book.title)
+    return reply
+      .header('content-type', 'application/epub+zip')
+      .header('content-disposition', `attachment; filename="${name.ascii}"; filename*=UTF-8''${name.encoded}`)
       .send(bytes)
   })
 

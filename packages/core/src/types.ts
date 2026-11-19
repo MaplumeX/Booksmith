@@ -47,6 +47,8 @@ export interface EpubIssue {
   code: string
   message: string
   path?: string
+  /** 1-based line inside `path`, when the issue points at a specific place. */
+  line?: number
 }
 
 export type XmlDocumentParser = (xml: string) => Document
