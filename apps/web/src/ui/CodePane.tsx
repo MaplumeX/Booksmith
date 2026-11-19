@@ -48,7 +48,8 @@ export function CodePane({ path, content, onChange, reveal }: CodePaneProps) {
       view.current = null
     }
     // Rebuilding per path keeps one document per file; typing never re-creates the view.
-  }, [path])
+    // 主题模块换了（改 theme.ts 时 Vite 热更新）也重建，否则编辑器还挂着旧样式。
+  }, [path, editorTheme])
 
   useEffect(() => {
     const instance = view.current

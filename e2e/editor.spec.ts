@@ -80,3 +80,26 @@ test('shows an image entry in the content area instead of an empty editor', asyn
     .toBeGreaterThan(0)
   await expect(page.locator('.statusbar')).not.toContainText('字')
 })
+
+test('selection background covers whole line boxes, including wrapped lines', async ({ page }) => {
+  await openWorkbench(page)
+  await page.getByRole('button', { name: 'ch003.xhtml', exact: true }).click()
+  await expect(page.locator('.cm-content')).toContainText('序言')
+
+  await page.locator('.cm-content').click()
+  await page.keyboard.press('Home')
+  await page.keyboard.press('Shift+End')
+  await page.keyboard.press('Shift+ArrowDown')
+  await expect(page.locator('.cm-selectionBackground')).toHaveCount(2)
+
+  // 选区块必须与行盒逐像素对齐：任何缝隙或多出的高度都说明对齐逻辑失效了。
+  const gaps = await page.evaluate(() => {
+    const marker = document.querySelector('.cm-selectionBackground')!
+    const line = document.querySelector('.cm-line')!
+    const m = marker.getBoundingClientRect()
+    const l = line.getBoundingClientRect()
+    return { top: m.top - l.top, bottom: m.bottom - l.bottom }
+  })
+  expect(Math.abs(gaps.top)).toBeLessThan(0.5)
+  expect(Math.abs(gaps.bottom)).toBeLessThan(0.5)
+})
