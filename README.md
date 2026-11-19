@@ -1,16 +1,17 @@
 # Booksmith
 
-自托管的 EPUB 编辑器：浏览器里编辑，书存在自己的 Postgres 里，每次保存留一个可回滚的版本。
+自托管的 EPUB 编辑器：浏览器里编辑，书存在自己的 Postgres 里，每个文件各有一份可回滚的历史。
 
 ## 能做什么
 
 - 登录后进封面墙书库：导入 EPUB、新建空白书、搜索书名/作者。
-- 三栏工作台：文件树（Text / Styles / Images / Other）+ CodeMirror 编辑 + 右栏「预览 / 查找 / 元数据 / 目录 / 版本」。
+- 三栏工作台：文件树（Text / Styles / Images / Other）+ CodeMirror 编辑 + 右栏「预览 / 查找 / 元数据 / 目录」。
 - 预览按书的 CSS 渲染当前章，图片、字体、MathML 都会正确加载。
 - 全书查找（正则、区分大小写）与当前文件替换（⌘F）。
 - 元数据表单只重写 OPF 的 `dc:*` 字段，目录改名同时同步 `nav.xhtml` 与 `toc.ncx`。
-- 保存时服务端校验 zip / mimetype / container / OPF，加入新版本；后保存者收到 409 冲突而不是覆盖。
-- 版本列表可恢复任意历史版本（恢复本身也是一个新版本）。
+- 停手 20 秒后自动保存（两次自动保存至少间隔 3 分钟），未落库的输入另存于浏览器 IndexedDB，刷新或崩溃后可找回。
+- 保存时服务端校验 zip / mimetype / container / OPF；内容没变则不写库、不升版本；后保存者收到 409 冲突而不是覆盖。
+- 快照按文件记录：xhtml / opf / nav / ncx / css 各有自己的历史，可单独恢复某一版（恢复本身也是一条新快照）。
 
 不支持、也不打算支持：富文本可视化编辑、中文排版规则引擎、EPUBCheck 集成、协作编辑。
 
@@ -96,7 +97,7 @@ DATABASE_URL=… ./scripts/backup.sh
 pg_restore --clean --if-exists --no-owner --dbname="$DATABASE_URL" backups/booksmith-*.dump
 ```
 
-版本保留最近 20 个（`pinned` 的永久保留）。
+每个文件保留最近 100 条快照：最近 10 条全留，更早的每天留最后一条；同一文件十分钟内的连续保存合并为一条。整本书只保留当前状态一行。
 
 ## 许可
 

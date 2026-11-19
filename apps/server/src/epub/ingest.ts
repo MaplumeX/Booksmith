@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto'
 import { DOMParser } from '@xmldom/xmldom'
-import { openEpub, validateStructure, type EpubPackage, type XmlDocumentParser } from '@booksmith/core'
+import { openEpub, validateStructure, type EpubArchive, type EpubPackage, type XmlDocumentParser } from '@booksmith/core'
 
 export const nodeXmlParser: XmlDocumentParser = (xml) =>
   new DOMParser().parseFromString(xml, 'application/xml') as unknown as Document
@@ -20,6 +20,8 @@ export interface IngestedBook {
   sha256: string
   cover: IngestedCover | null
   pkg: EpubPackage
+  /** Unpacked entries, so callers can diff one save against the previous pack without re-inflating. */
+  archive: EpubArchive
 }
 
 export class IngestError extends Error {
@@ -74,5 +76,6 @@ export function ingestEpub(input: Buffer, parse: XmlDocumentParser = nodeXmlPars
     sha256: createHash('sha256').update(input).digest('hex'),
     cover: findCover(pkg, (path) => archive.entries.get(path)),
     pkg,
+    archive,
   }
 }

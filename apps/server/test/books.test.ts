@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto'
 import { readFileSync } from 'node:fs'
+import { unzipArchive, zipArchive } from '@booksmith/core'
 import type { FastifyInstance } from 'fastify'
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest'
 import { createApp } from '../src/app'
@@ -11,6 +12,18 @@ const FIXTURE = new Uint8Array(readFileSync(new URL('../../../fixtures/马克思
 const FIXTURE_BUFFER = Buffer.from(FIXTURE)
 const FIXTURE_SHA = createHash('sha256').update(FIXTURE).digest('hex')
 const ALLOWED = ['lib@booksmith.test', 'other@booksmith.test']
+
+/** The fixture with one chapter rewritten, so a save carries different bytes. */
+function editedFixture(): Buffer {
+  const archive = unzipArchive(FIXTURE)
+  archive.entries.set(
+    'EPUB/text/ch003.xhtml',
+    new TextEncoder().encode(
+      '<?xml version="1.0" encoding="UTF-8"?>\n<html xmlns="http://www.w3.org/1999/xhtml"><head><title>改过的章节</title></head><body><p>改过的章节</p></body></html>\n',
+    ),
+  )
+  return Buffer.from(zipArchive(archive))
+}
 const PASSWORD = 'correct horse battery'
 
 let app: FastifyInstance
@@ -148,7 +161,7 @@ describe('saving a new version', () => {
       method: 'PUT',
       url: `/api/books/${id}/epub`,
       headers: { cookie: libCookie, 'content-type': 'application/epub+zip', 'if-match': '"1"' },
-      payload: FIXTURE_BUFFER,
+      payload: editedFixture(),
     })
     expect(save.statusCode).toBe(200)
     expect((save.json() as { version: number }).version).toBe(2)
@@ -156,6 +169,18 @@ describe('saving a new version', () => {
     const list = await app.inject({ method: 'GET', url: '/api/books', headers: { cookie: libCookie } })
     const book = (list.json() as { books: Array<{ currentVersion: number }> }).books[0]
     expect(book?.currentVersion).toBe(2)
+  })
+
+  it('keeps the version when the bytes are unchanged', async () => {
+    const id = await uploadBook(libCookie)
+    const save = await app.inject({
+      method: 'PUT',
+      url: `/api/books/${id}/epub`,
+      headers: { cookie: libCookie, 'content-type': 'application/epub+zip', 'if-match': '"1"' },
+      payload: FIXTURE_BUFFER,
+    })
+    expect(save.statusCode).toBe(200)
+    expect((save.json() as { version: number }).version).toBe(1)
   })
 
   it('rejects a stale If-Match with 409', async () => {

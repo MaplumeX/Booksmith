@@ -18,6 +18,7 @@ export {
   readOpfPath,
   unpackEpub,
 } from './unpack'
+export { hasPageHistory, isTextEntry } from './text'
 export { validateStructure } from './validate'
 export { buildSearchPattern, groupMatches, searchBook } from './search'
 export { browserXmlCodec } from './xml'

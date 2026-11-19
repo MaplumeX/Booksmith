@@ -1,11 +1,44 @@
+import { createHash } from 'node:crypto'
 import { and, desc, eq, sql } from 'drizzle-orm'
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify'
+import { hasPageHistory, openEpub, type EpubArchive } from '@booksmith/core'
 import type { Db } from '../db/client'
 import { books, type Book, type User } from '../db/schema'
-import { IngestError, ingestEpub } from '../epub/ingest'
+import { IngestError, ingestEpub, nodeXmlParser } from '../epub/ingest'
 import type { FileStore } from '../storage/fileStore'
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
+
+/** Same entry re-saved inside this window keeps its single snapshot: autosave fires far more often
+ * than an edit phase changes. Manual checkpoints (`x-booksmith-checkpoint: manual`) bypass it.
+ * See ADR 2026-11-19-autosave. */
+const SNAPSHOT_WINDOW_MS = 10 * 60 * 1000
+
+export function sha256(bytes: Uint8Array): string {
+  return createHash('sha256').update(bytes).digest('hex')
+}
+
+function sameBytes(a: Uint8Array | undefined, b: Uint8Array): boolean {
+  if (!a || a.byteLength !== b.byteLength) return false
+  for (let index = 0; index < a.byteLength; index += 1) if (a[index] !== b[index]) return false
+  return true
+}
+
+/**
+ * Text entries whose bytes differ from the pack we are replacing. Binaries and zip metadata are
+ * excluded, so adding an image does not create a page snapshot.
+ * See ADR 2026-11-19-page-level-snapshots.
+ */
+export function changedTextEntries(previous: Buffer | null, next: EpubArchive): Array<[string, Uint8Array]> {
+  const before = previous ? openEpub(new Uint8Array(previous), nodeXmlParser).archive.entries : new Map<string, Uint8Array>()
+  const changed: Array<[string, Uint8Array]> = []
+  for (const [path, bytes] of next.entries) {
+    if (!hasPageHistory(path)) continue
+    if (sameBytes(before.get(path), bytes)) continue
+    changed.push([path, bytes])
+  }
+  return changed
+}
 
 interface BookDeps {
   db: Db
@@ -121,7 +154,11 @@ export function registerBookRoutes(app: FastifyInstance, deps: BookDeps): void {
       return created
     })
 
-    await fileStore.put(book.id, 1, body, ingested.sha256, 'initial import')
+    await fileStore.putCurrent(book.id, body, ingested.sha256)
+    // The import is the baseline of every entry's history, so the first snapshot is not the first edit.
+    for (const [path, bytes] of ingested.archive.entries) {
+      if (hasPageHistory(path)) await fileStore.putPageVersion(book.id, path, Buffer.from(bytes), sha256(bytes))
+    }
 
     return reply.code(201).send({ book: toBookDto(book) })
   })
@@ -134,7 +171,7 @@ export function registerBookRoutes(app: FastifyInstance, deps: BookDeps): void {
     const book = await findOwnedBook(db, id, user.id)
     if (!book) return reply.code(404).send({ error: 'not_found' })
 
-    const bytes = await fileStore.get(book.id, book.currentVersion)
+    const bytes = await fileStore.getCurrent(book.id)
     if (!bytes) return reply.code(410).send({ error: 'version_missing' })
 
     return reply
@@ -170,9 +207,15 @@ export function registerBookRoutes(app: FastifyInstance, deps: BookDeps): void {
       throw error
     }
 
+    // Nothing changed byte-wise: return the current version instead of writing a row and bumping it.
+    if (ingested.sha256 === book.sha256) {
+      return reply.send({ book: toBookDto(book), version: book.currentVersion })
+    }
+
+    const previous = await fileStore.getCurrent(book.id)
     const nextVersion = book.currentVersion + 1
 
-    await fileStore.put(book.id, nextVersion, body, ingested.sha256)
+    await fileStore.putCurrent(book.id, body, ingested.sha256)
 
     const updated = await db.transaction(async (tx) => {
       const rows = await tx
@@ -198,7 +241,16 @@ export function registerBookRoutes(app: FastifyInstance, deps: BookDeps): void {
       return row
     })
 
-    await fileStore.prune(book.id)
+    const force = request.headers['x-booksmith-checkpoint'] === 'manual'
+    for (const [path, bytes] of changedTextEntries(previous, ingested.archive)) {
+      const hash = sha256(bytes)
+      const newest = await fileStore.newestFor(book.id, path)
+      if (newest?.sha256 === hash) continue
+      if (!force && newest && Date.now() - newest.createdAt.getTime() < SNAPSHOT_WINDOW_MS) continue
+      await fileStore.putPageVersion(book.id, path, Buffer.from(bytes), hash)
+    }
+
+    await fileStore.prunePages(book.id)
 
     return reply.send({ book: toBookDto(updated), version: nextVersion })
   })

@@ -342,6 +342,54 @@ input {
   }
 }
 
+/* ---------- context menu ---------- */
+
+.context-menu {
+  position: fixed;
+  z-index: 60;
+  min-width: 168px;
+  padding: var(--space-1);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius);
+  background: var(--surface);
+  box-shadow: 0 8px 20px rgb(16 24 40 / 12%), 0 2px 4px rgb(16 24 40 / 8%);
+}
+
+.context-menu-title {
+  display: block;
+  padding: var(--space-1) var(--space-2) var(--space-2);
+  border-bottom: 1px solid var(--border);
+  margin-bottom: var(--space-1);
+  font-size: 11px;
+  color: var(--text-muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.context-menu-item {
+  display: block;
+  width: 100%;
+  padding: var(--space-2);
+  border: none;
+  border-radius: var(--radius);
+  background: transparent;
+  color: var(--text);
+  font: inherit;
+  font-size: 13px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.context-menu-item:hover:not(:disabled) {
+  background: var(--surface-sunken);
+}
+
+.context-menu-item:disabled {
+  color: var(--text-muted);
+  cursor: default;
+}
+
 /* ---------- banners & empty ---------- */
 
 .banner {
@@ -364,6 +412,22 @@ input {
   background: var(--status-error-bg);
   border-color: var(--status-error-fg);
   color: var(--status-error-fg);
+}
+
+.banner-info {
+  background: var(--accent-subtle);
+  border-color: var(--accent);
+  color: var(--text);
+}
+
+.banner-actions {
+  margin-left: auto;
+  display: flex;
+  gap: var(--space-3);
+}
+
+.banner-actions .banner-action {
+  margin-left: 0;
 }
 
 .banner-action {
@@ -485,6 +549,35 @@ input {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.appbar-save {
+  font: inherit;
+  font-size: 12px;
+  white-space: nowrap;
+  color: var(--text-muted);
+}
+
+.appbar-save.is-saving {
+  color: var(--text-secondary);
+}
+
+.appbar-save.is-saved {
+  color: var(--status-ok-fg);
+}
+
+.appbar-save.is-error {
+  padding: 2px var(--space-2);
+  border: 1px solid var(--status-error-fg);
+  border-radius: var(--radius);
+  background: var(--status-error-bg);
+  color: var(--status-error-fg);
+  font-weight: 500;
+  cursor: pointer;
+}
+
+.appbar-save.is-error:hover {
+  color: var(--text);
 }
 
 .appbar-flag {
@@ -922,6 +1015,15 @@ input {
 .snapshot-item.on {
   background: var(--accent-subtle);
   box-shadow: inset 2px 0 0 var(--accent);
+}
+
+.snapshot-path-label {
+  color: var(--text-muted);
+  font-family: var(--font-mono);
+  font-size: 12px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .snapshot-time {

@@ -1,4 +1,4 @@
-import { customType, index, integer, pgTable, text, timestamp, uniqueIndex, uuid } from 'drizzle-orm/pg-core'
+import { customType, index, integer, pgTable, text, timestamp, uuid } from 'drizzle-orm/pg-core'
 
 const bytea = customType<{ data: Buffer; driverData: Buffer }>({
   dataType: () => 'bytea',
@@ -49,24 +49,37 @@ export const books = pgTable(
   (table) => [index('books_owner_updated_idx').on(table.ownerId, table.updatedAt)],
 )
 
-export const bookVersions = pgTable(
-  'book_versions',
+/** The current whole-book pack, one row per book, overwritten on every save.
+ * Whole-book history is gone on purpose; per-entry history lives in `page_versions`.
+ * See ADR 2026-11-19-page-level-snapshots. */
+export const bookFiles = pgTable('book_files', {
+  bookId: uuid('book_id')
+    .primaryKey()
+    .references(() => books.id, { onDelete: 'cascade' }),
+  bytes: bytea('bytes').notNull(),
+  byteSize: integer('byte_size').notNull(),
+  sha256: text('sha256').notNull(),
+  updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+})
+
+export const pageVersions = pgTable(
+  'page_versions',
   {
     id: uuid('id').primaryKey().defaultRandom(),
     bookId: uuid('book_id')
       .notNull()
       .references(() => books.id, { onDelete: 'cascade' }),
-    versionNo: integer('version_no').notNull(),
+    path: text('path').notNull(),
     bytes: bytea('bytes').notNull(),
     byteSize: integer('byte_size').notNull(),
     sha256: text('sha256').notNull(),
-    note: text('note'),
     createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
   },
-  (table) => [uniqueIndex('book_versions_book_version_idx').on(table.bookId, table.versionNo)],
+  (table) => [index('page_versions_book_path_idx').on(table.bookId, table.path, table.createdAt)],
 )
 
 export type User = typeof users.$inferSelect
 export type NewUser = typeof users.$inferInsert
 export type Book = typeof books.$inferSelect
-export type BookVersion = typeof bookVersions.$inferSelect
+export type BookFile = typeof bookFiles.$inferSelect
+export type PageVersion = typeof pageVersions.$inferSelect

@@ -1,91 +1,145 @@
 import { and, eq, inArray, sql } from 'drizzle-orm'
 import type { Db } from '../db/client'
-import { bookVersions } from '../db/schema'
+import { bookFiles, pageVersions } from '../db/schema'
 
 const RECENT_KEEP = 10
-const TOTAL_CAP = 40
+const PAGE_CAP = 100
 
-export interface FileStore {
-  put(bookId: string, versionNo: number, bytes: Buffer, sha256: string, note?: string): Promise<void>
-  get(bookId: string, versionNo: number): Promise<Buffer | null>
-  list(bookId: string): Promise<Array<{ versionNo: number; byteSize: number; sha256: string; createdAt: Date }>>
-  prune(bookId: string): Promise<number>
+export interface PageVersionMeta {
+  id: string
+  path: string
+  byteSize: number
+  sha256: string
+  createdAt: Date
 }
 
-/** Postgres-backed storage. Everything the app needs from a file layer lives here,
- * so swapping in an object store later is one implementation plus a migration.
- * See ADR 2026-11-19-server-backed-epub-editor. */
+export interface FileStore {
+  getCurrent(bookId: string): Promise<Buffer | null>
+  putCurrent(bookId: string, bytes: Buffer, sha256: string): Promise<void>
+  listPageVersions(bookId: string): Promise<PageVersionMeta[]>
+  getPageVersion(bookId: string, id: string): Promise<{ path: string; bytes: Buffer } | null>
+  /** Newest snapshot of one entry, used to decide whether the throttle window is still open. */
+  newestFor(bookId: string, path: string): Promise<{ sha256: string; createdAt: Date } | null>
+  putPageVersion(bookId: string, path: string, bytes: Buffer, sha256: string): Promise<void>
+  prunePages(bookId: string): Promise<number>
+}
+
+/** Postgres-backed storage: one row for the current pack, one table of per-entry snapshots.
+ * See ADR 2026-11-19-page-level-snapshots. */
 export function createPostgresFileStore(db: Db): FileStore {
   return {
-    async put(bookId, versionNo, bytes, sha256, note) {
-      await db.insert(bookVersions).values({
-        bookId,
-        versionNo,
-        bytes,
-        byteSize: bytes.byteLength,
-        sha256,
-        note: note ?? null,
-      })
-    },
-
-    async get(bookId, versionNo) {
+    async getCurrent(bookId) {
       const rows = await db
-        .select({ bytes: bookVersions.bytes })
-        .from(bookVersions)
-        .where(and(eq(bookVersions.bookId, bookId), eq(bookVersions.versionNo, versionNo)))
+        .select({ bytes: bookFiles.bytes })
+        .from(bookFiles)
+        .where(eq(bookFiles.bookId, bookId))
         .limit(1)
       return rows[0]?.bytes ?? null
     },
 
-    async list(bookId) {
+    /** Overwrites in place: the pack is the current state, never history. */
+    async putCurrent(bookId, bytes, sha256) {
+      await db
+        .insert(bookFiles)
+        .values({ bookId, bytes, byteSize: bytes.byteLength, sha256, updatedAt: new Date() })
+        .onConflictDoUpdate({
+          target: bookFiles.bookId,
+          set: { bytes, byteSize: bytes.byteLength, sha256, updatedAt: new Date() },
+        })
+    },
+
+    async listPageVersions(bookId) {
       return db
         .select({
-          versionNo: bookVersions.versionNo,
-          byteSize: bookVersions.byteSize,
-          sha256: bookVersions.sha256,
-          createdAt: bookVersions.createdAt,
+          id: pageVersions.id,
+          path: pageVersions.path,
+          byteSize: pageVersions.byteSize,
+          sha256: pageVersions.sha256,
+          createdAt: pageVersions.createdAt,
         })
-        .from(bookVersions)
-        .where(eq(bookVersions.bookId, bookId))
-        .orderBy(sql`${bookVersions.versionNo} desc`)
+        .from(pageVersions)
+        .where(eq(pageVersions.bookId, bookId))
+        .orderBy(sql`${pageVersions.createdAt} desc`)
+    },
+
+    async getPageVersion(bookId, id) {
+      const rows = await db
+        .select({ path: pageVersions.path, bytes: pageVersions.bytes })
+        .from(pageVersions)
+        .where(and(eq(pageVersions.bookId, bookId), eq(pageVersions.id, id)))
+        .limit(1)
+      return rows[0] ?? null
+    },
+
+    async newestFor(bookId, path) {
+      const rows = await db
+        .select({ sha256: pageVersions.sha256, createdAt: pageVersions.createdAt })
+        .from(pageVersions)
+        .where(and(eq(pageVersions.bookId, bookId), eq(pageVersions.path, path)))
+        .orderBy(sql`${pageVersions.createdAt} desc`)
+        .limit(1)
+      return rows[0] ?? null
+    },
+
+    async putPageVersion(bookId, path, bytes, sha256) {
+      await db.insert(pageVersions).values({
+        bookId,
+        path,
+        bytes,
+        byteSize: bytes.byteLength,
+        sha256,
+        createdAt: new Date(),
+      })
     },
 
     /**
-     * Keeps the newest `RECENT_KEEP` snapshots, then one more per UTC day for everything
-     * older, capped at `TOTAL_CAP`.
+     * Keeps up to `PAGE_CAP` snapshots per entry: the newest `RECENT_KEEP` unconditionally, then
+     * one more per UTC day for everything older.
      *
-     * Counting snapshots alone let a run of typo fixes evict the only history of a quiet
-     * period; keeping the last save of each day preserves that shape. Returns rows removed.
-     * See ADR 2026-11-19-snapshot-history.
+     * Per entry, not per book: a chapter under heavy revision keeps its own history instead of
+     * evicting the quiet chapters around it. Returns rows removed.
+     * See ADR 2026-11-19-page-level-snapshots.
      */
-    async prune(bookId) {
+    async prunePages(bookId) {
       const rows = await db
-        .select({ versionNo: bookVersions.versionNo, createdAt: bookVersions.createdAt })
-        .from(bookVersions)
-        .where(eq(bookVersions.bookId, bookId))
-        .orderBy(sql`${bookVersions.versionNo} desc`)
+        .select({ id: pageVersions.id, path: pageVersions.path, createdAt: pageVersions.createdAt })
+        .from(pageVersions)
+        .where(eq(pageVersions.bookId, bookId))
+        .orderBy(sql`${pageVersions.path} asc, ${pageVersions.createdAt} desc`)
 
-      const keep = new Set<number>()
-      const seenDays = new Set<string>()
-      for (const [index, row] of rows.entries()) {
+      const keep = new Set<string>()
+      let path = ''
+      let index = 0
+      let seenDays = new Set<string>()
+
+      for (const row of rows) {
+        if (row.path !== path) {
+          path = row.path
+          index = 0
+          seenDays = new Set<string>()
+        }
+
         const day = row.createdAt.toISOString().slice(0, 10)
-        if (index < RECENT_KEEP) {
-          keep.add(row.versionNo)
+        const withinRecent = index < RECENT_KEEP
+        index += 1
+
+        if (withinRecent) {
+          keep.add(row.id)
           seenDays.add(day)
           continue
         }
         if (seenDays.has(day)) continue
         seenDays.add(day)
-        if (keep.size >= TOTAL_CAP) continue
-        keep.add(row.versionNo)
+        if (index > PAGE_CAP) continue
+        keep.add(row.id)
       }
 
-      const removable = rows.filter((row) => !keep.has(row.versionNo)).map((row) => row.versionNo)
+      const removable = rows.filter((row) => !keep.has(row.id)).map((row) => row.id)
       if (removable.length === 0) return 0
 
       await db
-        .delete(bookVersions)
-        .where(and(eq(bookVersions.bookId, bookId), inArray(bookVersions.versionNo, removable)))
+        .delete(pageVersions)
+        .where(and(eq(pageVersions.bookId, bookId), inArray(pageVersions.id, removable)))
       return removable.length
     },
   }
