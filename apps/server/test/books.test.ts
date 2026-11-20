@@ -237,5 +237,21 @@ describe('deletion', () => {
 
     const list = await app.inject({ method: 'GET', url: '/api/books', headers: { cookie: libCookie } })
     expect((list.json() as { books: unknown[] }).books).toHaveLength(0)
+
+    const read = await app.inject({ method: 'GET', url: `/api/books/${id}/epub`, headers: { cookie: libCookie } })
+    expect(read.statusCode).toBe(404)
+  })
+
+  it('refuses unauthenticated deletion and hides other users books behind 404', async () => {
+    const id = await uploadBook(otherCookie)
+
+    const unauth = await app.inject({ method: 'DELETE', url: `/api/books/${id}` })
+    expect(unauth.statusCode).toBe(401)
+
+    const foreign = await app.inject({ method: 'DELETE', url: `/api/books/${id}`, headers: { cookie: libCookie } })
+    expect(foreign.statusCode).toBe(404)
+
+    const stillThere = await app.inject({ method: 'GET', url: '/api/books', headers: { cookie: otherCookie } })
+    expect((stillThere.json() as { books: unknown[] }).books).toHaveLength(1)
   })
 })

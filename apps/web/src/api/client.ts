@@ -144,6 +144,8 @@ export const api = {
 
   books: () => request<{ books: BookDto[] }>('/books'),
 
+  deleteBook: (id: string) => request<void>(`/books/${id}`, { method: 'DELETE' }),
+
   save: async (id: string, version: number, bytes: Uint8Array, options: { checkpoint?: boolean } = {}): Promise<{ version: number }> => {
     const copy = new Uint8Array(bytes.length)
     copy.set(bytes)
