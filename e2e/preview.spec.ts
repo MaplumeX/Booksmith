@@ -3,7 +3,7 @@ import { expectLoggedIn, login, seedBook } from './helpers'
 
 let bookId: string
 
-test.beforeAll(async () => {
+test.beforeEach(async () => {
   bookId = await seedBook()
 })
 
@@ -49,4 +49,57 @@ test('loads images from the book archive', async ({ page }) => {
   await expect
     .poll(async () => image.evaluate((img: HTMLImageElement) => img.naturalWidth))
     .toBeGreaterThan(0)
+})
+
+test('patches preview in place on code edits and save without reloading the iframe or styles', async ({ page }) => {
+  await openChapter(page, 'ch003.xhtml')
+  const frame = page.frameLocator('.preview-frame')
+  await expect(frame.locator('body')).toContainText('序言')
+
+  await page.evaluate(() => {
+    const iframe = document.querySelector<HTMLIFrameElement>('.preview-frame')!
+    const win = iframe.contentWindow as unknown as Record<string, unknown>
+    const doc = iframe.contentDocument!
+    win.__previewSessionId = 'stable-preview'
+    win.__initialStyle = doc.head.querySelector('style')
+    win.__initialHeading = doc.body.querySelector('h1')
+  })
+
+  // Edit in code mode (multiple keystrokes after already dirty) and verify live preview updates in place.
+  await page.locator('.cm-content').click()
+  await page.keyboard.press('Control+End')
+  await page.keyboard.press('ArrowUp')
+  await page.keyboard.press('ArrowUp')
+  await page.keyboard.type('<p>无闪烁实时预览测试</p>')
+
+  await expect(frame.locator('body')).toContainText('无闪烁实时预览测试')
+
+  const afterEdit = await page.evaluate(() => {
+    const iframe = document.querySelector<HTMLIFrameElement>('.preview-frame')!
+    const win = iframe.contentWindow as unknown as Record<string, unknown>
+    const doc = iframe.contentDocument!
+    return {
+      sameWindow: win.__previewSessionId === 'stable-preview',
+      sameStyle: doc.head.querySelector('style') === win.__initialStyle,
+      sameHeading: doc.body.querySelector('h1') === win.__initialHeading,
+    }
+  })
+  expect(afterEdit).toEqual({ sameWindow: true, sameStyle: true, sameHeading: true })
+
+  // Save and verify the preview iframe still did not reload.
+  await page.getByRole('button', { name: '保存', exact: true }).click()
+  await expect(page.locator('.appbar-meta')).toHaveText('v2')
+  await expect(page.locator('.statusbar')).toContainText('未修改')
+
+  const afterSave = await page.evaluate(() => {
+    const iframe = document.querySelector<HTMLIFrameElement>('.preview-frame')!
+    const win = iframe.contentWindow as unknown as Record<string, unknown>
+    const doc = iframe.contentDocument!
+    return {
+      sameWindow: win.__previewSessionId === 'stable-preview',
+      sameStyle: doc.head.querySelector('style') === win.__initialStyle,
+      sameHeading: doc.body.querySelector('h1') === win.__initialHeading,
+    }
+  })
+  expect(afterSave).toEqual({ sameWindow: true, sameStyle: true, sameHeading: true })
 })

@@ -209,6 +209,7 @@ export function Editor({ bookId }: { bookId: string }) {
   const [reveal, setReveal] = useState<RevealTarget | null>(null)
   const assetInput = useRef<HTMLInputElement>(null)
   const [saving, setSaving] = useState(false)
+  const [showSaving, setShowSaving] = useState(false)
   const [conflict, setConflict] = useState(false)
   const [saveError, setSaveError] = useState<string | null>(null)
   const [historyPath, setHistoryPath] = useState<string | null>(null)
@@ -236,6 +237,23 @@ export function Editor({ bookId }: { bookId: string }) {
   const [editorMode, setEditorMode] = useState<EditorViewMode>('code')
   const [externalResetVersion, setExternalResetVersion] = useState(0)
   const wysiwygFlushRef = useRef<(() => void) | null>(null)
+  const textListeners = useRef(new Set<(path: string, value: string) => void>())
+
+  const subscribeTextChange = useCallback((listener: (path: string, value: string) => void) => {
+    textListeners.current.add(listener)
+    return () => {
+      textListeners.current.delete(listener)
+    }
+  }, [])
+
+  useEffect(() => {
+    if (!saving) {
+      setShowSaving(false)
+      return
+    }
+    const timer = window.setTimeout(() => setShowSaving(true), 150)
+    return () => window.clearTimeout(timer)
+  }, [saving])
 
   const applyBook = useCallback((loaded: LoadedBook) => {
     texts.current = new Map(loaded.texts)
@@ -323,6 +341,7 @@ export function Editor({ bookId }: { bookId: string }) {
   const handleChange = useCallback(
     (path: string, value: string, options: { rerender?: boolean } = {}) => {
       texts.current.set(path, value)
+      for (const listener of textListeners.current) listener(path, value)
       if (!dirtyRef.current.has(path)) {
         const next = new Set(dirtyRef.current)
         next.add(path)
@@ -986,7 +1005,15 @@ export function Editor({ bookId }: { bookId: string }) {
       if (!previewable) {
         return <p className="sidebar-note">当前文件不是页面，切换到 .xhtml 文件查看预览。</p>
       }
-      return <PreviewPane path={active} content={content} archive={book.archive} pkg={book.pkg} />
+      return (
+        <PreviewPane
+          path={active}
+          content={content}
+          archive={book.archive}
+          pkg={book.pkg}
+          subscribeTextChange={subscribeTextChange}
+        />
+      )
     }
     if (sidebarTab === 'search') {
       return (
@@ -1118,7 +1145,7 @@ export function Editor({ bookId }: { bookId: string }) {
             <AlertCircle size={12} strokeWidth={1.8} aria-hidden="true" />
             <span>保存失败 · 重试</span>
           </button>
-        ) : saving ? (
+        ) : showSaving ? (
           <span className="appbar-save is-saving">
             <Loader2 size={12} strokeWidth={1.8} className="spin" aria-hidden="true" />
             <span>保存中…</span>
@@ -1173,7 +1200,7 @@ export function Editor({ bookId }: { bookId: string }) {
           disabled={dirty.size === 0 || saving || conflict}
         >
           <Save size={14} strokeWidth={1.65} aria-hidden="true" />
-          <span>{saving ? '保存中…' : '保存'}</span>
+          <span>保存</span>
         </Button>
       </header>
 
