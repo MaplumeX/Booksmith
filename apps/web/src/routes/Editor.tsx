@@ -53,7 +53,7 @@ import {
 } from 'lucide-react'
 import { Popover } from 'radix-ui'
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { ApiError, api, downloadUrl, type AgentProfileDto } from '../api/client'
+import { ApiError, api, downloadUrl, type AgentProfileDto, type AgentUserSettingsDto } from '../api/client'
 import { mediaTypeFromExtension, mediaTypeOf } from '../preview/render'
 import { spinePaths } from '../diff/document'
 import { navigate } from '../router'
@@ -75,6 +75,13 @@ import {
 } from '../state/bookStore'
 import { applySavedEntriesToBook, buildEntryDelta } from '../state/entryDelta'
 import { createAutosave, type Autosave } from '../state/autosave'
+import {
+  computeDirtySummary,
+  createSavedBaseline,
+  setsEqual,
+  type DirtySummary,
+  type SavedBaseline,
+} from '../state/dirtyState'
 import type { ReplacePlan } from '../state/replacePlan'
 import { DRAFT_DEBOUNCE_MS, clearDraft, planDraftRestore, readDraft, writeDraft } from '../state/draftStore'
 import { getSettings, useSettings } from '../state/settingsStore'
@@ -227,17 +234,13 @@ export function Editor({ bookId }: { bookId: string }) {
   const tocUndoStack = useRef<
     Array<{
       beforeTexts: Map<string, string | undefined>
-      beforeDirty: Set<string>
       afterTexts: Map<string, string | undefined>
-      afterDirty: Set<string>
     }>
   >([])
   const tocRedoStack = useRef<
     Array<{
       beforeTexts: Map<string, string | undefined>
-      beforeDirty: Set<string>
       afterTexts: Map<string, string | undefined>
-      afterDirty: Set<string>
     }>
   >([])
   const [tocHistoryState, setTocHistoryState] = useState({ canUndo: false, canRedo: false })
@@ -261,18 +264,22 @@ export function Editor({ bookId }: { bookId: string }) {
   } | null>(null)
   const tabsRef = useRef<string[]>([])
   const texts = useRef<Map<string, string>>(new Map())
+  const baselineRef = useRef<SavedBaseline>(createSavedBaseline(new Map(), new Map()))
   const autosave = useRef<Autosave | null>(null)
   const draftTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
   const dirtyRef = useRef<Set<string>>(new Set())
+  const savingRef = useRef(false)
+  const conflictRef = useRef(false)
   const bookRef = useRef<LoadedBook | null>(null)
   const saveRef = useRef<(options?: { checkpoint?: boolean }) => Promise<void>>(async () => {})
-  /** Text and dirty flags from before a book-wide replace, so one click can revert the batch. */
-  const replaceUndo = useRef<{ texts: Map<string, string>; dirty: Set<string> } | null>(null)
+  /** Texts from before a book-wide replace, so one click can revert the batch. */
+  const replaceUndo = useRef<{ texts: Map<string, string> } | null>(null)
   const [editorMode, setEditorMode] = useState<EditorViewMode>(() => getSettings().defaultEditorMode)
   const [externalResetVersion, setExternalResetVersion] = useState(0)
   const wysiwygFlushRef = useRef<(() => void) | null>(null)
   const [agentProfiles, setAgentProfiles] = useState<AgentProfileDto[]>([])
   const [agentProfilesLoading, setAgentProfilesLoading] = useState(true)
+  const [agentUserSettings, setAgentUserSettings] = useState<AgentUserSettingsDto | null>(null)
   const [selectionText, setSelectionText] = useState('')
   const agentUndoRef = useRef<{ messageId: string; snapshot: WorkspaceSnapshot } | null>(null)
   const [agentUndoMessageId, setAgentUndoMessageId] = useState<string | null>(null)
@@ -298,8 +305,11 @@ export function Editor({ bookId }: { bookId: string }) {
 
   const applyBook = useCallback((loaded: LoadedBook) => {
     texts.current = new Map(loaded.texts)
+    baselineRef.current = createSavedBaseline(loaded.texts, loaded.archive.entries)
     bookRef.current = loaded
     setBook(loaded)
+    dirtyRef.current = new Set()
+    setDirty(new Set())
     const first = loaded.groups.find((group) => group.group === 'Text')?.paths[0]
     const initial = first ?? loaded.groups[0]?.paths[0] ?? null
     setTabs(initial ? [initial] : [])
@@ -336,13 +346,14 @@ export function Editor({ bookId }: { bookId: string }) {
   useEffect(() => {
     let cancelled = false
     setAgentProfilesLoading(true)
-    api
-      .agentProfiles()
-      .then((res) => {
-        if (!cancelled) setAgentProfiles(res.profiles)
-      })
-      .catch(() => {
-        if (!cancelled) setAgentProfiles([])
+    Promise.all([
+      api.agentProfiles().catch(() => ({ secretConfigured: true, profiles: [] as AgentProfileDto[] })),
+      api.agentSettings().catch(() => null),
+    ])
+      .then(([profileRes, settingsRes]) => {
+        if (cancelled) return
+        setAgentProfiles(profileRes.profiles)
+        if (settingsRes) setAgentUserSettings(settingsRes.settings)
       })
       .finally(() => {
         if (!cancelled) setAgentProfilesLoading(false)
@@ -381,49 +392,78 @@ export function Editor({ bookId }: { bookId: string }) {
     })
   }, [])
 
-  /** Local crash buffer: 1s after the last keystroke, the edited files go to IndexedDB. */
+  /** Local crash buffer: 1s after the last keystroke, the edited text files go to IndexedDB. */
   const scheduleDraft = useCallback(() => {
     if (draftTimer.current) clearTimeout(draftTimer.current)
     draftTimer.current = setTimeout(() => {
       draftTimer.current = null
       const current = bookRef.current
       if (!current) return
+      const summary = computeDirtySummary(baselineRef.current, texts.current, current.archive.entries)
       const files: Record<string, string> = {}
-      for (const path of dirtyRef.current) {
+      for (const path of summary.texts) {
         const text = texts.current.get(path)
         if (typeof text === 'string') files[path] = text
       }
-      if (Object.keys(files).length === 0) return
+      if (Object.keys(files).length === 0) {
+        void clearDraft(current.id)
+        return
+      }
       void writeDraft(current.id, { baseVersion: current.version, savedAt: Date.now(), files })
     }, DRAFT_DEBOUNCE_MS)
   }, [])
+
+  const syncDirtyFromBaseline = useCallback((targetBook?: LoadedBook | null): DirtySummary => {
+    const current = targetBook ?? bookRef.current
+    const summary = current
+      ? computeDirtySummary(baselineRef.current, texts.current, current.archive.entries)
+      : {
+          all: new Set<string>(),
+          texts: new Set<string>(),
+          binaries: new Set<string>(),
+          deleted: new Set<string>(),
+        }
+    dirtyRef.current = summary.all
+    setDirty((prev) => (setsEqual(prev, summary.all) ? prev : summary.all))
+    return summary
+  }, [])
+
+  const syncDurability = useCallback(
+    (summary: DirtySummary) => {
+      // Clear local draft and cancel autosave when edits are undone back to the saved baseline so
+      // reverted files never leave ghost drafts or trigger no-op uploads.
+      // See ADR 2026-11-20-baseline-derived-dirty-state.
+      if (summary.texts.size === 0) {
+        if (draftTimer.current) {
+          clearTimeout(draftTimer.current)
+          draftTimer.current = null
+        }
+        const current = bookRef.current
+        if (current) void clearDraft(current.id)
+      } else {
+        scheduleDraft()
+      }
+      if (summary.all.size === 0) autosave.current?.cancel()
+      else autosave.current?.touch()
+    },
+    [scheduleDraft],
+  )
 
   const handleChange = useCallback(
     (path: string, value: string, options: { rerender?: boolean } = {}) => {
       texts.current.set(path, value)
       for (const listener of textListeners.current) listener(path, value)
-      if (!dirtyRef.current.has(path)) {
-        const next = new Set(dirtyRef.current)
-        next.add(path)
-        dirtyRef.current = next
-      }
-      setDirty((current) => {
-        if (current.has(path)) return current
-        const next = new Set(current)
-        next.add(path)
-        return next
-      })
+      const summary = syncDirtyFromBaseline()
       // Typing needs no rerender (the editor owns its document), but a form write into a file that
       // is already dirty does: without this the toc/meta panels keep showing the previous parse.
-      if (options.rerender) setRevision((value) => value + 1)
+      if (options.rerender) setRevision((rev) => rev + 1)
       if (agentUndoRef.current) {
         agentUndoRef.current = null
         setAgentUndoMessageId(null)
       }
-      scheduleDraft()
-      autosave.current?.touch()
+      syncDurability(summary)
     },
-    [scheduleDraft],
+    [syncDirtyFromBaseline, syncDurability],
   )
 
   const handleApplyAgentProposal = useCallback(
@@ -455,15 +495,13 @@ export function Editor({ bookId }: { bookId: string }) {
 
         texts.current = applied.texts
         bookRef.current = applied.book
-        dirtyRef.current = applied.dirty
         setBook(applied.book)
-        setDirty(applied.dirty)
         setTabs(applied.tabs)
         setActive(applied.active)
         setExternalResetVersion((v) => v + 1)
         setRevision((v) => v + 1)
-        scheduleDraft()
-        autosave.current?.touch()
+        const summary = syncDirtyFromBaseline(applied.book)
+        syncDurability(summary)
 
         await api.updateProposalStatus(current.id, messageId, 'applied').catch(() => {})
         return true
@@ -472,7 +510,7 @@ export function Editor({ bookId }: { bookId: string }) {
         return false
       }
     },
-    [scheduleDraft],
+    [syncDirtyFromBaseline, syncDurability],
   )
 
   const handleUndoAgentProposal = useCallback(
@@ -482,19 +520,17 @@ export function Editor({ bookId }: { bookId: string }) {
       const { snapshot } = saved
       texts.current = new Map(snapshot.texts)
       bookRef.current = snapshot.book
-      dirtyRef.current = new Set(snapshot.dirty)
       setBook(snapshot.book)
-      setDirty(new Set(snapshot.dirty))
       setTabs([...snapshot.tabs])
       setActive(snapshot.active)
       setExternalResetVersion((v) => v + 1)
       setRevision((v) => v + 1)
       agentUndoRef.current = null
       setAgentUndoMessageId(null)
-      scheduleDraft()
-      autosave.current?.touch()
+      const summary = syncDirtyFromBaseline(snapshot.book)
+      syncDurability(summary)
     },
-    [scheduleDraft],
+    [syncDirtyFromBaseline, syncDurability],
   )
 
   useEffect(() => {
@@ -506,21 +542,15 @@ export function Editor({ bookId }: { bookId: string }) {
       if (!bookRef.current) return
       replaceUndo.current = {
         texts: new Map(plan.files.map((file) => [file.path, texts.current.get(file.path) ?? ''])),
-        dirty: new Set(dirtyRef.current),
       }
       const nextTexts = new Map(texts.current)
       for (const file of plan.files) nextTexts.set(file.path, file.text)
       texts.current = nextTexts
-      setDirty((dirty) => {
-        const next = new Set(dirty)
-        for (const file of plan.files) next.add(file.path)
-        return next
-      })
       setExternalResetVersion((v) => v + 1)
-      scheduleDraft()
-      autosave.current?.touch()
+      const summary = syncDirtyFromBaseline()
+      syncDurability(summary)
     },
-    [scheduleDraft],
+    [syncDirtyFromBaseline, syncDurability],
   )
 
   const undoReplace = useCallback(() => {
@@ -529,20 +559,11 @@ export function Editor({ bookId }: { bookId: string }) {
     const nextTexts = new Map(texts.current)
     for (const [path, text] of snapshot.texts) nextTexts.set(path, text)
     texts.current = nextTexts
-    // A file that was clean before the batch must be clean again after undoing it.
-    setDirty((dirty) => {
-      const next = new Set(dirty)
-      for (const path of snapshot.texts.keys()) {
-        if (snapshot.dirty.has(path)) next.add(path)
-        else next.delete(path)
-      }
-      return next
-    })
     replaceUndo.current = null
     setExternalResetVersion((v) => v + 1)
-    scheduleDraft()
-    autosave.current?.touch()
-  }, [scheduleDraft])
+    const summary = syncDirtyFromBaseline()
+    syncDurability(summary)
+  }, [syncDirtyFromBaseline, syncDurability])
 
   const createDocument = useCallback(() => {
     const current = bookRef.current
@@ -588,11 +609,10 @@ export function Editor({ bookId }: { bookId: string }) {
     texts.current = nextTexts
     bookRef.current = next
     setBook(next)
-    setDirty((dirty) => new Set(dirty).add(opfPath).add(path))
     open(path)
-    scheduleDraft()
-    autosave.current?.touch()
-  }, [open, scheduleDraft])
+    const summary = syncDirtyFromBaseline(next)
+    syncDurability(summary)
+  }, [open, syncDirtyFromBaseline, syncDurability])
 
   const startRename = useCallback((path: string) => {
     setRenaming({ path, value: basename(path), error: null })
@@ -669,7 +689,6 @@ export function Editor({ bookId }: { bookId: string }) {
     const moved = nextTexts.get(path)
     nextTexts.delete(path)
     if (moved !== undefined) nextTexts.set(target, moved)
-    const changed = [...nextTexts.keys()].filter((entry) => nextTexts.get(entry) !== texts.current.get(entry))
 
     const refreshed = refreshPackage(current, nextTexts, entries)
     const next = { ...refreshed, entryMeta, entryOrigins, localBinaries }
@@ -678,17 +697,11 @@ export function Editor({ bookId }: { bookId: string }) {
     setBook(next)
     setTabs((list) => list.map((entry) => (entry === path ? target : entry)))
     setActive((activePath) => (activePath === path ? target : activePath))
-    setDirty((dirty) => {
-      const set = new Set<string>()
-      for (const entry of dirty) set.add(entry === path ? target : entry)
-      for (const entry of changed) set.add(entry)
-      return set
-    })
     setExternalResetVersion((v) => v + 1)
     setRenaming(null)
-    scheduleDraft()
-    autosave.current?.touch()
-  }, [renaming, scheduleDraft])
+    const summary = syncDirtyFromBaseline(next)
+    syncDurability(summary)
+  }, [renaming, syncDirtyFromBaseline, syncDurability])
 
   const requestDelete = useCallback((path: string) => {
     const files = texts.current
@@ -760,18 +773,11 @@ export function Editor({ bookId }: { bookId: string }) {
     const fallback = spinePaths(next.pkg)[0] ?? next.groups[0]?.paths[0] ?? null
     setTabs((list) => list.filter((entry) => entry !== path))
     setActive((activePath) => (activePath === path ? fallback : activePath))
-    setDirty((dirty) => {
-      const set = new Set(dirty)
-      set.delete(path)
-      set.add(opfPath)
-      if (navPath && nextTexts.get(navPath) !== current.texts.get(navPath)) set.add(navPath)
-      if (ncxPath && nextTexts.get(ncxPath) !== current.texts.get(ncxPath)) set.add(ncxPath)
-      return set
-    })
+    setExternalResetVersion((v) => v + 1)
     setDeleting(null)
-    scheduleDraft()
-    autosave.current?.touch()
-  }, [deleting, scheduleDraft])
+    const summary = syncDirtyFromBaseline(next)
+    syncDurability(summary)
+  }, [deleting, syncDirtyFromBaseline, syncDurability])
 
   const moveSpine = useCallback(
     (path: string, delta: -1 | 1) => {
@@ -802,11 +808,10 @@ export function Editor({ bookId }: { bookId: string }) {
       texts.current = nextTexts
       bookRef.current = next
       setBook(next)
-      setDirty((dirty) => new Set(dirty).add(opfPath))
-      scheduleDraft()
-      autosave.current?.touch()
+      const summary = syncDirtyFromBaseline(next)
+      syncDurability(summary)
     },
-    [scheduleDraft],
+    [syncDirtyFromBaseline, syncDurability],
   )
 
   const navigateTo = useCallback(
@@ -866,42 +871,37 @@ export function Editor({ bookId }: { bookId: string }) {
       if (updates.size === 0) return
 
       // Record per-path before/after snapshots (up to 50 steps) so TOC edits and auto-injected
-      // heading ids undo atomically without resetting unrelated chapter dirty flags.
+      // heading ids undo atomically; dirty flags derive from the saved baseline.
       // See ADR 2026-11-20-toc-workbench-enhancements.
       const beforeTexts = new Map<string, string | undefined>()
       const afterTexts = new Map<string, string | undefined>()
-      const beforeDirty = new Set<string>(dirtyRef.current)
-      const afterDirty = new Set<string>(dirtyRef.current)
       let activeModified = false
 
       for (const [filePath, nextXml] of updates) {
         beforeTexts.set(filePath, texts.current.get(filePath))
         afterTexts.set(filePath, nextXml)
         texts.current.set(filePath, nextXml)
-        afterDirty.add(filePath)
         if (filePath === activeRef.current) activeModified = true
         for (const listener of textListeners.current) listener(filePath, nextXml)
       }
 
-      tocUndoStack.current.push({ beforeTexts, beforeDirty, afterTexts, afterDirty })
+      tocUndoStack.current.push({ beforeTexts, afterTexts })
       if (tocUndoStack.current.length > 50) tocUndoStack.current.shift()
       tocRedoStack.current = []
       syncTocHistoryFlags()
 
-      dirtyRef.current = afterDirty
-      setDirty(afterDirty)
       setRevision((rev) => rev + 1)
       if (activeModified || (extraChapters && extraChapters.size > 0)) {
         setExternalResetVersion((v) => v + 1)
       }
-      scheduleDraft()
-      autosave.current?.touch()
+      const summary = syncDirtyFromBaseline()
+      syncDurability(summary)
     },
-    [scheduleDraft, syncTocHistoryFlags],
+    [syncDirtyFromBaseline, syncDurability, syncTocHistoryFlags],
   )
 
   const restoreTocSnapshot = useCallback(
-    (snapshotTexts: Map<string, string | undefined>, snapshotDirty: Set<string>) => {
+    (snapshotTexts: Map<string, string | undefined>) => {
       let touchedOpen = false
       for (const [filePath, value] of snapshotTexts) {
         if (value === undefined) texts.current.delete(filePath)
@@ -911,26 +911,19 @@ export function Editor({ bookId }: { bookId: string }) {
           for (const listener of textListeners.current) listener(filePath, value)
         }
       }
-      const nextDirty = new Set<string>(dirtyRef.current)
-      for (const filePath of snapshotTexts.keys()) {
-        if (snapshotDirty.has(filePath)) nextDirty.add(filePath)
-        else nextDirty.delete(filePath)
-      }
-      dirtyRef.current = nextDirty
-      setDirty(nextDirty)
       setRevision((rev) => rev + 1)
       if (touchedOpen) setExternalResetVersion((v) => v + 1)
-      scheduleDraft()
-      autosave.current?.touch()
+      const summary = syncDirtyFromBaseline()
+      syncDurability(summary)
     },
-    [scheduleDraft],
+    [syncDirtyFromBaseline, syncDurability],
   )
 
   const undoToc = useCallback(() => {
     const entry = tocUndoStack.current.pop()
     if (!entry) return
     tocRedoStack.current.push(entry)
-    restoreTocSnapshot(entry.beforeTexts, entry.beforeDirty)
+    restoreTocSnapshot(entry.beforeTexts)
     syncTocHistoryFlags()
   }, [restoreTocSnapshot, syncTocHistoryFlags])
 
@@ -938,7 +931,7 @@ export function Editor({ bookId }: { bookId: string }) {
     const entry = tocRedoStack.current.pop()
     if (!entry) return
     tocUndoStack.current.push(entry)
-    restoreTocSnapshot(entry.afterTexts, entry.afterDirty)
+    restoreTocSnapshot(entry.afterTexts)
     syncTocHistoryFlags()
   }, [restoreTocSnapshot, syncTocHistoryFlags])
 
@@ -967,18 +960,15 @@ export function Editor({ bookId }: { bookId: string }) {
       texts.current = nextTexts
       bookRef.current = next
       setBook(next)
-      const nextDirty = new Set(dirtyRef.current).add(current.pkg.opfPath).add(init.tocPath)
-      dirtyRef.current = nextDirty
-      setDirty(nextDirty)
       tocUndoStack.current = []
       tocRedoStack.current = []
       syncTocHistoryFlags()
-      scheduleDraft()
-      autosave.current?.touch()
+      const summary = syncDirtyFromBaseline(next)
+      syncDurability(summary)
     } catch (error) {
       setSaveError(error instanceof Error ? error.message : '无法初始化目录文件')
     }
-  }, [scheduleDraft, syncTocHistoryFlags])
+  }, [syncDirtyFromBaseline, syncDurability, syncTocHistoryFlags])
 
   const navigateTocHref = useCallback(
     (href: string) => {
@@ -1000,6 +990,7 @@ export function Editor({ bookId }: { bookId: string }) {
       const previousTabs = tabs
       const previousActive = active
       texts.current = new Map(loaded.texts)
+      baselineRef.current = createSavedBaseline(loaded.texts, loaded.archive.entries)
       bookRef.current = loaded
       setBook(loaded)
       setDirty(new Set())
@@ -1009,6 +1000,7 @@ export function Editor({ bookId }: { bookId: string }) {
       setTocHistoryState({ canUndo: false, canRedo: false })
       setActiveTocHref(null)
       setExternalResetVersion((v) => v + 1)
+      conflictRef.current = false
       setConflict(false)
       setSaveError(null)
       setSaveState('idle')
@@ -1026,52 +1018,83 @@ export function Editor({ bookId }: { bookId: string }) {
   const save = useCallback(
     async (options: { checkpoint?: boolean } = {}) => {
       wysiwygFlushRef.current?.()
-      const activeDirty = dirtyRef.current
+      const currentBook = bookRef.current
       // Conflict is terminal until the user reloads: retrying would only produce the same 409.
-      if (!book || activeDirty.size === 0 || saving || conflict) return
+      if (!currentBook || savingRef.current || conflictRef.current) return
+      const summary = syncDirtyFromBaseline(currentBook)
+      if (summary.all.size === 0) return
+      savingRef.current = true
       setSaving(true)
       setSaveState('saving')
       setSaveError(null)
       try {
-        // `dcterms:modified` tracks the package document, not every keystroke: refreshing it on each
-        // save would make an unchanged book a new revision and fill the snapshot cap with noise.
-        // See ADR 2026-11-19-opf-meta-editing.
-        if (activeDirty.has(book.pkg.opfPath)) {
-          const opfText = texts.current.get(book.pkg.opfPath)
+        // `dcterms:modified` tracks the package document itself, not every keystroke or binary-only
+        // swap: refresh it only when the OPF text actually differs from the saved baseline.
+        // See ADR 2026-11-19-opf-meta-editing and ADR 2026-11-20-baseline-derived-dirty-state.
+        const opfPath = currentBook.pkg.opfPath
+        const uploadedTexts = new Map(texts.current)
+        if (summary.texts.has(opfPath)) {
+          const opfText = uploadedTexts.get(opfPath)
           if (opfText !== undefined) {
             const touched = touchOpfModified(
               opfText,
               new Date().toISOString().replace(/\.\d{3}Z$/, 'Z'),
               browserXmlCodec,
             )
-            if (touched !== opfText) texts.current.set(book.pkg.opfPath, touched)
+            if (touched !== opfText) {
+              uploadedTexts.set(opfPath, touched)
+              texts.current.set(opfPath, touched)
+              for (const listener of textListeners.current) listener(opfPath, touched)
+            }
           }
         }
 
-        const currentBook = bookRef.current ?? book
-        const delta = buildEntryDelta({ book: currentBook, texts: texts.current, dirty: activeDirty })
+        const delta = buildEntryDelta({ book: currentBook, texts: uploadedTexts, dirty: summary.texts })
         if (!delta.hasChanges) {
-          dirtyRef.current = new Set()
-          setDirty(new Set())
+          syncDirtyFromBaseline(currentBook)
           setSaveState('idle')
           return
         }
 
         const result = await api.saveEntries(currentBook.id, currentBook.version, delta, options)
-        const next = applySavedEntriesToBook(currentBook, result.version, result.entries, texts.current)
+        const uploadedSavedBook = applySavedEntriesToBook(currentBook, result.version, result.entries, uploadedTexts)
+
+        // Advance the saved baseline only to the exact snapshot uploaded above, then recompute
+        // dirty against the live workspace so edits typed while the save was in flight survive.
+        // See ADR 2026-11-20-baseline-derived-dirty-state and ADR 2026-11-20-entry-level-book-storage.
+        baselineRef.current = createSavedBaseline(uploadedTexts, uploadedSavedBook.archive.entries)
+
+        const latestBook = bookRef.current ?? currentBook
+        const next: LoadedBook =
+          latestBook === currentBook
+            ? uploadedSavedBook
+            : {
+                ...latestBook,
+                version: result.version,
+                serverPaths: uploadedSavedBook.serverPaths,
+                serverEntries: uploadedSavedBook.serverEntries,
+              }
         bookRef.current = next
         setBook(next)
-        dirtyRef.current = new Set()
-        setDirty(new Set())
         agentUndoRef.current = null
         setAgentUndoMessageId(null)
+
+        const remaining = syncDirtyFromBaseline(next)
         setSaveState('saved')
         setSavedAt(Date.now())
         setServerIssues([])
-        if (draftTimer.current) clearTimeout(draftTimer.current)
-        void clearDraft(book.id)
+        if (remaining.texts.size === 0) {
+          if (draftTimer.current) {
+            clearTimeout(draftTimer.current)
+            draftTimer.current = null
+          }
+          void clearDraft(currentBook.id)
+        } else {
+          scheduleDraft()
+        }
       } catch (error) {
         if (error instanceof ApiError && error.status === 409) {
+          conflictRef.current = true
           setConflict(true)
           setSaveState('idle')
         } else {
@@ -1086,10 +1109,11 @@ export function Editor({ bookId }: { bookId: string }) {
           }
         }
       } finally {
+        savingRef.current = false
         setSaving(false)
       }
     },
-    [book, dirty, saving, conflict],
+    [scheduleDraft, syncDirtyFromBaseline],
   )
 
   const replaceAsset = useCallback(
@@ -1134,23 +1158,25 @@ export function Editor({ bookId }: { bookId: string }) {
         const next = { ...current, archive, groups: groupFiles(current.pkg, archive), entryMeta, localBinaries }
         bookRef.current = next
         setBook(next)
-        setDirty((dirty) => new Set(dirty).add(nextOpf !== opf ? opfPath : path))
-        scheduleDraft()
-        autosave.current?.touch()
+        const summary = syncDirtyFromBaseline(next)
+        syncDurability(summary)
       })
     },
-    [scheduleDraft],
+    [syncDirtyFromBaseline, syncDurability],
   )
 
   const importAsset = useCallback(
     async (file: File) => {
-      if (!book) return
+      const current = bookRef.current
+      if (!current) return
       const bytes = new Uint8Array(await file.arrayBuffer())
-      const baseDir = dirname(book.pkg.opfPath)
+      const latest = bookRef.current
+      if (!latest) return
+      const baseDir = dirname(latest.pkg.opfPath)
       const safeName = file.name.replace(/[^\w.\-]+/g, '_')
       let target = `${baseDir}/media/${safeName}`
       let counter = 1
-      while (book.archive.entries.has(target)) {
+      while (latest.archive.entries.has(target)) {
         target = `${baseDir}/media/${counter}_${safeName}`
         counter += 1
       }
@@ -1158,16 +1184,15 @@ export function Editor({ bookId }: { bookId: string }) {
       const id = href.replace(/[/.\-]+/g, '_')
 
       const mediaType = file.type || mediaTypeFromExtension(target)
-      const opf = texts.current.get(book.pkg.opfPath) ?? ''
+      const opf = texts.current.get(latest.pkg.opfPath) ?? ''
       const nextOpf = addManifestItem(opf, { id, href, mediaType }, browserXmlCodec)
-      texts.current.set(book.pkg.opfPath, nextOpf)
-      setDirty((current) => new Set(current).add(book.pkg.opfPath).add(target))
+      texts.current.set(latest.pkg.opfPath, nextOpf)
 
-      const entries = new Map(book.archive.entries)
+      const entries = new Map(latest.archive.entries)
       entries.set(target, bytes)
-      const order = book.archive.order.includes(target) ? book.archive.order : [...book.archive.order, target]
+      const order = latest.archive.order.includes(target) ? latest.archive.order : [...latest.archive.order, target]
       const archive = { order, entries }
-      const entryMeta = new Map(book.entryMeta)
+      const entryMeta = new Map(latest.entryMeta)
       entryMeta.set(target, {
         path: target,
         isText: false,
@@ -1175,21 +1200,17 @@ export function Editor({ bookId }: { bookId: string }) {
         byteSize: bytes.byteLength,
         sha256: null,
       })
-      const localBinaries = new Map(book.localBinaries)
+      const localBinaries = new Map(latest.localBinaries)
       localBinaries.set(target, { bytes, mediaType })
-      const next = { ...book, archive, groups: groupFiles(book.pkg, archive), entryMeta, localBinaries }
+      const next = { ...latest, archive, groups: groupFiles(latest.pkg, archive), entryMeta, localBinaries }
       bookRef.current = next
       setBook(next)
-      scheduleDraft()
-      autosave.current?.touch()
+      const summary = syncDirtyFromBaseline(next)
+      syncDurability(summary)
       // Binary entries are not editable, so they stay out of the tab strip.
     },
-    [book],
+    [syncDirtyFromBaseline, syncDurability],
   )
-
-  useEffect(() => {
-    dirtyRef.current = dirty
-  }, [dirty])
 
   useEffect(() => {
     saveRef.current = save
@@ -1377,13 +1398,11 @@ export function Editor({ bookId }: { bookId: string }) {
   const applyDraft = () => {
     if (!draftPrompt) return
     for (const [path, text] of draftPrompt.files) texts.current.set(path, text)
-    const nextDirty = new Set(draftPrompt.files.map(([path]) => path))
-    dirtyRef.current = nextDirty
-    setDirty(nextDirty)
     setExternalResetVersion((v) => v + 1)
     setDraftPrompt(null)
     setDraftSavedAt(null)
-    autosave.current?.touch()
+    const summary = syncDirtyFromBaseline()
+    syncDurability(summary)
   }
 
   const discardDraft = () => {
@@ -1786,6 +1805,7 @@ export function Editor({ bookId }: { bookId: string }) {
                 selectionText={selectionText}
                 profiles={agentProfiles}
                 profilesLoading={agentProfilesLoading}
+                defaultApprovalMode={agentUserSettings?.defaultApprovalMode ?? 'review'}
                 undoMessageId={agentUndoMessageId}
                 getOverlay={() => {
                   wysiwygFlushRef.current?.()
@@ -1968,6 +1988,7 @@ export function Editor({ bookId }: { bookId: string }) {
         }}
         initialTab={settingsTab ?? 'general'}
         onAgentProfilesChanged={setAgentProfiles}
+        onAgentSettingsChanged={setAgentUserSettings}
       />
     </div>
   )

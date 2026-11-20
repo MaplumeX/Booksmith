@@ -19,7 +19,7 @@ Status: implemented
 
 ### Storage model & lossless migration
 
-- 新增 `book_entries` 表（迁移 `apps/server/drizzle/0007_narrow_whiplash.sql`）作为书籍当前态的唯一真相源：`(book_id, path)` 联合主键，含 `position`（保留 zip 原始顺序，索引 `(book_id, position)`）、`is_text`、`media_type`、`bytes bytea`、`byte_size`、`sha256`、`updated_at`。
+- 新增 `book_entries` 表（迁移 `apps/server/drizzle/0008_wooden_magik.sql`）作为书籍当前态的唯一真相源：`(book_id, path)` 联合主键，含 `position`（保留 zip 原始顺序，索引 `(book_id, position)`）、`is_text`、`media_type`、`bytes bytea`、`byte_size`、`sha256`、`updated_at`。
 - `books.byte_size` 记录全部条目字节总和；`books.sha256` 记录按路径排序后的规范化条目摘要哈希（`computeManifestSha256`），无需打包即可判定空保存。
 - 下线并移除 `book_files` 表。迁移由统一入口 [apps/server/src/db/migrate.ts](../../../../apps/server/src/db/migrate.ts)（`runMigrations`）顺序执行：SQL 建 `book_entries` → 幂等 `backfillBookEntries` 用 `openEpub` 将存量 `book_files` 逐本事务拆入 `book_entries`（任一旧书解包失败即抛错中止，绝不删表）→ 确认无剩余未迁移行后执行 `DROP TABLE IF EXISTS "book_files"`。大书写入按 50 条分批插入。
 

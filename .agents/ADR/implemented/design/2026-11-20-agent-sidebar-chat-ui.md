@@ -80,3 +80,4 @@ Status: implemented
 **后续演进（2026-11-20）**
 
 - 右侧 5-Tab「预览/结构」侧栏已由 [the Soft Craft Studio UI decision](2026-11-20-soft-craft-studio-ui.md) 彻底拆解移除（目录并入左栏、查找/元数据/检查迁为顶栏唤起的 Dialog 与 Popover、实时预览并入主画布右侧仿真书页），使本文档定义的 `AgentPanel` 成为右侧唯一按需展开的独立悬浮侧栏；`--accent`、`--accent-fg-muted` 与 `--bubble-radius`（`14px`）随新色板同步更新。
+- 对话输入卡底栏已由 [Agent approval modes, multi-model providers, preferences, reasoning & retry](../feature/2026-11-20-agent-modes-and-multimodel.md) 扩展为审批模式与供应商分组多模型双紧凑胶囊，并在消息流中增量加入了默认折叠的 `ReasoningBlock` 思考过程卡、自动应用/降级状态提示与末条助手重试操作。

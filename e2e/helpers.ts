@@ -2,7 +2,7 @@ import { expect, request as playwrightRequest, test, type Page } from '@playwrig
 import { readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 
-export const API = process.env.BOOKSMITH_API ?? 'http://127.0.0.1:8787'
+export const API = process.env.E2E_API ?? process.env.BOOKSMITH_API ?? 'http://127.0.0.1:8787'
 export const E2E_EMAIL = 'e2e@booksmith.local'
 export const E2E_PASSWORD = 'e2e-password-2026'
 export const FIXTURE = fileURLToPath(new URL('../fixtures/马克思经济学与数理分析.epub', import.meta.url))

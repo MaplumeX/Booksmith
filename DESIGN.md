@@ -59,7 +59,7 @@
 | `SearchBar` | `src/ui/SearchBar.tsx` | 圆角胶囊搜索框；default / focus-within / Lucide 搜索图标 |
 | `VersionHistory` | `src/ui/VersionHistory.tsx` | Radix Dialog (`wide`) / 时间轴 + diff / empty / loading / error / 置顶（Pin 图标）/ 恢复确认 |
 | `StatusBar` | `src/ui/StatusBar.tsx` | 内嵌于中央文档白卡底部；路径图标 / 字数（等宽数字）/ 未修改或 N 个文件未保存 |
-| `BookCard` | `src/ui/BookCard.tsx` | 藏书架画廊漫射白卡（`--radius-lg` + 书脊折痕高光）/ hover 抬升与下载胶囊显现 / 键盘 focus-within 可见 |
+| `BookCard` | `src/ui/BookCard.tsx` | 藏书架画廊漫射白卡（`--radius-lg` + 书脊折痕高光）/ hover 抬升与下载·删除浮标显现 / 键盘 focus-within 可见 / 接入 `ContextMenu` 与删除确认弹窗 |
 | `EmptyState` | `src/ui/EmptyState.tsx` | 漫射圆角白卡（`40ch`）+ 强调色图标徽章 + 标题 + 说明 + 主操作 |
 | `Login` | `src/routes/Login.tsx` | default（`420px` 居中漫射扉页卡）/ error（带图标横幅）/ pending |
 

@@ -47,6 +47,43 @@ test('shows a search empty state and can clear it', async ({ page }) => {
   await expect(page.getByPlaceholder('搜索书名或作者')).toHaveValue('')
 })
 
+test('deletes a book after confirmation and keeps it on cancel', async ({ page }) => {
+  await login(page)
+  await expectLoggedIn(page)
+
+  if (await page.getByText('书库还是空的').isVisible()) {
+    await page.setInputFiles('[data-testid=upload-input]', FIXTURE)
+    await expect(page.getByText(BOOK_TITLE)).toBeVisible()
+  }
+
+  const card = page.locator('.book-card-wrap').first()
+  await card.hover()
+  await card.getByRole('button', { name: '删除' }).click()
+
+  const dialog = page.getByRole('dialog', { name: '删除书籍' })
+  await expect(dialog).toBeVisible()
+  await expect(dialog).toContainText(BOOK_TITLE)
+
+  // Cancelling leaves the book untouched.
+  await dialog.getByRole('button', { name: '取消' }).click()
+  await expect(dialog).toBeHidden()
+  await expect(page.getByText(BOOK_TITLE)).toBeVisible()
+
+  // Deleting via right-click menu and confirming removes it persistently.
+  await card.click({ button: 'right' })
+  await page.getByRole('menuitem', { name: '删除书籍' }).click()
+  await expect(dialog).toBeVisible()
+  await dialog.getByRole('button', { name: '删除' }).click()
+
+  await expect(dialog).toBeHidden()
+  await expect(page.getByText('书库还是空的')).toBeVisible()
+  await expect(page.getByText('0 本')).toBeVisible()
+
+  await page.reload()
+  await expectLoggedIn(page)
+  await expect(page.getByText('书库还是空的')).toBeVisible()
+})
+
 test('logs out back to the login screen', async ({ page }) => {
   await login(page)
   await expectLoggedIn(page)

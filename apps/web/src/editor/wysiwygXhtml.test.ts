@@ -179,4 +179,13 @@ describe('wysiwygXhtml', () => {
     expect(nextXhtml).not.toContain('mutated-should-be-ignored')
     expect(nextXhtml).not.toContain('should-drop')
   })
+
+  it('preserves CRLF line endings when splicing edited body into a CRLF chapter', () => {
+    const crlfXhtml = SAMPLE_XHTML.replace(/\n/g, '\r\n')
+    const serializedBody = '<body epub:type="bodymatter">\n<p>修改后的正文</p>\n</body>'
+    const nextXhtml = replaceBodyInXhtml(crlfXhtml, serializedBody)
+
+    expect(nextXhtml).toContain('<body epub:type="bodymatter">\r\n<p>修改后的正文</p>\r\n</body>')
+    expect(nextXhtml.replace(/\r\n/g, '')).not.toContain('\n')
+  })
 })

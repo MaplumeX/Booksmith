@@ -9,12 +9,14 @@ import { EmptyState } from '../ui/EmptyState'
 import { SearchBar } from '../ui/SearchBar'
 import { SettingsDialog } from '../ui/SettingsDialog'
 import { navigate } from '../router'
+import { clearDraft } from '../state/draftStore'
 
-function messageFor(error: unknown): string {
+function messageFor(error: unknown, action = '操作失败'): string {
   if (error instanceof ApiError) {
     if (error.code === 'invalid_epub') return '这个文件不是有效的 EPUB，检查后重试'
     if (error.code === 'unauthenticated') return '登录已过期，请重新登录'
-    return `导入失败（${error.code}）`
+    if (error.code === 'not_found') return '这本书不存在或已被删除'
+    return `${action}（${error.code}）`
   }
   return '网络异常，请稍后重试'
 }
@@ -30,6 +32,9 @@ export function Library({ user, onLogout }: { user: UserDto; onLogout: () => voi
   const [newTitle, setNewTitle] = useState('')
   const [newAuthor, setNewAuthor] = useState('')
   const [creatingPending, setCreatingPending] = useState(false)
+  const [deletingBook, setDeletingBook] = useState<BookDto | null>(null)
+  const [deletingPending, setDeletingPending] = useState(false)
+  const [deleteError, setDeleteError] = useState<string | null>(null)
   const [settingsOpen, setSettingsOpen] = useState(false)
   const fileInput = useRef<HTMLInputElement>(null)
 
@@ -40,7 +45,7 @@ export function Library({ user, onLogout }: { user: UserDto; onLogout: () => voi
       const result = await api.books()
       setBooks(result.books)
     } catch (cause) {
-      setError(messageFor(cause))
+      setError(messageFor(cause, '加载书库失败'))
     } finally {
       setLoading(false)
     }
@@ -57,7 +62,7 @@ export function Library({ user, onLogout }: { user: UserDto; onLogout: () => voi
       const { book } = await api.upload(file)
       setBooks((current) => [book, ...current])
     } catch (cause) {
-      setError(messageFor(cause))
+      setError(messageFor(cause, '导入失败'))
     } finally {
       setUploading(false)
       if (fileInput.current) fileInput.current.value = ''
@@ -79,9 +84,37 @@ export function Library({ user, onLogout }: { user: UserDto; onLogout: () => voi
       setNewAuthor('')
       navigate(`/books/${book.id}`)
     } catch (cause) {
-      setError(messageFor(cause))
+      setError(messageFor(cause, '创建失败'))
     } finally {
       setCreatingPending(false)
+    }
+  }
+
+  function requestDelete(book: BookDto) {
+    setDeleteError(null)
+    setDeletingBook(book)
+  }
+
+  async function confirmDelete() {
+    if (!deletingBook || deletingPending) return
+    const target = deletingBook
+    setDeletingPending(true)
+    setDeleteError(null)
+    try {
+      await api.deleteBook(target.id)
+      void clearDraft(target.id)
+      setBooks((current) => current.filter((item) => item.id !== target.id))
+      setDeletingBook(null)
+    } catch (cause) {
+      if (cause instanceof ApiError && cause.code === 'not_found') {
+        void clearDraft(target.id)
+        setBooks((current) => current.filter((item) => item.id !== target.id))
+        setDeletingBook(null)
+        return
+      }
+      setDeleteError(messageFor(cause, '删除失败'))
+    } finally {
+      setDeletingPending(false)
     }
   }
 
@@ -218,7 +251,12 @@ export function Library({ user, onLogout }: { user: UserDto; onLogout: () => voi
         ) : (
           <div className="book-grid">
             {filtered.map((book) => (
-              <BookCard key={book.id} book={book} onOpen={(id) => navigate(`/books/${id}`)} />
+              <BookCard
+                key={book.id}
+                book={book}
+                onOpen={(id) => navigate(`/books/${id}`)}
+                onDelete={requestDelete}
+              />
             ))}
           </div>
         )}
@@ -258,6 +296,49 @@ export function Library({ user, onLogout }: { user: UserDto; onLogout: () => voi
           <span>作者（可留空）</span>
           <input type="text" value={newAuthor} onChange={(event) => setNewAuthor(event.target.value)} />
         </label>
+      </Dialog>
+
+      <Dialog
+        open={Boolean(deletingBook)}
+        onOpenChange={(open) => {
+          if (!open && !deletingPending) {
+            setDeletingBook(null)
+            setDeleteError(null)
+          }
+        }}
+        ariaLabel="删除书籍"
+        title={deletingBook ? `删除《${deletingBook.title}》` : ''}
+        description="删除后这本书的 EPUB 文件、历史快照和 AI 对话记录都会一并移除，且无法恢复。"
+        footer={
+          <>
+            <Button
+              variant="ghost"
+              type="button"
+              disabled={deletingPending}
+              onClick={() => {
+                setDeletingBook(null)
+                setDeleteError(null)
+              }}
+            >
+              取消
+            </Button>
+            <Button
+              variant="danger"
+              type="button"
+              disabled={deletingPending}
+              onClick={() => void confirmDelete()}
+            >
+              {deletingPending ? '删除中…' : '删除'}
+            </Button>
+          </>
+        }
+      >
+        {deleteError ? (
+          <p className="banner banner-error" role="alert">
+            <AlertCircle size={14} strokeWidth={1.75} aria-hidden="true" />
+            <span>{deleteError}</span>
+          </p>
+        ) : null}
       </Dialog>
 
       <SettingsDialog open={settingsOpen} onOpenChange={setSettingsOpen} />

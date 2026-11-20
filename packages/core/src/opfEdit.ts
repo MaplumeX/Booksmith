@@ -52,6 +52,10 @@ export function setManifestMediaType(
   const doc = codec.parse(xml)
   const matches = manifestItems(doc).filter((item) => pathOf(item, baseDir) === path)
   if (matches.length === 0) throw new Error(`manifest has no entry for ${path}`)
+  // Skip re-serializing when the media-type already matches so replacing a binary asset does not
+  // introduce XML serializer formatting noise and spuriously dirty OPF.
+  // See ADR 2026-11-20-baseline-derived-dirty-state.
+  if (matches.every((item) => item.getAttribute('media-type') === mediaType)) return xml
   for (const item of matches) item.setAttribute('media-type', mediaType)
   return codec.serialize(doc)
 }

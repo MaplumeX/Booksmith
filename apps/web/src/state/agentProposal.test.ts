@@ -5,6 +5,7 @@ import {
   collectDirtyTexts,
   computeDeletedPaths,
   createUndoSnapshot,
+  evaluateAutoApply,
   type WorkspaceSnapshot,
 } from './agentProposal'
 import { groupFiles, type LoadedBook } from './bookStore'
@@ -232,5 +233,49 @@ describe('agentProposal application & undo', () => {
         parseXml: stubOpfParser,
       }),
     ).toThrow('结构预检')
+  })
+
+  it('evaluates auto-apply eligibility cleanly across text, structural, preflight error, and broken-delete cases', () => {
+    expect(
+      evaluateAutoApply({
+        id: 'p-text',
+        isStructural: false,
+        validationIssues: [],
+        files: [{ path: 'EPUB/text/ch001.xhtml', kind: 'update', afterText: '<html/>' }],
+      }),
+    ).toEqual({ eligible: true })
+
+    expect(
+      evaluateAutoApply({
+        id: 'p-create',
+        isStructural: true,
+        validationIssues: [],
+        files: [{ path: 'EPUB/text/ch002.xhtml', kind: 'create', afterText: '<html/>' }],
+      }),
+    ).toEqual({ eligible: true })
+
+    const preflightFail = evaluateAutoApply({
+      id: 'p-err',
+      isStructural: true,
+      validationIssues: [{ code: 'missing-file', message: 'missing target' }],
+      files: [{ path: 'EPUB/content.opf', kind: 'update', afterText: '<package/>' }],
+    })
+    expect(preflightFail.eligible).toBe(false)
+    expect(preflightFail.reason).toContain('结构预检')
+
+    const brokenDelete = evaluateAutoApply({
+      id: 'p-del',
+      isStructural: true,
+      validationIssues: [],
+      files: [
+        {
+          path: 'EPUB/text/extra.xhtml',
+          kind: 'delete',
+          referencesAffected: [{ from: 'EPUB/text/ch001.xhtml', line: 12 }],
+        },
+      ],
+    })
+    expect(brokenDelete.eligible).toBe(false)
+    expect(brokenDelete.reason).toContain('外部引用失效')
   })
 })

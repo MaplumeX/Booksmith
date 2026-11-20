@@ -90,8 +90,8 @@ export const pageVersions = pgTable(
   (table) => [index('page_versions_book_path_idx').on(table.bookId, table.path, table.createdAt)],
 )
 
-/** Per-user LLM provider presets with AES-256-GCM encrypted API keys.
- * See ADR 2026-11-20-builtin-epub-agent. */
+/** Per-user LLM provider presets with AES-256-GCM encrypted API keys and optional multi-model list.
+ * See ADR 2026-11-20-builtin-epub-agent, ADR 2026-11-20-agent-modes-and-multimodel. */
 export const agentProfiles = pgTable(
   'agent_profiles',
   {
@@ -103,6 +103,7 @@ export const agentProfiles = pgTable(
     provider: text('provider').notNull(),
     baseUrl: text('base_url').notNull(),
     model: text('model').notNull(),
+    modelsJson: text('models_json'),
     apiKeyCiphertext: text('api_key_ciphertext'),
     apiKeyLast4: text('api_key_last4'),
     isDefault: boolean('is_default').notNull().default(false),
@@ -111,6 +112,18 @@ export const agentProfiles = pgTable(
   },
   (table) => [index('agent_profiles_user_id_idx').on(table.userId)],
 )
+
+/** Per-user cloud-synced Agent runtime preferences (approval default, step cap, custom prompt).
+ * See ADR 2026-11-20-agent-modes-and-multimodel. */
+export const agentUserSettings = pgTable('agent_user_settings', {
+  userId: uuid('user_id')
+    .primaryKey()
+    .references(() => users.id, { onDelete: 'cascade' }),
+  defaultApprovalMode: text('default_approval_mode').notNull().default('review'),
+  maxSteps: integer('max_steps').notNull().default(15),
+  customInstructions: text('custom_instructions').notNull().default(''),
+  updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+})
 
 /** Per-book Agent conversation threads, persisted across reloads and devices. */
 export const agentThreads = pgTable(
@@ -125,13 +138,15 @@ export const agentThreads = pgTable(
       .references(() => users.id, { onDelete: 'cascade' }),
     title: text('title').notNull().default('新对话'),
     profileId: uuid('profile_id').references(() => agentProfiles.id, { onDelete: 'set null' }),
+    model: text('model'),
+    approvalMode: text('approval_mode').notNull().default('review'),
     createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
   },
   (table) => [index('agent_threads_book_user_updated_idx').on(table.bookId, table.userId, table.updatedAt)],
 )
 
-/** Individual user/assistant turns within an Agent thread, including tool summaries and proposals. */
+/** Individual user/assistant turns within an Agent thread, including reasoning traces, tool summaries, and proposals. */
 export const agentMessages = pgTable(
   'agent_messages',
   {
@@ -141,6 +156,7 @@ export const agentMessages = pgTable(
       .references(() => agentThreads.id, { onDelete: 'cascade' }),
     role: text('role').notNull(),
     content: text('content').notNull().default(''),
+    reasoning: text('reasoning'),
     contextJson: text('context_json'),
     toolCallsJson: text('tool_calls_json'),
     proposalJson: text('proposal_json'),
@@ -157,5 +173,6 @@ export type Book = typeof books.$inferSelect
 export type BookEntry = typeof bookEntries.$inferSelect
 export type PageVersion = typeof pageVersions.$inferSelect
 export type AgentProfile = typeof agentProfiles.$inferSelect
+export type AgentUserSetting = typeof agentUserSettings.$inferSelect
 export type AgentThread = typeof agentThreads.$inferSelect
 export type AgentMessage = typeof agentMessages.$inferSelect

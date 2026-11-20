@@ -3,8 +3,8 @@ import { createServer, type IncomingMessage, type ServerResponse } from 'node:ht
 import { createEmptyEpub, openEpub, zipArchive } from '@booksmith/core'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import { nodeXmlCodec } from '../src/agent/nodeXmlCodec'
-import { testProfileConnection, validateBaseUrl } from '../src/agent/providers'
-import { runAgentTurn, trimHistory, type AgentStreamEvent } from '../src/agent/runner'
+import { fetchProviderModels, testProfileConnection, validateBaseUrl } from '../src/agent/providers'
+import { normalizeMaxToolSteps, runAgentTurn, trimHistory, type AgentStreamEvent } from '../src/agent/runner'
 import { ingestEpub, nodeXmlParser } from '../src/epub/ingest'
 
 function readBody(req: IncomingMessage): Promise<string> {
@@ -38,6 +38,7 @@ describe('agent providers & runner with local mock LLM servers', () => {
   let server: ReturnType<typeof createServer>
   let openAiStep = 0
   let anthropicStep = 0
+  let lastAskRequest: Record<string, unknown> | null = null
 
   beforeAll(async () => {
     server = createServer(async (req, res) => {
@@ -54,6 +55,130 @@ describe('agent providers & runner with local mock LLM servers', () => {
       if (url.pathname.startsWith('/rate-limit')) {
         res.writeHead(429, { 'content-type': 'application/json' })
         res.end(JSON.stringify({ error: { message: 'too many requests' } }))
+        return
+      }
+
+      // Provider model listing endpoints (OpenAI-compatible, Ollama fallback, Anthropic)
+      if (url.pathname === '/openai/v1/models' && req.method === 'GET') {
+        res.writeHead(200, { 'content-type': 'application/json' })
+        res.end(
+          JSON.stringify({
+            object: 'list',
+            data: [{ id: 'gpt-4.1-mini' }, { id: 'gpt-4.1' }, { id: 'gpt-4.1' }],
+          }),
+        )
+        return
+      }
+      if (url.pathname === '/ollama/v1/models' && req.method === 'GET') {
+        res.writeHead(200, { 'content-type': 'application/json' })
+        res.end(JSON.stringify({ models: [{ name: 'qwen2.5:14b' }, { name: 'deepseek-r1:8b' }] }))
+        return
+      }
+      if (url.pathname === '/anthropic/v1/models' && req.method === 'GET') {
+        if (req.headers['x-api-key'] !== 'sk-ant-mock') {
+          res.writeHead(401, { 'content-type': 'application/json' })
+          res.end(JSON.stringify({ error: { message: 'invalid x-api-key' } }))
+          return
+        }
+        res.writeHead(200, { 'content-type': 'application/json' })
+        res.end(
+          JSON.stringify({
+            data: [{ id: 'claude-sonnet-4-20250514' }, { id: 'claude-opus-4-20250514' }],
+          }),
+        )
+        return
+      }
+
+      // OpenAI-compatible reasoning stream endpoint (DeepSeek-R1 / reasoning_content)
+      if (url.pathname === '/openai-reasoning/v1/chat/completions') {
+        writeOpenAiSse(res, [
+          {
+            id: 'r1',
+            object: 'chat.completion.chunk',
+            created: 1,
+            model: 'deepseek-reasoner',
+            choices: [{ index: 0, delta: { role: 'assistant', reasoning_content: '先核对段落结构，' }, finish_reason: null }],
+          },
+          {
+            id: 'r1',
+            object: 'chat.completion.chunk',
+            created: 1,
+            model: 'deepseek-reasoner',
+            choices: [{ index: 0, delta: { reasoning_content: '再确认标点规范。' }, finish_reason: null }],
+          },
+          {
+            id: 'r1',
+            object: 'chat.completion.chunk',
+            created: 1,
+            model: 'deepseek-reasoner',
+            choices: [{ index: 0, delta: { content: '正文标点无误。' }, finish_reason: 'stop' }],
+          },
+        ])
+        return
+      }
+
+      // Anthropic thinking stream endpoint
+      if (url.pathname === '/anthropic-thinking/v1/messages') {
+        writeAnthropicSse(res, [
+          {
+            event: 'message_start',
+            data: {
+              type: 'message_start',
+              message: {
+                id: 'msg_think',
+                type: 'message',
+                role: 'assistant',
+                model: 'claude-sonnet-4-20250514',
+                content: [],
+                stop_reason: null,
+                stop_sequence: null,
+                usage: { input_tokens: 10, output_tokens: 1 },
+              },
+            },
+          },
+          {
+            event: 'content_block_start',
+            data: { type: 'content_block_start', index: 0, content_block: { type: 'thinking', thinking: '' } },
+          },
+          {
+            event: 'content_block_delta',
+            data: { type: 'content_block_delta', index: 0, delta: { type: 'thinking_delta', thinking: '分析目录层级。' } },
+          },
+          { event: 'content_block_stop', data: { type: 'content_block_stop', index: 0 } },
+          {
+            event: 'content_block_start',
+            data: { type: 'content_block_start', index: 1, content_block: { type: 'text', text: '' } },
+          },
+          {
+            event: 'content_block_delta',
+            data: { type: 'content_block_delta', index: 1, delta: { type: 'text_delta', text: '目录层级清晰。' } },
+          },
+          { event: 'content_block_stop', data: { type: 'content_block_stop', index: 1 } },
+          {
+            event: 'message_delta',
+            data: {
+              type: 'message_delta',
+              delta: { stop_reason: 'end_turn', stop_sequence: null },
+              usage: { output_tokens: 8 },
+            },
+          },
+          { event: 'message_stop', data: { type: 'message_stop' } },
+        ])
+        return
+      }
+
+      // Ask-mode inspection endpoint: captures registered tools & system prompt
+      if (url.pathname === '/ask-check/v1/chat/completions') {
+        lastAskRequest = body
+        writeOpenAiSse(res, [
+          {
+            id: 'ask1',
+            object: 'chat.completion.chunk',
+            created: 1,
+            model: 'mock-ask',
+            choices: [{ index: 0, delta: { role: 'assistant', content: '仅给出只读校对建议。' }, finish_reason: 'stop' }],
+          },
+        ])
         return
       }
 
@@ -481,5 +606,137 @@ describe('agent providers & runner with local mock LLM servers', () => {
     expect(trimmed).toHaveLength(2)
     expect(trimmed[0]!.content).toBe('B'.repeat(100))
     expect(trimmed[1]!.content).toBe('C'.repeat(80))
+  })
+
+  it('fetches provider models for OpenAI-compatible, Ollama fallback, and Anthropic with graceful errors', async () => {
+    const oai = await fetchProviderModels({
+      provider: 'openai-compatible',
+      baseUrl: `${mockUrl}/openai/v1`,
+      apiKey: 'sk-test',
+    })
+    expect(oai.ok).toBe(true)
+    expect(oai.models).toEqual(['gpt-4.1', 'gpt-4.1-mini'])
+
+    const ollama = await fetchProviderModels({
+      provider: 'openai-compatible',
+      baseUrl: `${mockUrl}/ollama/v1`,
+      apiKey: null,
+    })
+    expect(ollama.ok).toBe(true)
+    expect(ollama.models).toEqual(['deepseek-r1:8b', 'qwen2.5:14b'])
+
+    const anth = await fetchProviderModels({
+      provider: 'anthropic',
+      baseUrl: `${mockUrl}/anthropic/v1`,
+      apiKey: 'sk-ant-mock',
+    })
+    expect(anth.ok).toBe(true)
+    expect(anth.models).toEqual(['claude-opus-4-20250514', 'claude-sonnet-4-20250514'])
+
+    const unsupported = await fetchProviderModels({
+      provider: 'openai-compatible',
+      baseUrl: `${mockUrl}/missing`,
+      apiKey: null,
+    })
+    expect(unsupported.ok).toBe(false)
+    expect(unsupported.errorCode).toBe('models_endpoint_unsupported')
+
+    const authErr = await fetchProviderModels({
+      provider: 'anthropic',
+      baseUrl: `${mockUrl}/anthropic/v1`,
+      apiKey: 'wrong-key',
+    })
+    expect(authErr.ok).toBe(false)
+    expect(authErr.errorCode).toBe('auth_failed')
+  })
+
+  it('restricts tools to read-only in ask mode and injects custom instructions + user-defined maxSteps', async () => {
+    expect(normalizeMaxToolSteps(undefined)).toBe(15)
+    expect(normalizeMaxToolSteps(0)).toBe(0)
+    expect(normalizeMaxToolSteps(1)).toBe(1)
+    expect(normalizeMaxToolSteps(120)).toBe(120)
+
+    lastAskRequest = null
+    const { archive } = openEpub(createEmptyEpub({ title: '只读测试书' }), nodeXmlCodec.parse)
+    const result = await runAgentTurn({
+      archive,
+      provider: {
+        provider: 'openai-compatible',
+        baseUrl: `${mockUrl}/ask-check/v1`,
+        model: 'mock-ask',
+        apiKey: null,
+      },
+      history: [],
+      userMessage: '帮我看一下哪里有错字',
+      approvalMode: 'ask',
+      customInstructions: '请保留民国纪年与所有 MathML 公式原貌。',
+      maxSteps: 8,
+    })
+
+    expect(result.error).toBeNull()
+    expect(result.proposal).toBeNull()
+    expect(result.content).toBe('仅给出只读校对建议。')
+
+    const captured = lastAskRequest as Record<string, unknown> | null
+    const tools = (captured?.tools as Array<{ function?: { name?: string } }>) ?? []
+    const toolNames = tools.map((t) => t.function?.name).sort()
+    expect(toolNames).toEqual([
+      'get_metadata',
+      'get_toc',
+      'lint_book',
+      'list_files',
+      'read_file',
+      'scan_headings',
+      'search_book',
+    ])
+
+    const messages = (captured?.messages as Array<{ role: string; content: string }>) ?? []
+    const systemMsg = messages.find((m) => m.role === 'system')?.content ?? ''
+    expect(systemMsg).toContain('只读顾问模式')
+    expect(systemMsg).toContain('请保留民国纪年与所有 MathML 公式原貌。')
+  })
+
+  it('streams reasoning_delta events for both OpenAI-compatible reasoning_content and Anthropic thinking', async () => {
+    const { archive } = openEpub(createEmptyEpub({ title: '思考测试书' }), nodeXmlCodec.parse)
+
+    const oaiEvents: AgentStreamEvent[] = []
+    const oaiResult = await runAgentTurn({
+      archive,
+      provider: {
+        provider: 'openai-compatible',
+        baseUrl: `${mockUrl}/openai-reasoning/v1`,
+        model: 'deepseek-reasoner',
+        apiKey: null,
+      },
+      history: [],
+      userMessage: '检查标点',
+      onEvent: (event) => oaiEvents.push(event),
+    })
+
+    expect(oaiResult.error).toBeNull()
+    expect(oaiResult.reasoning).toBe('先核对段落结构，再确认标点规范。')
+    expect(oaiResult.content).toBe('正文标点无误。')
+    expect(oaiEvents.filter((e) => e.type === 'reasoning_delta').map((e) => e.text).join('')).toBe(
+      '先核对段落结构，再确认标点规范。',
+    )
+
+    const anthEvents: AgentStreamEvent[] = []
+    const anthResult = await runAgentTurn({
+      archive,
+      provider: {
+        provider: 'anthropic',
+        baseUrl: `${mockUrl}/anthropic-thinking/v1`,
+        model: 'claude-sonnet-4-20250514',
+        apiKey: 'sk-ant-mock',
+      },
+      history: [],
+      userMessage: '检查目录',
+      onEvent: (event) => anthEvents.push(event),
+    })
+
+    expect(anthResult.error).toBeNull()
+    expect(anthResult.reasoning).toBe('分析目录层级。')
+    expect(anthResult.content).toBe('目录层级清晰。')
+    expect(anthEvents.some((e) => e.type === 'reasoning_delta')).toBe(true)
   })
 })

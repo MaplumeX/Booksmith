@@ -129,6 +129,137 @@ export interface ConnectionTestResult {
   error?: string
 }
 
+export interface ProviderModelsResult {
+  ok: boolean
+  models: string[]
+  errorCode?: string
+  error?: string
+}
+
+const MAX_FETCHED_MODELS = 500
+
+function extractModelIds(payload: unknown): string[] {
+  if (!payload || typeof payload !== 'object') return []
+  const record = payload as Record<string, unknown>
+  const found = new Set<string>()
+
+  // Standard OpenAI & Anthropic shape: { data: [{ id: "..." }] }
+  if (Array.isArray(record.data)) {
+    for (const item of record.data) {
+      if (item && typeof item === 'object') {
+        const id = (item as Record<string, unknown>).id
+        if (typeof id === 'string' && id.trim()) found.add(id.trim())
+      } else if (typeof item === 'string' && item.trim()) {
+        found.add(item.trim())
+      }
+      if (found.size >= MAX_FETCHED_MODELS) break
+    }
+  }
+
+  // Fallback for native Ollama / proxy shape: { models: [{ name | id | model }] }
+  if (found.size === 0 && Array.isArray(record.models)) {
+    for (const item of record.models) {
+      if (item && typeof item === 'object') {
+        const obj = item as Record<string, unknown>
+        const candidate = obj.id ?? obj.model ?? obj.name
+        if (typeof candidate === 'string' && candidate.trim()) found.add(candidate.trim())
+      } else if (typeof item === 'string' && item.trim()) {
+        found.add(item.trim())
+      }
+      if (found.size >= MAX_FETCHED_MODELS) break
+    }
+  }
+
+  return Array.from(found).sort((a, b) => a.localeCompare(b))
+}
+
+/**
+ * Fetches available model IDs from an OpenAI-compatible or Anthropic provider server-side
+ * so stored encrypted API keys never leave the server and browser CORS is avoided.
+ * See ADR 2026-11-20-agent-modes-and-multimodel.
+ */
+export async function fetchProviderModels(
+  config: Pick<ResolvedProviderConfig, 'provider' | 'baseUrl' | 'apiKey'>,
+  timeoutMs = 10_000,
+): Promise<ProviderModelsResult> {
+  let cleanUrl: string
+  try {
+    cleanUrl = validateBaseUrl(config.baseUrl)
+  } catch (error) {
+    const classified = classifyProviderError(error)
+    return { ok: false, models: [], errorCode: classified.code, error: classified.message }
+  }
+
+  const endpoint =
+    config.provider === 'anthropic'
+      ? `${normalizeAnthropicBaseUrl(cleanUrl)}/models`
+      : `${cleanUrl}/models`
+
+  const headers: Record<string, string> = { accept: 'application/json' }
+  if (config.provider === 'anthropic') {
+    headers['anthropic-version'] = '2023-06-01'
+    if (config.apiKey) headers['x-api-key'] = config.apiKey
+  } else if (config.apiKey) {
+    headers.authorization = `Bearer ${config.apiKey}`
+  }
+
+  try {
+    const response = await fetch(endpoint, {
+      method: 'GET',
+      headers,
+      signal: AbortSignal.timeout(timeoutMs),
+    })
+
+    if (!response.ok) {
+      if (response.status === 401 || response.status === 403) {
+        return {
+          ok: false,
+          models: [],
+          errorCode: 'auth_failed',
+          error: `模型列表鉴权失败（HTTP ${response.status}），请检查 API Key 或手动填写模型名`,
+        }
+      }
+      if (response.status === 404 || response.status === 405) {
+        return {
+          ok: false,
+          models: [],
+          errorCode: 'models_endpoint_unsupported',
+          error: '该服务端点未开放 /models 接口，请直接手动输入模型名称',
+        }
+      }
+      if (response.status === 429) {
+        return {
+          ok: false,
+          models: [],
+          errorCode: 'rate_limited',
+          error: '拉取模型列表触发限流（HTTP 429），请稍后再试或手动填写',
+        }
+      }
+      return {
+        ok: false,
+        models: [],
+        errorCode: 'upstream_error',
+        error: `拉取模型列表失败（HTTP ${response.status}），请稍后重试或手动填写`,
+      }
+    }
+
+    const payload = (await response.json().catch(() => null)) as unknown
+    const models = extractModelIds(payload)
+    if (models.length === 0) {
+      return {
+        ok: false,
+        models: [],
+        errorCode: 'empty_model_list',
+        error: '服务端点未返回可识别的模型列表，请手动填写模型名称',
+      }
+    }
+    return { ok: true, models }
+  } catch (error) {
+    const classified = classifyProviderError(error)
+    return { ok: false, models: [], errorCode: classified.code, error: classified.message }
+  }
+}
+
 export async function testProfileConnection(
   config: ResolvedProviderConfig,
   timeoutMs = 15_000,

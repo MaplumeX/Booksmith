@@ -1,5 +1,5 @@
 {
-  "id": "094fac39-367f-4696-9e79-0be2bef7bcef",
+  "id": "d966684d-bb05-4273-a530-3b972fd0faf5",
   "prevId": "df1aa2da-54dd-4e3e-bc30-35102fbc0bf1",
   "version": "7",
   "dialect": "postgresql",
@@ -33,6 +33,12 @@
           "primaryKey": false,
           "notNull": true,
           "default": "''"
+        },
+        "reasoning": {
+          "name": "reasoning",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
         },
         "context_json": {
           "name": "context_json",
@@ -157,6 +163,12 @@
           "primaryKey": false,
           "notNull": true
         },
+        "models_json": {
+          "name": "models_json",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
         "api_key_ciphertext": {
           "name": "api_key_ciphertext",
           "type": "text",
@@ -265,6 +277,19 @@
           "primaryKey": false,
           "notNull": false
         },
+        "model": {
+          "name": "model",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "approval_mode": {
+          "name": "approval_mode",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "'review'"
+        },
         "created_at": {
           "name": "created_at",
           "type": "timestamp with time zone",
@@ -356,57 +381,36 @@
       "checkConstraints": {},
       "isRLSEnabled": false
     },
-    "public.book_entries": {
-      "name": "book_entries",
+    "public.agent_user_settings": {
+      "name": "agent_user_settings",
       "schema": "",
       "columns": {
-        "book_id": {
-          "name": "book_id",
+        "user_id": {
+          "name": "user_id",
           "type": "uuid",
-          "primaryKey": false,
+          "primaryKey": true,
           "notNull": true
         },
-        "path": {
-          "name": "path",
+        "default_approval_mode": {
+          "name": "default_approval_mode",
           "type": "text",
           "primaryKey": false,
-          "notNull": true
+          "notNull": true,
+          "default": "'review'"
         },
-        "position": {
-          "name": "position",
+        "max_steps": {
+          "name": "max_steps",
           "type": "integer",
           "primaryKey": false,
-          "notNull": true
+          "notNull": true,
+          "default": 15
         },
-        "is_text": {
-          "name": "is_text",
-          "type": "boolean",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "media_type": {
-          "name": "media_type",
+        "custom_instructions": {
+          "name": "custom_instructions",
           "type": "text",
           "primaryKey": false,
-          "notNull": true
-        },
-        "bytes": {
-          "name": "bytes",
-          "type": "bytea",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "byte_size": {
-          "name": "byte_size",
-          "type": "integer",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "sha256": {
-          "name": "sha256",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true
+          "notNull": true,
+          "default": "''"
         },
         "updated_at": {
           "name": "updated_at",
@@ -416,36 +420,14 @@
           "default": "now()"
         }
       },
-      "indexes": {
-        "book_entries_book_position_idx": {
-          "name": "book_entries_book_position_idx",
-          "columns": [
-            {
-              "expression": "book_id",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            },
-            {
-              "expression": "position",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            }
-          ],
-          "isUnique": false,
-          "concurrently": false,
-          "method": "btree",
-          "with": {}
-        }
-      },
+      "indexes": {},
       "foreignKeys": {
-        "book_entries_book_id_books_id_fk": {
-          "name": "book_entries_book_id_books_id_fk",
-          "tableFrom": "book_entries",
-          "tableTo": "books",
+        "agent_user_settings_user_id_users_id_fk": {
+          "name": "agent_user_settings_user_id_users_id_fk",
+          "tableFrom": "agent_user_settings",
+          "tableTo": "users",
           "columnsFrom": [
-            "book_id"
+            "user_id"
           ],
           "columnsTo": [
             "id"
@@ -454,15 +436,7 @@
           "onUpdate": "no action"
         }
       },
-      "compositePrimaryKeys": {
-        "book_entries_book_id_path_pk": {
-          "name": "book_entries_book_id_path_pk",
-          "columns": [
-            "book_id",
-            "path"
-          ]
-        }
-      },
+      "compositePrimaryKeys": {},
       "uniqueConstraints": {},
       "policies": {},
       "checkConstraints": {},

@@ -8,29 +8,42 @@ import {
   encryptApiKey,
 } from '../agent/crypto'
 import {
+  fetchProviderModels,
   InvalidProviderConfigError,
   isAgentProvider,
   testProfileConnection,
   validateBaseUrl,
   type AgentProviderType,
 } from '../agent/providers'
-import { runAgentTurn, type AgentStreamEvent, type ToolCallSummary } from '../agent/runner'
+import {
+  isAgentApprovalMode,
+  MAX_TOOL_STEPS,
+  normalizeMaxToolSteps,
+  runAgentTurn,
+  type AgentApprovalMode,
+  type AgentStreamEvent,
+  type ToolCallSummary,
+} from '../agent/runner'
+import { MAX_CUSTOM_INSTRUCTIONS_CHARS } from '../agent/systemPrompt'
 import type { Config } from '../config'
 import type { Db } from '../db/client'
 import {
   agentMessages,
   agentProfiles,
   agentThreads,
+  agentUserSettings,
   books,
   type AgentMessage,
   type AgentProfile,
   type AgentThread,
+  type AgentUserSetting,
   type Book,
   type User,
 } from '../db/schema'
 import type { FileStore } from '../storage/fileStore'
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
+const MAX_PROFILE_MODELS = 100
 
 interface AgentDeps {
   db: Db
@@ -44,10 +57,18 @@ export interface AgentProfileDto {
   provider: AgentProviderType
   baseUrl: string
   model: string
+  models: string[]
   hasApiKey: boolean
   apiKeyLast4: string | null
   isDefault: boolean
   updatedAt: string
+}
+
+export interface AgentUserSettingsDto {
+  defaultApprovalMode: AgentApprovalMode
+  maxSteps: number
+  customInstructions: string
+  updatedAt: string | null
 }
 
 export interface AgentThreadDto {
@@ -55,6 +76,8 @@ export interface AgentThreadDto {
   bookId: string
   title: string
   profileId: string | null
+  model: string | null
+  approvalMode: AgentApprovalMode
   createdAt: string
   updatedAt: string
 }
@@ -64,37 +87,13 @@ export interface AgentMessageDto {
   threadId: string
   role: 'user' | 'assistant'
   content: string
+  reasoning: string | null
   context: { activePath?: string | null; selection?: string | null } | null
   toolCalls: ToolCallSummary[]
   proposal: AgentProposal | null
   proposalStatus: 'pending' | 'applied' | 'dismissed' | null
   error: string | null
   createdAt: string
-}
-
-function toProfileDto(row: AgentProfile): AgentProfileDto {
-  return {
-    id: row.id,
-    name: row.name,
-    provider: isAgentProvider(row.provider) ? row.provider : 'openai-compatible',
-    baseUrl: row.baseUrl,
-    model: row.model,
-    hasApiKey: Boolean(row.apiKeyCiphertext),
-    apiKeyLast4: row.apiKeyLast4,
-    isDefault: row.isDefault,
-    updatedAt: row.updatedAt.toISOString(),
-  }
-}
-
-function toThreadDto(row: AgentThread): AgentThreadDto {
-  return {
-    id: row.id,
-    bookId: row.bookId,
-    title: row.title,
-    profileId: row.profileId,
-    createdAt: row.createdAt.toISOString(),
-    updatedAt: row.updatedAt.toISOString(),
-  }
 }
 
 function safeJsonParse<T>(raw: string | null, fallback: T): T {
@@ -106,12 +105,84 @@ function safeJsonParse<T>(raw: string | null, fallback: T): T {
   }
 }
 
+/** Keeps the primary default model in the list, deduplicates, and caps size for legacy & multi-model rows.
+ * See ADR 2026-11-20-agent-modes-and-multimodel. */
+function normalizeProfileModels(primaryModel: string, rawModels: unknown): string[] {
+  const seen = new Set<string>()
+  const out: string[] = []
+  const primary = primaryModel.trim()
+
+  const add = (value: unknown) => {
+    if (typeof value !== 'string') return
+    const trimmed = value.trim()
+    if (!trimmed || seen.has(trimmed) || out.length >= MAX_PROFILE_MODELS) return
+    seen.add(trimmed)
+    out.push(trimmed)
+  }
+
+  if (Array.isArray(rawModels)) {
+    for (const item of rawModels) add(item)
+  }
+  if (primary && !seen.has(primary)) {
+    out.unshift(primary)
+    if (out.length > MAX_PROFILE_MODELS) out.length = MAX_PROFILE_MODELS
+  }
+  return out
+}
+
+function toProfileDto(row: AgentProfile): AgentProfileDto {
+  const parsed = safeJsonParse<unknown>(row.modelsJson, null)
+  return {
+    id: row.id,
+    name: row.name,
+    provider: isAgentProvider(row.provider) ? row.provider : 'openai-compatible',
+    baseUrl: row.baseUrl,
+    model: row.model,
+    models: normalizeProfileModels(row.model, parsed),
+    hasApiKey: Boolean(row.apiKeyCiphertext),
+    apiKeyLast4: row.apiKeyLast4,
+    isDefault: row.isDefault,
+    updatedAt: row.updatedAt.toISOString(),
+  }
+}
+
+function toSettingsDto(row: AgentUserSetting | null): AgentUserSettingsDto {
+  if (!row) {
+    return {
+      defaultApprovalMode: 'review',
+      maxSteps: MAX_TOOL_STEPS,
+      customInstructions: '',
+      updatedAt: null,
+    }
+  }
+  return {
+    defaultApprovalMode: isAgentApprovalMode(row.defaultApprovalMode) ? row.defaultApprovalMode : 'review',
+    maxSteps: normalizeMaxToolSteps(row.maxSteps),
+    customInstructions: row.customInstructions,
+    updatedAt: row.updatedAt.toISOString(),
+  }
+}
+
+function toThreadDto(row: AgentThread): AgentThreadDto {
+  return {
+    id: row.id,
+    bookId: row.bookId,
+    title: row.title,
+    profileId: row.profileId,
+    model: row.model,
+    approvalMode: isAgentApprovalMode(row.approvalMode) ? row.approvalMode : 'review',
+    createdAt: row.createdAt.toISOString(),
+    updatedAt: row.updatedAt.toISOString(),
+  }
+}
+
 function toMessageDto(row: AgentMessage): AgentMessageDto {
   return {
     id: row.id,
     threadId: row.threadId,
     role: row.role === 'assistant' ? 'assistant' : 'user',
     content: row.content,
+    reasoning: row.reasoning,
     context: safeJsonParse(row.contextJson, null),
     toolCalls: safeJsonParse<ToolCallSummary[]>(row.toolCallsJson, []),
     proposal: safeJsonParse<AgentProposal | null>(row.proposalJson, null),
@@ -167,6 +238,15 @@ async function findOwnedThread(
   return rows[0] ?? null
 }
 
+async function loadUserSettings(db: Db, userId: string): Promise<AgentUserSettingsDto> {
+  const rows = await db
+    .select()
+    .from(agentUserSettings)
+    .where(eq(agentUserSettings.userId, userId))
+    .limit(1)
+  return toSettingsDto(rows[0] ?? null)
+}
+
 function autoTitleFromPrompt(content: string): string {
   const singleLine = content.replace(/\s+/g, ' ').trim()
   if (!singleLine) return '新对话'
@@ -192,9 +272,106 @@ function sendCryptoOrValidationError(reply: FastifyReply, error: unknown): Fasti
   throw error
 }
 
+function parseOverlay(body: Record<string, unknown>): {
+  dirtyTexts: Record<string, string>
+  deletedPaths: string[]
+} {
+  const dirtyTexts: Record<string, string> = {}
+  if (body.dirtyTexts && typeof body.dirtyTexts === 'object') {
+    for (const [k, v] of Object.entries(body.dirtyTexts as Record<string, unknown>)) {
+      if (typeof v === 'string') dirtyTexts[k] = v
+    }
+  }
+  const deletedPaths = Array.isArray(body.deletedPaths)
+    ? body.deletedPaths.filter((item): item is string => typeof item === 'string')
+    : []
+  return { dirtyTexts, deletedPaths }
+}
+
 export function registerAgentRoutes(app: FastifyInstance, deps: AgentDeps): void {
   const { db, config, fileStore } = deps
   const secretKey = config.agentSecretKey ?? null
+
+  // --- Cloud-synced per-user Agent preferences ---
+
+  app.get('/api/agent/settings', async (request, reply) => {
+    const user = requireUser(request, reply)
+    if (!user) return
+    const settings = await loadUserSettings(db, user.id)
+    return reply.send({ settings })
+  })
+
+  app.patch('/api/agent/settings', async (request, reply) => {
+    const user = requireUser(request, reply)
+    if (!user) return
+
+    const body = (request.body ?? {}) as Record<string, unknown>
+    const current = await loadUserSettings(db, user.id)
+
+    let defaultApprovalMode = current.defaultApprovalMode
+    if (body.defaultApprovalMode !== undefined) {
+      if (!isAgentApprovalMode(body.defaultApprovalMode)) {
+        return reply.code(400).send({
+          error: 'invalid_approval_mode',
+          message: '默认审批模式仅支持 ask、review 或 auto',
+        })
+      }
+      defaultApprovalMode = body.defaultApprovalMode
+    }
+
+    let maxSteps = current.maxSteps
+    if (body.maxSteps !== undefined) {
+      if (body.maxSteps === null || body.maxSteps === '') {
+        maxSteps = 0
+      } else {
+        const parsed = typeof body.maxSteps === 'number' ? body.maxSteps : Number(body.maxSteps)
+        if (!Number.isInteger(parsed) || parsed < 0) {
+          return reply.code(400).send({
+            error: 'invalid_max_steps',
+            message: '单轮最大工具步数必须为非负整数（0 或留空表示不限制）',
+          })
+        }
+        maxSteps = parsed
+      }
+    }
+
+    let customInstructions = current.customInstructions
+    if (body.customInstructions !== undefined) {
+      if (typeof body.customInstructions !== 'string') {
+        return reply.code(400).send({ error: 'invalid_custom_instructions', message: '自定义附加指令必须为文本' })
+      }
+      if (body.customInstructions.length > MAX_CUSTOM_INSTRUCTIONS_CHARS) {
+        return reply.code(400).send({
+          error: 'invalid_custom_instructions',
+          message: `自定义附加指令不能超过 ${MAX_CUSTOM_INSTRUCTIONS_CHARS} 字`,
+        })
+      }
+      customInstructions = body.customInstructions
+    }
+
+    const now = new Date()
+    const [saved] = await db
+      .insert(agentUserSettings)
+      .values({
+        userId: user.id,
+        defaultApprovalMode,
+        maxSteps,
+        customInstructions,
+        updatedAt: now,
+      })
+      .onConflictDoUpdate({
+        target: agentUserSettings.userId,
+        set: {
+          defaultApprovalMode,
+          maxSteps,
+          customInstructions,
+          updatedAt: now,
+        },
+      })
+      .returning()
+
+    return reply.send({ settings: toSettingsDto(saved ?? null) })
+  })
 
   // --- Model profiles ---
 
@@ -222,14 +399,19 @@ export function registerAgentRoutes(app: FastifyInstance, deps: AgentDeps): void
     const name = typeof body.name === 'string' ? body.name.trim() : ''
     const provider = body.provider
     const rawBaseUrl = typeof body.baseUrl === 'string' ? body.baseUrl : ''
-    const model = typeof body.model === 'string' ? body.model.trim() : ''
+    const rawModels = Array.isArray(body.models) ? body.models : undefined
+    const explicitModel = typeof body.model === 'string' ? body.model.trim() : ''
+    const normalizedModels = normalizeProfileModels(explicitModel, rawModels)
+    const model = explicitModel || normalizedModels[0] || ''
     const rawApiKey = typeof body.apiKey === 'string' ? body.apiKey : ''
 
     if (!name) return reply.code(400).send({ error: 'invalid_profile', message: '预设名称不能为空' })
     if (!isAgentProvider(provider)) {
       return reply.code(400).send({ error: 'invalid_profile', message: '协议仅支持 openai-compatible 或 anthropic' })
     }
-    if (!model) return reply.code(400).send({ error: 'invalid_profile', message: '模型名称不能为空' })
+    if (!model) return reply.code(400).send({ error: 'invalid_profile', message: '至少需要填写一个模型名称' })
+
+    const finalModels = normalizeProfileModels(model, normalizedModels)
 
     let baseUrl: string
     let encrypted: { ciphertext: string | null; last4: string | null }
@@ -259,6 +441,7 @@ export function registerAgentRoutes(app: FastifyInstance, deps: AgentDeps): void
         provider,
         baseUrl,
         model,
+        modelsJson: JSON.stringify(finalModels),
         apiKeyCiphertext: encrypted.ciphertext,
         apiKeyLast4: encrypted.last4,
         isDefault: shouldBeDefault,
@@ -299,10 +482,40 @@ export function registerAgentRoutes(app: FastifyInstance, deps: AgentDeps): void
       }
     }
 
-    if (body.model !== undefined) {
-      const model = typeof body.model === 'string' ? body.model.trim() : ''
-      if (!model) return reply.code(400).send({ error: 'invalid_profile', message: '模型名称不能为空' })
-      updates.model = model
+    const existingModels = normalizeProfileModels(existing.model, safeJsonParse<unknown>(existing.modelsJson, null))
+    if (body.models !== undefined || body.model !== undefined) {
+      let nextModel = existing.model
+      if (body.model !== undefined) {
+        const candidate = typeof body.model === 'string' ? body.model.trim() : ''
+        if (!candidate) return reply.code(400).send({ error: 'invalid_profile', message: '模型名称不能为空' })
+        nextModel = candidate
+      }
+
+      if (body.models !== undefined) {
+        if (!Array.isArray(body.models)) {
+          return reply.code(400).send({ error: 'invalid_profile', message: '模型列表格式无效' })
+        }
+        const cleanedList = body.models
+          .filter((item): item is string => typeof item === 'string' && item.trim().length > 0)
+          .map((item) => item.trim())
+        if (cleanedList.length === 0 && body.model === undefined) {
+          return reply.code(400).send({ error: 'invalid_profile', message: '至少需要保留一个模型' })
+        }
+        if (body.model === undefined && cleanedList.length > 0 && !cleanedList.includes(nextModel)) {
+          nextModel = cleanedList[0]!
+        }
+        const normalized = normalizeProfileModels(nextModel, cleanedList)
+        updates.model = nextModel
+        updates.modelsJson = JSON.stringify(normalized)
+      } else {
+        // Legacy single-model PATCH: replace default model while keeping additional configured models intact.
+        const merged = normalizeProfileModels(
+          nextModel,
+          existingModels.map((m) => (m === existing.model ? nextModel : m)),
+        )
+        updates.model = nextModel
+        updates.modelsJson = JSON.stringify(merged)
+      }
     }
 
     if (body.clearApiKey === true) {
@@ -388,6 +601,36 @@ export function registerAgentRoutes(app: FastifyInstance, deps: AgentDeps): void
     return reply.send(result)
   })
 
+  app.post('/api/agent/profiles/models', async (request, reply) => {
+    const user = requireUser(request, reply)
+    if (!user) return
+
+    const body = (request.body ?? {}) as Record<string, unknown>
+    const provider = body.provider
+    const rawBaseUrl = typeof body.baseUrl === 'string' ? body.baseUrl : ''
+    const profileId = typeof body.profileId === 'string' ? body.profileId : undefined
+    let apiKey: string | null = typeof body.apiKey === 'string' && body.apiKey.trim() ? body.apiKey.trim() : null
+
+    if (!isAgentProvider(provider)) {
+      return reply.code(400).send({ error: 'invalid_profile', message: '协议仅支持 openai-compatible 或 anthropic' })
+    }
+
+    let baseUrl: string
+    try {
+      baseUrl = validateBaseUrl(rawBaseUrl)
+      if (!apiKey && profileId) {
+        const stored = await findOwnedProfile(db, profileId, user.id)
+        if (!stored) return reply.code(404).send({ error: 'not_found' })
+        apiKey = decryptApiKey(stored.apiKeyCiphertext, secretKey)
+      }
+    } catch (error) {
+      return sendCryptoOrValidationError(reply, error)
+    }
+
+    const result = await fetchProviderModels({ provider, baseUrl, apiKey })
+    return reply.send(result)
+  })
+
   // --- Per-book threads ---
 
   app.get<{ Params: { id: string } }>('/api/books/:id/agent/threads', async (request, reply) => {
@@ -414,6 +657,7 @@ export function registerAgentRoutes(app: FastifyInstance, deps: AgentDeps): void
     const body = (request.body ?? {}) as Record<string, unknown>
     const title = typeof body.title === 'string' && body.title.trim() ? body.title.trim().slice(0, 80) : '新对话'
     let profileId: string | null = null
+    let model: string | null = null
 
     if (typeof body.profileId === 'string' && body.profileId.trim()) {
       const profile = await findOwnedProfile(db, body.profileId.trim(), user.id)
@@ -428,9 +672,27 @@ export function registerAgentRoutes(app: FastifyInstance, deps: AgentDeps): void
       profileId = defaultProfile?.id ?? null
     }
 
+    if (typeof body.model === 'string' && body.model.trim()) {
+      model = body.model.trim()
+    }
+
+    let approvalMode: AgentApprovalMode
+    if (body.approvalMode !== undefined) {
+      if (!isAgentApprovalMode(body.approvalMode)) {
+        return reply.code(400).send({
+          error: 'invalid_approval_mode',
+          message: '审批模式仅支持 ask、review 或 auto',
+        })
+      }
+      approvalMode = body.approvalMode
+    } else {
+      const settings = await loadUserSettings(db, user.id)
+      approvalMode = settings.defaultApprovalMode
+    }
+
     const [created] = await db
       .insert(agentThreads)
-      .values({ bookId: book.id, userId: user.id, title, profileId })
+      .values({ bookId: book.id, userId: user.id, title, profileId, model, approvalMode })
       .returning()
 
     return reply.code(201).send({ thread: toThreadDto(created!) })
@@ -450,7 +712,7 @@ export function registerAgentRoutes(app: FastifyInstance, deps: AgentDeps): void
         .select()
         .from(agentMessages)
         .where(eq(agentMessages.threadId, thread.id))
-        .orderBy(asc(agentMessages.createdAt))
+        .orderBy(asc(agentMessages.createdAt), asc(agentMessages.id))
 
       return reply.send({
         thread: toThreadDto(thread),
@@ -488,6 +750,24 @@ export function registerAgentRoutes(app: FastifyInstance, deps: AgentDeps): void
         }
       }
 
+      if (body.model !== undefined) {
+        if (body.model === null || body.model === '') {
+          updates.model = null
+        } else if (typeof body.model === 'string') {
+          updates.model = body.model.trim() || null
+        }
+      }
+
+      if (body.approvalMode !== undefined) {
+        if (!isAgentApprovalMode(body.approvalMode)) {
+          return reply.code(400).send({
+            error: 'invalid_approval_mode',
+            message: '审批模式仅支持 ask、review 或 auto',
+          })
+        }
+        updates.approvalMode = body.approvalMode
+      }
+
       const [updated] = await db
         .update(agentThreads)
         .set(updates)
@@ -513,6 +793,228 @@ export function registerAgentRoutes(app: FastifyInstance, deps: AgentDeps): void
     },
   )
 
+  // --- Shared turn execution & streaming helper ---
+
+  async function resolveTurnExecution(options: {
+    request: FastifyRequest
+    reply: FastifyReply
+    user: User
+    book: Book
+    thread: AgentThread
+    body: Record<string, unknown>
+    userMessage: string
+    context: { activePath?: string | null; selection?: string | null } | undefined
+    history: Array<{ role: 'user' | 'assistant'; content: string }>
+    nextTitle: string
+    persistUserMessage: boolean
+    replaceMessageId?: string
+  }): Promise<void> {
+    const {
+      request,
+      reply,
+      user,
+      book,
+      thread,
+      body,
+      userMessage,
+      context,
+      history,
+      nextTitle,
+      persistUserMessage,
+      replaceMessageId,
+    } = options
+
+    const baseVersion = typeof body.baseVersion === 'number' ? body.baseVersion : Number(body.baseVersion)
+    if (!Number.isInteger(baseVersion) || baseVersion <= 0) {
+      reply.code(400).send({ error: 'invalid_version', message: '缺少有效的书籍版本号' })
+      return
+    }
+    if (baseVersion !== book.currentVersion) {
+      reply.code(409).send({
+        error: 'version_conflict',
+        currentVersion: book.currentVersion,
+        message: '书籍已在其他位置更新，请先重新加载后再继续对话。',
+      })
+      return
+    }
+
+    let approvalMode: AgentApprovalMode = isAgentApprovalMode(thread.approvalMode) ? thread.approvalMode : 'review'
+    if (body.approvalMode !== undefined) {
+      if (!isAgentApprovalMode(body.approvalMode)) {
+        reply.code(400).send({
+          error: 'invalid_approval_mode',
+          message: '审批模式仅支持 ask、review 或 auto',
+        })
+        return
+      }
+      approvalMode = body.approvalMode
+    }
+
+    // Resolve profile: explicit request.profileId -> thread.profileId -> user's default profile
+    let profile: AgentProfile | null = null
+    if (typeof body.profileId === 'string' && body.profileId.trim()) {
+      profile = await findOwnedProfile(db, body.profileId.trim(), user.id)
+      if (!profile) {
+        reply.code(404).send({ error: 'profile_not_found' })
+        return
+      }
+    } else if (thread.profileId) {
+      profile = await findOwnedProfile(db, thread.profileId, user.id)
+    }
+    if (!profile) {
+      const [fallback] = await db
+        .select()
+        .from(agentProfiles)
+        .where(eq(agentProfiles.userId, user.id))
+        .orderBy(desc(agentProfiles.isDefault), desc(agentProfiles.updatedAt))
+        .limit(1)
+      profile = fallback ?? null
+    }
+    if (!profile) {
+      reply.code(400).send({
+        error: 'no_agent_profile',
+        message: '还没有配置模型预设，请先在右上角或助手设置中添加一个模型预设。',
+      })
+      return
+    }
+
+    const explicitModel = typeof body.model === 'string' && body.model.trim() ? body.model.trim() : null
+    const inheritedThreadModel = thread.profileId === profile.id ? thread.model : null
+    const effectiveModel = explicitModel ?? inheritedThreadModel ?? profile.model
+
+    let apiKey: string | null
+    try {
+      apiKey = decryptApiKey(profile.apiKeyCiphertext, secretKey)
+    } catch (error) {
+      sendCryptoOrValidationError(reply, error)
+      return
+    }
+
+    // Build AgentWorkspace directly from unpacked `book_entries` (text + mimetype bytes only,
+    // zero binary bytea detoasting or zip unpacking). See ADR 2026-11-20-entry-level-book-storage.
+    const workspaceRows = await fileStore.listWorkspaceEntries(book.id)
+    if (workspaceRows.length === 0) {
+      reply.code(404).send({ error: 'not_found' })
+      return
+    }
+    const emptyBinary = new Uint8Array(0)
+    const archive: EpubArchive = {
+      order: workspaceRows.map((row) => row.path),
+      entries: new Map(
+        workspaceRows.map((row) => [row.path, row.bytes ? new Uint8Array(row.bytes) : emptyBinary]),
+      ),
+    }
+    const overlay = parseOverlay(body)
+    const userSettings = await loadUserSettings(db, user.id)
+
+    if (persistUserMessage) {
+      await db.insert(agentMessages).values({
+        threadId: thread.id,
+        role: 'user',
+        content: userMessage,
+        contextJson: context ? JSON.stringify(context) : null,
+      })
+    }
+
+    await db
+      .update(agentThreads)
+      .set({
+        title: nextTitle,
+        profileId: profile.id,
+        model: effectiveModel,
+        approvalMode,
+        updatedAt: new Date(),
+      })
+      .where(eq(agentThreads.id, thread.id))
+
+    // Hijack Fastify response to stream SSE directly with reverse-proxy buffering disabled.
+    // See ADR 2026-11-20-builtin-epub-agent.
+    reply.hijack()
+    const raw = reply.raw
+    raw.writeHead(200, {
+      'Content-Type': 'text/event-stream; charset=utf-8',
+      'Cache-Control': 'no-cache, no-transform',
+      Connection: 'keep-alive',
+      'X-Accel-Buffering': 'no',
+    })
+    raw.flushHeaders?.()
+
+    const controller = new AbortController()
+    request.raw.on('close', () => {
+      if (!raw.writableEnded) controller.abort()
+    })
+
+    const writeEvent = (payload: Record<string, unknown>) => {
+      if (raw.writableEnded) return
+      raw.write(`data: ${JSON.stringify(payload)}\n\n`)
+    }
+
+    const result = await runAgentTurn({
+      archive,
+      overlay,
+      provider: {
+        provider: isAgentProvider(profile.provider) ? profile.provider : 'openai-compatible',
+        baseUrl: profile.baseUrl,
+        model: effectiveModel,
+        apiKey,
+      },
+      history,
+      userMessage,
+      context,
+      approvalMode,
+      customInstructions: userSettings.customInstructions,
+      maxSteps: userSettings.maxSteps,
+      abortSignal: controller.signal,
+      onEvent: (event: AgentStreamEvent) => {
+        // Hold `done` until the assistant message is persisted so the client gets its real messageId.
+        if (event.type === 'done') return
+        writeEvent(event)
+      },
+    })
+
+    const persistedFields = {
+      content: result.content,
+      reasoning: result.reasoning.trim() ? result.reasoning : null,
+      toolCallsJson: result.toolCalls.length > 0 ? JSON.stringify(result.toolCalls) : null,
+      proposalJson: result.proposal ? JSON.stringify(result.proposal) : null,
+      proposalStatus: result.proposal ? 'pending' : null,
+      error: result.error ? result.error.message : null,
+    }
+
+    let savedMessageId: string | undefined
+    if (replaceMessageId) {
+      const [updated] = await db
+        .update(agentMessages)
+        .set(persistedFields)
+        .where(eq(agentMessages.id, replaceMessageId))
+        .returning({ id: agentMessages.id })
+      savedMessageId = updated?.id ?? replaceMessageId
+    } else {
+      const [inserted] = await db
+        .insert(agentMessages)
+        .values({
+          threadId: thread.id,
+          role: 'assistant',
+          ...persistedFields,
+        })
+        .returning({ id: agentMessages.id })
+      savedMessageId = inserted?.id
+    }
+
+    await db.update(agentThreads).set({ updatedAt: new Date() }).where(eq(agentThreads.id, thread.id))
+
+    writeEvent({
+      type: 'done',
+      messageId: savedMessageId,
+      threadTitle: nextTitle,
+      stopped: result.stopped,
+      approvalMode,
+      model: effectiveModel,
+      profileId: profile.id,
+    })
+    if (!raw.writableEnded) raw.end()
+  }
+
   // --- Streaming turn execution (SSE) ---
 
   app.post<{ Params: { id: string; threadId: string } }>(
@@ -529,72 +1031,8 @@ export function registerAgentRoutes(app: FastifyInstance, deps: AgentDeps): void
       const content = typeof body.content === 'string' ? body.content.trim() : ''
       if (!content) return reply.code(400).send({ error: 'empty_message', message: '请输入消息内容' })
 
-      const baseVersion = typeof body.baseVersion === 'number' ? body.baseVersion : Number(body.baseVersion)
-      if (!Number.isInteger(baseVersion) || baseVersion <= 0) {
-        return reply.code(400).send({ error: 'invalid_version', message: '缺少有效的书籍版本号' })
-      }
-      if (baseVersion !== book.currentVersion) {
-        return reply.code(409).send({
-          error: 'version_conflict',
-          currentVersion: book.currentVersion,
-          message: '书籍已在其他位置更新，请先重新加载后再继续对话。',
-        })
-      }
-
-      // Resolve profile: explicit request.profileId -> thread.profileId -> user's default profile
-      let profile: AgentProfile | null = null
-      if (typeof body.profileId === 'string' && body.profileId.trim()) {
-        profile = await findOwnedProfile(db, body.profileId.trim(), user.id)
-        if (!profile) return reply.code(404).send({ error: 'profile_not_found' })
-      } else if (thread.profileId) {
-        profile = await findOwnedProfile(db, thread.profileId, user.id)
-      }
-      if (!profile) {
-        const [fallback] = await db
-          .select()
-          .from(agentProfiles)
-          .where(eq(agentProfiles.userId, user.id))
-          .orderBy(desc(agentProfiles.isDefault), desc(agentProfiles.updatedAt))
-          .limit(1)
-        profile = fallback ?? null
-      }
-      if (!profile) {
-        return reply.code(400).send({
-          error: 'no_agent_profile',
-          message: '还没有配置模型预设，请先在右上角或助手设置中添加一个模型预设。',
-        })
-      }
-
-      let apiKey: string | null
-      try {
-        apiKey = decryptApiKey(profile.apiKeyCiphertext, secretKey)
-      } catch (error) {
-        return sendCryptoOrValidationError(reply, error)
-      }
-
-      // Build AgentWorkspace directly from unpacked `book_entries` (text + mimetype bytes only,
-      // zero binary bytea detoasting or zip unpacking). See ADR 2026-11-20-entry-level-book-storage.
-      const workspaceRows = await fileStore.listWorkspaceEntries(book.id)
-      if (workspaceRows.length === 0) return reply.code(404).send({ error: 'not_found' })
-      const emptyBinary = new Uint8Array(0)
-      const archive: EpubArchive = {
-        order: workspaceRows.map((row) => row.path),
-        entries: new Map(
-          workspaceRows.map((row) => [row.path, row.bytes ? new Uint8Array(row.bytes) : emptyBinary]),
-        ),
-      }
-
-      const dirtyTexts: Record<string, string> = {}
-      if (body.dirtyTexts && typeof body.dirtyTexts === 'object') {
-        for (const [k, v] of Object.entries(body.dirtyTexts as Record<string, unknown>)) {
-          if (typeof v === 'string') dirtyTexts[k] = v
-        }
-      }
-      const deletedPaths = Array.isArray(body.deletedPaths)
-        ? body.deletedPaths.filter((item): item is string => typeof item === 'string')
-        : []
-
-      const rawContext = body.context && typeof body.context === 'object' ? (body.context as Record<string, unknown>) : null
+      const rawContext =
+        body.context && typeof body.context === 'object' ? (body.context as Record<string, unknown>) : null
       const context = rawContext
         ? {
             activePath: typeof rawContext.activePath === 'string' ? rawContext.activePath : null,
@@ -606,91 +1044,108 @@ export function registerAgentRoutes(app: FastifyInstance, deps: AgentDeps): void
         .select({ role: agentMessages.role, content: agentMessages.content })
         .from(agentMessages)
         .where(eq(agentMessages.threadId, thread.id))
-        .orderBy(asc(agentMessages.createdAt))
+        .orderBy(asc(agentMessages.createdAt), asc(agentMessages.id))
 
+      // History intentionally omits stored reasoning traces to preserve the 24k char sliding window.
+      // See ADR 2026-11-20-agent-modes-and-multimodel.
       const history = priorMessages.map((row) => ({
         role: (row.role === 'assistant' ? 'assistant' : 'user') as 'user' | 'assistant',
         content: row.content,
       }))
 
-      await db.insert(agentMessages).values({
-        threadId: thread.id,
-        role: 'user',
-        content,
-        contextJson: context ? JSON.stringify(context) : null,
-      })
-
       const nextTitle =
         priorMessages.length === 0 && thread.title === '新对话' ? autoTitleFromPrompt(content) : thread.title
-      await db
-        .update(agentThreads)
-        .set({ title: nextTitle, profileId: profile.id, updatedAt: new Date() })
-        .where(eq(agentThreads.id, thread.id))
 
-      // Hijack Fastify response to stream SSE directly with reverse-proxy buffering disabled.
-      // See ADR 2026-11-20-builtin-epub-agent.
-      reply.hijack()
-      const raw = reply.raw
-      raw.writeHead(200, {
-        'Content-Type': 'text/event-stream; charset=utf-8',
-        'Cache-Control': 'no-cache, no-transform',
-        Connection: 'keep-alive',
-        'X-Accel-Buffering': 'no',
-      })
-      raw.flushHeaders?.()
-
-      const controller = new AbortController()
-      request.raw.on('close', () => {
-        if (!raw.writableEnded) controller.abort()
-      })
-
-      const writeEvent = (payload: Record<string, unknown>) => {
-        if (raw.writableEnded) return
-        raw.write(`data: ${JSON.stringify(payload)}\n\n`)
-      }
-
-      const result = await runAgentTurn({
-        archive,
-        overlay: { dirtyTexts, deletedPaths },
-        provider: {
-          provider: isAgentProvider(profile.provider) ? profile.provider : 'openai-compatible',
-          baseUrl: profile.baseUrl,
-          model: profile.model,
-          apiKey,
-        },
-        history,
+      await resolveTurnExecution({
+        request,
+        reply,
+        user,
+        book,
+        thread,
+        body,
         userMessage: content,
         context,
-        abortSignal: controller.signal,
-        onEvent: (event: AgentStreamEvent) => {
-          // Hold `done` until the assistant message is persisted so the client gets its real messageId.
-          if (event.type === 'done') return
-          writeEvent(event)
-        },
+        history,
+        nextTitle,
+        persistUserMessage: true,
       })
+    },
+  )
 
-      const [savedAssistant] = await db
-        .insert(agentMessages)
-        .values({
-          threadId: thread.id,
-          role: 'assistant',
-          content: result.content,
-          toolCallsJson: result.toolCalls.length > 0 ? JSON.stringify(result.toolCalls) : null,
-          proposalJson: result.proposal ? JSON.stringify(result.proposal) : null,
-          proposalStatus: result.proposal ? 'pending' : null,
-          error: result.error ? result.error.message : null,
+  // --- Retry last assistant turn in place (SSE) ---
+
+  app.post<{ Params: { id: string; threadId: string; messageId: string } }>(
+    '/api/books/:id/agent/threads/:threadId/messages/:messageId/retry',
+    async (request, reply) => {
+      const user = requireUser(request, reply)
+      if (!user) return
+      const book = await findOwnedBook(db, request.params.id, user.id)
+      if (!book) return reply.code(404).send({ error: 'not_found' })
+      const thread = await findOwnedThread(db, book.id, request.params.threadId, user.id)
+      if (!thread) return reply.code(404).send({ error: 'not_found' })
+
+      const { messageId } = request.params
+      if (!UUID.test(messageId)) return reply.code(404).send({ error: 'not_found' })
+
+      const allMessages = await db
+        .select()
+        .from(agentMessages)
+        .where(eq(agentMessages.threadId, thread.id))
+        .orderBy(asc(agentMessages.createdAt), asc(agentMessages.id))
+
+      const latest = allMessages[allMessages.length - 1]
+      if (!latest || latest.id !== messageId || latest.role !== 'assistant') {
+        return reply.code(409).send({
+          error: 'retry_not_latest',
+          message: '仅支持重试当前对话的最后一条助手回复。',
         })
-        .returning()
+      }
 
-      await db.update(agentThreads).set({ updatedAt: new Date() }).where(eq(agentThreads.id, thread.id))
+      // Block overwriting an assistant turn whose proposal was already applied so workspace & history stay consistent.
+      // See ADR 2026-11-20-agent-modes-and-multimodel.
+      if (latest.proposalStatus === 'applied') {
+        return reply.code(409).send({
+          error: 'proposal_already_applied',
+          message: '该回复的变更提案已应用到工作区，无法直接覆盖重试，请先撤销或继续追问。',
+        })
+      }
 
-      writeEvent({
-        type: 'done',
-        messageId: savedAssistant?.id,
-        threadTitle: nextTitle,
-        stopped: result.stopped,
+      let userTurnIndex = -1
+      for (let i = allMessages.length - 2; i >= 0; i -= 1) {
+        if (allMessages[i]!.role === 'user') {
+          userTurnIndex = i
+          break
+        }
+      }
+      if (userTurnIndex < 0) {
+        return reply.code(400).send({ error: 'missing_user_message', message: '找不到对应的上一条用户提问' })
+      }
+
+      const userTurn = allMessages[userTurnIndex]!
+      const history = allMessages.slice(0, userTurnIndex).map((row) => ({
+        role: (row.role === 'assistant' ? 'assistant' : 'user') as 'user' | 'assistant',
+        content: row.content,
+      }))
+      const savedContext = safeJsonParse<{ activePath?: string | null; selection?: string | null } | null>(
+        userTurn.contextJson,
+        null,
+      )
+
+      const body = (request.body ?? {}) as Record<string, unknown>
+      await resolveTurnExecution({
+        request,
+        reply,
+        user,
+        book,
+        thread,
+        body,
+        userMessage: userTurn.content,
+        context: savedContext ?? undefined,
+        history,
+        nextTitle: thread.title,
+        persistUserMessage: false,
+        replaceMessageId: latest.id,
       })
-      if (!raw.writableEnded) raw.end()
     },
   )
 
