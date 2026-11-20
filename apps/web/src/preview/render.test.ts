@@ -1,6 +1,12 @@
 import { describe, expect, it, vi } from 'vitest'
 import type { EpubArchive, EpubPackage } from '@booksmith/core'
-import { PreviewBlobCache, previewResourcesChanged, type PreviewResourceSnapshot } from './render'
+import {
+  buildEditorStyleCss,
+  buildPreviewThemeCss,
+  PreviewBlobCache,
+  previewResourcesChanged,
+  type PreviewResourceSnapshot,
+} from './render'
 
 function makePkg(manifest: Array<{ id: string; path: string; mediaType: string }> = []): EpubPackage {
   return {
@@ -128,5 +134,32 @@ describe('previewResourcesChanged', () => {
       ]),
     }
     expect(previewResourcesChanged(deps, missingAdded, pkg)).toBe(true)
+  })
+})
+
+describe('preview & editor theme CSS', () => {
+  it('generates Soft Craft Studio colors for light and dark preview themes', () => {
+    const light = buildPreviewThemeCss('light')
+    expect(light).toContain('color-scheme: light')
+    expect(light).toContain('background-color: #ffffff')
+    expect(light).toContain('color: #202028')
+
+    const dark = buildPreviewThemeCss('dark')
+    expect(dark).toContain('color-scheme: dark')
+    expect(dark).toContain('background-color: #1a1b24')
+    expect(dark).toContain('color: #ececf2')
+    expect(dark).toContain('color: #9c97f4')
+  })
+
+  it('aligns editable paper CSS with global light and dark tokens', () => {
+    const light = buildEditorStyleCss('light')
+    expect(light).toContain('color-scheme: light')
+    expect(light).toContain('background: #ffffff')
+    expect(light).toContain('color: #202028')
+
+    const dark = buildEditorStyleCss('dark')
+    expect(dark).toContain('color-scheme: dark')
+    expect(dark).toContain('background: #1a1b24')
+    expect(dark).toContain('color: #ececf2')
   })
 })

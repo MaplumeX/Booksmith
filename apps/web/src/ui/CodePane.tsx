@@ -1,5 +1,5 @@
 import { dirname, resolvePath, splitFragment } from '@booksmith/core'
-import { EditorState } from '@codemirror/state'
+import { Compartment, EditorState } from '@codemirror/state'
 import { EditorView, keymap } from '@codemirror/view'
 import { search, searchKeymap } from '@codemirror/search'
 import { basicSetup } from 'codemirror'
@@ -26,6 +26,7 @@ interface CodePaneProps {
   onNavigate?: (target: NavigateTarget) => void
   onSelectionChange?: (selection: string) => void
   visible?: boolean
+  wordWrap?: boolean
   syncMode?: 'reset' | 'transaction'
   resetVersion?: number
 }
@@ -65,11 +66,15 @@ export function CodePane({
   onNavigate,
   onSelectionChange,
   visible = true,
+  wordWrap = true,
   syncMode = 'reset',
   resetVersion = 0,
 }: CodePaneProps) {
   const host = useRef<HTMLDivElement>(null)
   const view = useRef<EditorView | null>(null)
+  const wrapCompartment = useRef(new Compartment())
+  const wordWrapRef = useRef(wordWrap)
+  wordWrapRef.current = wordWrap
   /** One state per opened file. The undo stack lives in `EditorState`, so rebuilding on a tab switch
    * silently drops the user's last edit from history.
    * See ADR 2026-11-19-editor-state-per-tab. */
@@ -93,7 +98,7 @@ export function CodePane({
           basicSetup,
           languageFor(forPath),
           editorTheme,
-          EditorView.lineWrapping,
+          wrapCompartment.current.of(wordWrapRef.current ? EditorView.lineWrapping : []),
           search({ top: true }),
           keymap.of(searchKeymap),
           EditorView.updateListener.of((update) => {
@@ -144,6 +149,9 @@ export function CodePane({
     const cached = states.current.get(path)
     if (cached) {
       instance.setState(cached)
+      instance.dispatch({
+        effects: wrapCompartment.current.reconfigure(wordWrapRef.current ? EditorView.lineWrapping : []),
+      })
     } else {
       const created = makeState(path, content)
       states.current.set(path, created)
@@ -152,6 +160,14 @@ export function CodePane({
     shownPath.current = path
     // `content` only seeds a file that has never been shown; after that the document owns the text.
   }, [path, makeState])
+
+  useEffect(() => {
+    const instance = view.current
+    if (!instance) return
+    instance.dispatch({
+      effects: wrapCompartment.current.reconfigure(wordWrap ? EditorView.lineWrapping : []),
+    })
+  }, [wordWrap])
 
   // An outside rewrite (book-wide replace, snapshot restore, reference rename) resets every cached
   // state and drops undo history; switching back from WYSIWYG applies a single transaction instead

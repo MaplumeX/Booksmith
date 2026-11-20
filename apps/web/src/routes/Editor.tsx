@@ -44,6 +44,7 @@ import {
   Loader2,
   Save,
   Search,
+  Settings,
   ShieldCheck,
   Sparkles,
   Tags,
@@ -65,8 +66,8 @@ import { basename, extensionOf, groupFiles, loadBook, proseLength, type LoadedBo
 import { createAutosave, type Autosave } from '../state/autosave'
 import type { ReplacePlan } from '../state/replacePlan'
 import { DRAFT_DEBOUNCE_MS, clearDraft, planDraftRestore, readDraft, writeDraft } from '../state/draftStore'
+import { getSettings, useSettings } from '../state/settingsStore'
 import { AgentPanel } from '../ui/AgentPanel'
-import { AgentSettingsDialog } from '../ui/AgentSettingsDialog'
 import { Button } from '../ui/Button'
 import { CheckPanel } from '../ui/CheckPanel'
 import { CodePane } from '../ui/CodePane'
@@ -77,6 +78,7 @@ import { MediaPane } from '../ui/MediaPane'
 import { PreviewPane } from '../ui/PreviewPane'
 import { MetadataPanel } from '../ui/MetadataPanel'
 import { SearchPanel } from '../ui/SearchPanel'
+import { SettingsDialog, type SettingsTab } from '../ui/SettingsDialog'
 import { TocPanel } from '../ui/TocPanel'
 import type { NavigateTarget, RevealTarget } from '../ui/CodePane'
 import { StatusBar } from '../ui/StatusBar'
@@ -193,6 +195,7 @@ function pruneToc(entries: TocEntry[], tocPath: string, removed: string): { entr
 }
 
 export function Editor({ bookId }: { bookId: string }) {
+  const { settings } = useSettings()
   const [state, setState] = useState<LoadState>({ status: 'loading' })
   const [book, setBook] = useState<LoadedBook | null>(null)
   const [tabs, setTabs] = useState<string[]>([])
@@ -200,11 +203,12 @@ export function Editor({ bookId }: { bookId: string }) {
   const [dirty, setDirty] = useState<Set<string>>(new Set())
   const [treeOpen, setTreeOpen] = useState(false)
   const [navTab, setNavTab] = useState<NavIslandTab>('files')
-  const [previewOpen, setPreviewOpen] = useState(true)
+  const [previewOpen, setPreviewOpen] = useState(() => getSettings().defaultPreviewOpen)
   const [searchOpen, setSearchOpen] = useState(false)
   const [metadataOpen, setMetadataOpen] = useState(false)
   const [checkOpen, setCheckOpen] = useState(false)
   const [agentOpen, setAgentOpen] = useState(false)
+  const [settingsTab, setSettingsTab] = useState<SettingsTab | null>(null)
   const [sidebarWidth, setSidebarWidth] = useState(440)
   const [reveal, setReveal] = useState<RevealTarget | null>(null)
   const assetInput = useRef<HTMLInputElement>(null)
@@ -234,12 +238,11 @@ export function Editor({ bookId }: { bookId: string }) {
   const saveRef = useRef<(options?: { checkpoint?: boolean }) => Promise<void>>(async () => {})
   /** Text and dirty flags from before a book-wide replace, so one click can revert the batch. */
   const replaceUndo = useRef<{ texts: Map<string, string>; dirty: Set<string> } | null>(null)
-  const [editorMode, setEditorMode] = useState<EditorViewMode>('code')
+  const [editorMode, setEditorMode] = useState<EditorViewMode>(() => getSettings().defaultEditorMode)
   const [externalResetVersion, setExternalResetVersion] = useState(0)
   const wysiwygFlushRef = useRef<(() => void) | null>(null)
   const [agentProfiles, setAgentProfiles] = useState<AgentProfileDto[]>([])
   const [agentProfilesLoading, setAgentProfilesLoading] = useState(true)
-  const [agentSettingsOpen, setAgentSettingsOpen] = useState(false)
   const [selectionText, setSelectionText] = useState('')
   const agentUndoRef = useRef<{ messageId: string; snapshot: WorkspaceSnapshot } | null>(null)
   const [agentUndoMessageId, setAgentUndoMessageId] = useState<string | null>(null)
@@ -1262,6 +1265,16 @@ export function Editor({ bookId }: { bookId: string }) {
           <Sparkles size={14} strokeWidth={1.7} aria-hidden="true" />
           <span className="appbar-agent-label">助手</span>
         </Button>
+        <Button
+          variant="ghost"
+          size="sm"
+          className="appbar-settings-btn"
+          aria-label="设置"
+          title="应用设置（主题、编辑器与 AI 助手）"
+          onClick={() => setSettingsTab('general')}
+        >
+          <Settings size={14} strokeWidth={1.7} aria-hidden="true" />
+        </Button>
         <span className="appbar-sep appbar-download" aria-hidden="true" />
         <a
           className="btn btn-ghost appbar-download"
@@ -1438,6 +1451,7 @@ export function Editor({ bookId }: { bookId: string }) {
                     content={content}
                     reveal={reveal}
                     visible={!showWysiwyg}
+                    wordWrap={settings.codeWordWrap}
                     syncMode={canWysiwyg ? 'transaction' : 'reset'}
                     resetVersion={externalResetVersion}
                     onNavigate={navigateTo}
@@ -1514,7 +1528,7 @@ export function Editor({ bookId }: { bookId: string }) {
                     deletedPaths: computeDeletedPaths(current),
                   }
                 }}
-                onOpenSettings={() => setAgentSettingsOpen(true)}
+                onOpenSettings={() => setSettingsTab('agent')}
                 onClose={() => setAgentOpen(false)}
                 onReloadBook={() => void reload()}
                 onApplyProposal={handleApplyAgentProposal}
@@ -1680,10 +1694,13 @@ export function Editor({ bookId }: { bookId: string }) {
         />
       ) : null}
 
-      <AgentSettingsDialog
-        open={agentSettingsOpen}
-        onOpenChange={setAgentSettingsOpen}
-        onChanged={setAgentProfiles}
+      <SettingsDialog
+        open={settingsTab !== null}
+        onOpenChange={(open) => {
+          if (!open) setSettingsTab(null)
+        }}
+        initialTab={settingsTab ?? 'general'}
+        onAgentProfilesChanged={setAgentProfiles}
       />
     </div>
   )

@@ -4,19 +4,14 @@ import { usePathname } from './router'
 import { Editor } from './routes/Editor'
 import { Library } from './routes/Library'
 import { Login } from './routes/Login'
+import { initSettings } from './state/settingsStore'
 
 export function App() {
   const pathname = usePathname()
   const [user, setUser] = useState<UserDto | null | undefined>(undefined)
 
   useEffect(() => {
-    const media = window.matchMedia('(prefers-color-scheme: dark)')
-    const apply = () => {
-      document.documentElement.dataset.theme = media.matches ? 'dark' : 'light'
-    }
-    apply()
-    media.addEventListener('change', apply)
-    return () => media.removeEventListener('change', apply)
+    initSettings()
   }, [])
 
   useEffect(() => {

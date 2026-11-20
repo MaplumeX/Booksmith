@@ -126,18 +126,65 @@ export function mediaTypeOf(path: string, pkg: EpubPackage): string {
  * rather than linked so their own relative `url(...)` references can be rewritten.
  * See ADR 2026-11-19-epub-editor-mvp.
  */
-export function buildEditorStyleCss(paperTheme: 'light' | 'dark'): string {
-  const isDark = paperTheme === 'dark'
-  const paperBg = isDark ? '#1b222c' : '#ffffff'
-  const paperText = isDark ? '#e9edf2' : '#1b222c'
-  const paperBorder = isDark ? '#2d3746' : '#d6dbe0'
-  const paperShadow = isDark
-    ? '0 1px 2px rgb(7 11 18 / 28%), inset 0 1px 0 rgb(255 255 255 / 4%)'
-    : '0 1px 2px rgb(16 24 40 / 6%), 0 1px 1px rgb(16 24 40 / 4%)'
-  const islandBorder = isDark ? '#404c5e' : '#aab5c6'
-  const accent = isDark ? '#82abd3' : '#35618c'
+export function buildPreviewThemeCss(theme: 'light' | 'dark'): string {
+  const isDark = theme === 'dark'
+  const bg = isDark ? '#1a1b24' : '#ffffff'
+  const text = isDark ? '#ececf2' : '#202028'
+  const link = isDark ? '#9c97f4' : '#4338ca'
+  const border = isDark ? '#2c2e3d' : '#e2e2ea'
+  const muted = isDark ? '#9e9fb3' : '#5a5a6b'
 
   return `
+:root {
+  color-scheme: ${theme};
+}
+html,
+body {
+  background-color: ${bg};
+  color: ${text};
+}
+${
+  isDark
+    ? `a {
+  color: ${link};
+}
+hr,
+th,
+td,
+blockquote {
+  border-color: ${border};
+}
+`
+    : ''
+}img[data-missing="true"] {
+  display: inline-block;
+  min-width: 120px;
+  min-height: 36px;
+  padding: 6px 10px;
+  border: 1px dashed ${border};
+  border-radius: 4px;
+  font-size: 12px;
+  color: ${muted};
+}
+`
+}
+
+export function buildEditorStyleCss(paperTheme: 'light' | 'dark'): string {
+  const isDark = paperTheme === 'dark'
+  const paperBg = isDark ? '#1a1b24' : '#ffffff'
+  const paperText = isDark ? '#ececf2' : '#202028'
+  const paperBorder = isDark ? '#2c2e3d' : '#e2e2ea'
+  const paperShadow = isDark
+    ? '0 2px 6px rgb(6 7 12 / 34%), inset 0 1px 0 rgb(255 255 255 / 5%)'
+    : '0 2px 6px -1px rgb(18 19 26 / 6%), 0 1px 2px rgb(18 19 26 / 4%)'
+  const islandBorder = isDark ? '#464655' : '#afb0bd'
+  const accent = isDark ? '#9c97f4' : '#4338ca'
+  const muted = isDark ? '#9e9fb3' : '#5a5a6b'
+
+  return `
+:root {
+  color-scheme: ${paperTheme};
+}
 html {
   background: transparent !important;
   padding: 24px 16px !important;
@@ -153,12 +200,25 @@ body {
   background: ${paperBg};
   color: ${paperText};
   border: 1px solid ${paperBorder};
-  border-radius: 6px;
+  border-radius: 10px;
   box-shadow: ${paperShadow};
   outline: none;
   overflow-wrap: break-word;
 }
-@media (max-width: 640px) {
+${
+  isDark
+    ? `body a {
+  color: ${accent};
+}
+body hr,
+body th,
+body td,
+body blockquote {
+  border-color: ${paperBorder};
+}
+`
+    : ''
+}@media (max-width: 640px) {
   html {
     padding: 12px 8px !important;
   }
@@ -187,7 +247,7 @@ body img[data-missing="true"] {
   border: 1px dashed ${islandBorder};
   border-radius: 4px;
   font-size: 12px;
-  color: ${isDark ? '#aab5c6' : '#546175'};
+  color: ${muted};
 }
 body p:empty::before {
   content: "\\200B";
@@ -200,10 +260,11 @@ export function buildPreviewDocument(args: {
   path: string
   archive: EpubArchive
   pkg: EpubPackage
+  theme?: 'light' | 'dark'
   editable?: { paperTheme?: 'light' | 'dark' }
   blobCache?: PreviewBlobCache
 }): BuiltPreviewDocument {
-  const { xhtml, path, archive, pkg, editable, blobCache } = args
+  const { xhtml, path, archive, pkg, theme = 'light', editable, blobCache } = args
   const doc = new DOMParser().parseFromString(xhtml, 'text/html')
   const ephemeralUrls: string[] = []
   const dependencies = new Map<string, PreviewResourceSnapshot>()
@@ -307,8 +368,13 @@ export function buildPreviewDocument(args: {
 
     const editorStyle = doc.createElement('style')
     editorStyle.setAttribute('data-booksmith-editor-style', 'true')
-    editorStyle.textContent = buildEditorStyleCss(editable.paperTheme ?? 'light')
+    editorStyle.textContent = buildEditorStyleCss(editable.paperTheme ?? theme)
     doc.head?.appendChild(editorStyle)
+  } else {
+    const previewThemeStyle = doc.createElement('style')
+    previewThemeStyle.setAttribute('data-booksmith-preview-theme', 'true')
+    previewThemeStyle.textContent = buildPreviewThemeCss(theme)
+    doc.head?.appendChild(previewThemeStyle)
   }
 
   return {
@@ -326,6 +392,7 @@ export function buildPreview(args: {
   path: string
   archive: EpubArchive
   pkg: EpubPackage
+  theme?: 'light' | 'dark'
   editable?: { paperTheme?: 'light' | 'dark' }
 }): PreviewDocument {
   const built = buildPreviewDocument(args)
