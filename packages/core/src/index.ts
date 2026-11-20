@@ -60,3 +60,12 @@ export type { BrokenAnchor, TocEntry, TocPath } from './toc'
 export { readNavToc, writeNavToc } from './nav'
 export { readNcxToc, writeNcxToc } from './ncx'
 export type { SearchFile, SearchMatch, SearchOptions, SearchResult } from './search'
+export { AGENT_TOOL_NAMES, AgentWorkspace } from './agentTools'
+export type {
+  AgentProposal,
+  AgentProposalFile,
+  AgentToolName,
+  AgentToolResult,
+  AgentWorkspaceOptions,
+  AgentWorkspaceOverlay,
+} from './agentTools'

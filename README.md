@@ -86,6 +86,7 @@ docker compose exec app pnpm --filter @booksmith/server db:migrate
 | `PORT` | `8787` | API 端口 |
 | `COOKIE_SECURE` | `false` | 仅 HTTPS 下发送会话 cookie |
 | `SESSION_TTL_DAYS` | `30` | 会话有效期 |
+| `AGENT_SECRET_KEY` | 空（禁用加密保存 API Key） | 32 字节密钥（`openssl rand -hex 32`），AES-256-GCM 加密用户模型 API Key |
 | `WEB_DIST` | 空 | 设置后由 Fastify 托管该目录的静态前端 |
 
 ## 备份

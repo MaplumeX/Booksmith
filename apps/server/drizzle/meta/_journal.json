@@ -43,6 +43,13 @@
       "when": 1795093160470,
       "tag": "0005_brainy_human_torch",
       "breakpoints": true
+    },
+    {
+      "idx": 6,
+      "version": "7",
+      "when": 1795156709315,
+      "tag": "0006_vengeful_energizer",
+      "breakpoints": true
     }
   ]
 }

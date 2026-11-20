@@ -24,6 +24,7 @@ import {
   writeOpfMeta,
   writeOpfMetadata,
   zipArchive,
+  type AgentProposal,
   type EpubArchive,
   type EpubIssue,
   type OpfMetaRow,
@@ -45,17 +46,27 @@ import {
   Save,
   Search,
   ShieldCheck,
+  Sparkles,
   Tags,
 } from 'lucide-react'
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { ApiError, api, downloadUrl } from '../api/client'
+import { ApiError, api, downloadUrl, type AgentProfileDto } from '../api/client'
 import { mediaTypeFromExtension, mediaTypeOf } from '../preview/render'
 import { spinePaths } from '../diff/document'
 import { navigate } from '../router'
+import {
+  applyProposalToBook,
+  collectDirtyTexts,
+  computeDeletedPaths,
+  createUndoSnapshot,
+  type WorkspaceSnapshot,
+} from '../state/agentProposal'
 import { basename, extensionOf, groupFiles, loadBook, proseLength, type LoadedBook } from '../state/bookStore'
 import { createAutosave, type Autosave } from '../state/autosave'
 import type { ReplacePlan } from '../state/replacePlan'
 import { DRAFT_DEBOUNCE_MS, clearDraft, planDraftRestore, readDraft, writeDraft } from '../state/draftStore'
+import { AgentPanel } from '../ui/AgentPanel'
+import { AgentSettingsDialog } from '../ui/AgentSettingsDialog'
 import { Button } from '../ui/Button'
 import { CheckPanel } from '../ui/CheckPanel'
 import { CodePane } from '../ui/CodePane'
@@ -74,7 +85,7 @@ import { VersionHistory } from '../ui/VersionHistory'
 import { WysiwygPane, type WysiwygShortcut } from '../ui/WysiwygPane'
 
 type LoadState = { status: 'loading' } | { status: 'error'; message: string } | { status: 'ready' }
-type SidebarTab = 'preview' | 'search' | 'metadata' | 'toc' | 'check'
+type SidebarTab = 'preview' | 'search' | 'metadata' | 'toc' | 'check' | 'agent'
 
 const SIDEBAR_MIN = 400
 const SIDEBAR_MAX = 560
@@ -84,6 +95,7 @@ const SIDEBAR_TABS: Array<[SidebarTab, string]> = [
   ['metadata', '元数据'],
   ['toc', '目录'],
   ['check', '检查'],
+  ['agent', '助手'],
 ]
 
 function messageFor(error: unknown): string {
@@ -194,6 +206,7 @@ const SIDEBAR_TAB_ICONS: Record<SidebarTab, typeof Eye> = {
   metadata: Tags,
   toc: ListTree,
   check: ShieldCheck,
+  agent: Sparkles,
 }
 
 export function Editor({ bookId }: { bookId: string }) {
@@ -236,6 +249,14 @@ export function Editor({ bookId }: { bookId: string }) {
   const [editorMode, setEditorMode] = useState<EditorViewMode>('code')
   const [externalResetVersion, setExternalResetVersion] = useState(0)
   const wysiwygFlushRef = useRef<(() => void) | null>(null)
+  const [agentProfiles, setAgentProfiles] = useState<AgentProfileDto[]>([])
+  const [agentProfilesLoading, setAgentProfilesLoading] = useState(true)
+  const [agentSettingsOpen, setAgentSettingsOpen] = useState(false)
+  const [selectionText, setSelectionText] = useState('')
+  const agentUndoRef = useRef<{ messageId: string; snapshot: WorkspaceSnapshot } | null>(null)
+  const [agentUndoMessageId, setAgentUndoMessageId] = useState<string | null>(null)
+  const activeRef = useRef<string | null>(null)
+  activeRef.current = active
 
   const applyBook = useCallback((loaded: LoadedBook) => {
     texts.current = new Map(loaded.texts)
@@ -273,6 +294,25 @@ export function Editor({ bookId }: { bookId: string }) {
       cancelled = true
     }
   }, [bookId, applyBook])
+
+  useEffect(() => {
+    let cancelled = false
+    setAgentProfilesLoading(true)
+    api
+      .agentProfiles()
+      .then((res) => {
+        if (!cancelled) setAgentProfiles(res.profiles)
+      })
+      .catch(() => {
+        if (!cancelled) setAgentProfiles([])
+      })
+      .finally(() => {
+        if (!cancelled) setAgentProfilesLoading(false)
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [bookId])
 
   const open = useCallback((path: string) => {
     wysiwygFlushRef.current?.()
@@ -337,6 +377,81 @@ export function Editor({ bookId }: { bookId: string }) {
       // Typing needs no rerender (the editor owns its document), but a form write into a file that
       // is already dirty does: without this the toc/meta panels keep showing the previous parse.
       if (options.rerender) setRevision((value) => value + 1)
+      if (agentUndoRef.current) {
+        agentUndoRef.current = null
+        setAgentUndoMessageId(null)
+      }
+      scheduleDraft()
+      autosave.current?.touch()
+    },
+    [scheduleDraft],
+  )
+
+  const handleApplyAgentProposal = useCallback(
+    async (messageId: string, proposal: AgentProposal, selectedPaths?: Set<string>): Promise<boolean> => {
+      wysiwygFlushRef.current?.()
+      const current = bookRef.current
+      if (!current) return false
+      try {
+        const snapshot = createUndoSnapshot({
+          book: current,
+          texts: texts.current,
+          dirty: dirtyRef.current,
+          tabs: tabsRef.current,
+          active: activeRef.current,
+        })
+        const applied = applyProposalToBook({
+          book: current,
+          texts: texts.current,
+          dirty: dirtyRef.current,
+          tabs: tabsRef.current,
+          active: activeRef.current,
+          proposal,
+          selectedPaths,
+        })
+        if (applied.appliedCount === 0) return false
+
+        agentUndoRef.current = { messageId, snapshot }
+        setAgentUndoMessageId(messageId)
+
+        texts.current = applied.texts
+        bookRef.current = applied.book
+        dirtyRef.current = applied.dirty
+        setBook(applied.book)
+        setDirty(applied.dirty)
+        setTabs(applied.tabs)
+        setActive(applied.active)
+        setExternalResetVersion((v) => v + 1)
+        setRevision((v) => v + 1)
+        scheduleDraft()
+        autosave.current?.touch()
+
+        await api.updateProposalStatus(current.id, messageId, 'applied').catch(() => {})
+        return true
+      } catch (error) {
+        setSaveError(error instanceof Error ? error.message : '应用变更提案失败')
+        return false
+      }
+    },
+    [scheduleDraft],
+  )
+
+  const handleUndoAgentProposal = useCallback(
+    (messageId: string) => {
+      const saved = agentUndoRef.current
+      if (!saved || saved.messageId !== messageId) return
+      const { snapshot } = saved
+      texts.current = new Map(snapshot.texts)
+      bookRef.current = snapshot.book
+      dirtyRef.current = new Set(snapshot.dirty)
+      setBook(snapshot.book)
+      setDirty(new Set(snapshot.dirty))
+      setTabs([...snapshot.tabs])
+      setActive(snapshot.active)
+      setExternalResetVersion((v) => v + 1)
+      setRevision((v) => v + 1)
+      agentUndoRef.current = null
+      setAgentUndoMessageId(null)
       scheduleDraft()
       autosave.current?.touch()
     },
@@ -698,11 +813,18 @@ export function Editor({ bookId }: { bookId: string }) {
         ]
         const bytes = zipArchive({ order, entries })
         const result = await api.save(book.id, book.version, bytes, options)
-        const next = { ...book, version: result.version, archive: { order, entries } }
+        const next = {
+          ...book,
+          version: result.version,
+          archive: { order, entries },
+          serverPaths: new Set(entries.keys()),
+        }
         bookRef.current = next
         setBook(next)
         dirtyRef.current = new Set()
         setDirty(new Set())
+        agentUndoRef.current = null
+        setAgentUndoMessageId(null)
         setSaveState('saved')
         setSavedAt(Date.now())
         setServerIssues([])
@@ -1035,6 +1157,32 @@ export function Editor({ bookId }: { bookId: string }) {
         />
       )
     }
+    if (sidebarTab === 'agent') {
+      return (
+        <AgentPanel
+          bookId={book.id}
+          bookTitle={book.pkg.metadata.title || '未命名'}
+          bookVersion={book.version}
+          activePath={active}
+          selectionText={selectionText}
+          profiles={agentProfiles}
+          profilesLoading={agentProfilesLoading}
+          undoMessageId={agentUndoMessageId}
+          getOverlay={() => {
+            wysiwygFlushRef.current?.()
+            const current = bookRef.current ?? book
+            return {
+              dirtyTexts: collectDirtyTexts(texts.current, dirtyRef.current, current),
+              deletedPaths: computeDeletedPaths(current),
+            }
+          }}
+          onOpenSettings={() => setAgentSettingsOpen(true)}
+          onReloadBook={() => void reload()}
+          onApplyProposal={handleApplyAgentProposal}
+          onUndoProposal={handleUndoAgentProposal}
+        />
+      )
+    }
     if (!tocPath) {
       return <p className="sidebar-note">这本书没有 nav.xhtml 或 toc.ncx，暂时无法编辑目录。</p>
     }
@@ -1258,6 +1406,7 @@ export function Editor({ bookId }: { bookId: string }) {
                   syncMode={canWysiwyg ? 'transaction' : 'reset'}
                   resetVersion={externalResetVersion}
                   onNavigate={navigateTo}
+                  onSelectionChange={setSelectionText}
                   onChange={(value) => handleChange(active, value)}
                 />
                 {showWysiwyg ? (
@@ -1421,6 +1570,12 @@ export function Editor({ bookId }: { bookId: string }) {
           }}
         />
       ) : null}
+
+      <AgentSettingsDialog
+        open={agentSettingsOpen}
+        onOpenChange={setAgentSettingsOpen}
+        onChanged={setAgentProfiles}
+      />
 
       <StatusBar
         path={active}

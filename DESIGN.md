@@ -53,6 +53,9 @@
 | `MetadataPanel` | `src/ui/MetadataPanel.tsx` | default / dirty / error（字段非法）/ meta 卡片行编辑 / edge（同一 property+refines 重复行） |
 | `TocPanel` | `src/ui/TocPanel.tsx` | default / empty / error（锚点失效）/ 新增表单 / 缩进禁用 / Lucide 行内操作 |
 | `CheckPanel` | `src/ui/CheckPanel.tsx` | empty（全部通过图标提示）/ 错误与提醒分层卡片（带图标）/ 点击跳行 |
+| `AgentPanel` | `src/ui/AgentPanel.tsx` | default（多会话切换 + 流式回复 + 工具步骤折叠 + 上下文芯片 + 模型预设下拉）/ empty（未配置模型引导 / 新对话快捷任务）/ loading（骨架与流式生成 + 停止）/ error（版本冲突、未配密钥、上游报错带恢复动作）/ edge（长文本截断、`<1024px` 抽屉） |
+| `AgentProposalCard` | `src/ui/AgentProposalCard.tsx` | default（纯文本按文件勾选 / 结构变更整批原子应用 + 折叠字符级 Diff）/ applied（一键撤销本次应用）/ dismissed（低对比单行折叠）/ error（结构预检未通过阻断并列诊断）/ edge（删除影响引用提示、大 Diff 折叠展开） |
+| `AgentSettingsDialog` | `src/ui/AgentSettingsDialog.tsx` | Radix Dialog (`760px` 宽双栏) / 多预设列表与默认标记 / OpenAI·Anthropic·DeepSeek·Ollama 快捷模板 / 测试连接反馈 / empty / loading / error（缺 `AGENT_SECRET_KEY` 警告、测试失败）/ edge（留空保留已存密钥、本地无密钥预设） |
 | `MediaPane` | `src/ui/MediaPane.tsx` | default（带外框预览）/ 非图片（图标说明）/ 替换确认（Radix Dialog）/ 删除入口 |
 | `SearchPanel` | `src/ui/SearchPanel.tsx` | default / empty / loading / 全书替换确认与撤销 |
 | `SearchBar` | `src/ui/SearchBar.tsx` | default / focus-within / Lucide 搜索图标 + 内凹边界 |

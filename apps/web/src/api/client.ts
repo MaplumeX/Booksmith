@@ -1,3 +1,5 @@
+import type { AgentProposal, AgentToolName } from '@booksmith/core'
+
 export interface UserDto {
   id: string
   email: string
@@ -26,6 +28,85 @@ export interface BookDto {
   updatedAt: string
   hasCover: boolean
 }
+
+export type AgentProviderType = 'openai-compatible' | 'anthropic'
+
+export interface AgentProfileDto {
+  id: string
+  name: string
+  provider: AgentProviderType
+  baseUrl: string
+  model: string
+  hasApiKey: boolean
+  apiKeyLast4: string | null
+  isDefault: boolean
+  updatedAt: string
+}
+
+export interface AgentProfileCreateInput {
+  name: string
+  provider: AgentProviderType
+  baseUrl: string
+  model: string
+  apiKey?: string
+  isDefault?: boolean
+}
+
+export interface AgentProfileUpdateInput {
+  name?: string
+  provider?: AgentProviderType
+  baseUrl?: string
+  model?: string
+  apiKey?: string
+  clearApiKey?: boolean
+  isDefault?: boolean
+}
+
+export interface AgentConnectionTestResult {
+  ok: boolean
+  latencyMs: number
+  reply?: string
+  errorCode?: string
+  error?: string
+}
+
+export interface AgentThreadDto {
+  id: string
+  bookId: string
+  title: string
+  profileId: string | null
+  createdAt: string
+  updatedAt: string
+}
+
+export interface AgentToolCallDto {
+  id: string
+  name: AgentToolName
+  argsSummary: string
+  ok: boolean
+  summary: string
+}
+
+export interface AgentMessageDto {
+  id: string
+  threadId: string
+  role: 'user' | 'assistant'
+  content: string
+  context: { activePath?: string | null; selection?: string | null } | null
+  toolCalls: AgentToolCallDto[]
+  proposal: AgentProposal | null
+  proposalStatus: 'pending' | 'applied' | 'dismissed' | null
+  error: string | null
+  createdAt: string
+}
+
+export type AgentSseEvent =
+  | { type: 'text_delta'; text: string }
+  | { type: 'tool_start'; id: string; name: AgentToolName; argsSummary: string }
+  | { type: 'tool_end'; id: string; name: AgentToolName; ok: boolean; summary: string }
+  | { type: 'proposal'; proposal: AgentProposal }
+  | { type: 'done'; messageId?: string; threadTitle?: string; stopped: boolean }
+  | { type: 'error'; code: string; message: string }
 
 export class ApiError extends Error {
   constructor(
@@ -119,6 +200,132 @@ export const api = {
     return {
       bytes: new Uint8Array(await response.arrayBuffer()),
       version: Number(etag.replace(/[^0-9]/g, '')) || 0,
+    }
+  },
+
+  agentProfiles: () => request<{ secretConfigured: boolean; profiles: AgentProfileDto[] }>('/agent/profiles'),
+
+  createAgentProfile: (input: AgentProfileCreateInput) =>
+    request<{ profile: AgentProfileDto }>('/agent/profiles', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(input),
+    }),
+
+  updateAgentProfile: (profileId: string, input: AgentProfileUpdateInput) =>
+    request<{ profile: AgentProfileDto }>(`/agent/profiles/${profileId}`, {
+      method: 'PATCH',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(input),
+    }),
+
+  deleteAgentProfile: (profileId: string) =>
+    request<void>(`/agent/profiles/${profileId}`, { method: 'DELETE' }),
+
+  testAgentProfile: (input: {
+    profileId?: string
+    provider: AgentProviderType
+    baseUrl: string
+    model: string
+    apiKey?: string
+  }) =>
+    request<AgentConnectionTestResult>('/agent/profiles/test', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(input),
+    }),
+
+  agentThreads: (bookId: string) => request<{ threads: AgentThreadDto[] }>(`/books/${bookId}/agent/threads`),
+
+  createAgentThread: (bookId: string, input: { title?: string; profileId?: string } = {}) =>
+    request<{ thread: AgentThreadDto }>(`/books/${bookId}/agent/threads`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(input),
+    }),
+
+  agentThread: (bookId: string, threadId: string) =>
+    request<{ thread: AgentThreadDto; messages: AgentMessageDto[] }>(
+      `/books/${bookId}/agent/threads/${threadId}`,
+    ),
+
+  updateAgentThread: (bookId: string, threadId: string, input: { title?: string; profileId?: string | null }) =>
+    request<{ thread: AgentThreadDto }>(`/books/${bookId}/agent/threads/${threadId}`, {
+      method: 'PATCH',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(input),
+    }),
+
+  deleteAgentThread: (bookId: string, threadId: string) =>
+    request<void>(`/books/${bookId}/agent/threads/${threadId}`, { method: 'DELETE' }),
+
+  updateProposalStatus: (bookId: string, messageId: string, status: 'applied' | 'dismissed') =>
+    request<{ message: AgentMessageDto }>(`/books/${bookId}/agent/proposals/${messageId}`, {
+      method: 'PATCH',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ status }),
+    }),
+
+  streamAgentMessage: async (
+    bookId: string,
+    threadId: string,
+    body: {
+      content: string
+      profileId?: string
+      baseVersion: number
+      dirtyTexts?: Record<string, string>
+      deletedPaths?: string[]
+      context?: { activePath?: string | null; selection?: string | null }
+    },
+    options: { onEvent: (event: AgentSseEvent) => void; signal?: AbortSignal },
+  ): Promise<void> => {
+    const response = await fetch(`/api/books/${bookId}/agent/threads/${threadId}/messages`, {
+      method: 'POST',
+      credentials: 'include',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(body),
+      signal: options.signal,
+    })
+
+    if (!response.ok) {
+      const payload = await response.json().catch(() => ({}))
+      const code = (payload as { error?: string }).error ?? `http_${response.status}`
+      throw new ApiError(response.status, code, payload)
+    }
+
+    if (!response.body) throw new ApiError(500, 'empty_stream', {})
+
+    const reader = response.body.getReader()
+    const decoder = new TextDecoder('utf-8')
+    let buffer = ''
+
+    while (true) {
+      const { value, done } = await reader.read()
+      if (done) break
+      buffer += decoder.decode(value, { stream: true })
+      const chunks = buffer.split('\n\n')
+      buffer = chunks.pop() ?? ''
+      for (const chunk of chunks) {
+        const line = chunk
+          .split('\n')
+          .find((entry) => entry.startsWith('data: '))
+        if (!line) continue
+        try {
+          const parsed = JSON.parse(line.slice(6)) as AgentSseEvent
+          options.onEvent(parsed)
+        } catch {
+          // Ignore malformed keepalive frames.
+        }
+      }
+    }
+
+    const tail = buffer.trim()
+    if (tail.startsWith('data: ')) {
+      try {
+        options.onEvent(JSON.parse(tail.slice(6)) as AgentSseEvent)
+      } catch {
+        // Ignore incomplete tail on abrupt disconnect.
+      }
     }
   },
 }

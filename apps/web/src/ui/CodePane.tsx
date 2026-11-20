@@ -24,6 +24,7 @@ interface CodePaneProps {
   onChange: (value: string) => void
   reveal?: RevealTarget | null
   onNavigate?: (target: NavigateTarget) => void
+  onSelectionChange?: (selection: string) => void
   visible?: boolean
   syncMode?: 'reset' | 'transaction'
   resetVersion?: number
@@ -62,6 +63,7 @@ export function CodePane({
   onChange,
   reveal,
   onNavigate,
+  onSelectionChange,
   visible = true,
   syncMode = 'reset',
   resetVersion = 0,
@@ -76,9 +78,11 @@ export function CodePane({
   const lastResetVersion = useRef(resetVersion)
   const onChangeRef = useRef(onChange)
   const onNavigateRef = useRef(onNavigate)
+  const onSelectionRef = useRef(onSelectionChange)
   const latest = useRef({ path, content })
   onChangeRef.current = onChange
   onNavigateRef.current = onNavigate
+  onSelectionRef.current = onSelectionChange
   latest.current = { path, content }
 
   const makeState = useCallback(
@@ -94,6 +98,10 @@ export function CodePane({
           keymap.of(searchKeymap),
           EditorView.updateListener.of((update) => {
             if (update.docChanged) onChangeRef.current(update.state.doc.toString())
+            if (update.selectionSet && onSelectionRef.current) {
+              const { from, to } = update.state.selection.main
+              onSelectionRef.current(from === to ? '' : update.state.sliceDoc(from, to))
+            }
           }),
           EditorView.domEventHandlers({
             mousedown(event, editor) {

@@ -79,8 +79,72 @@ export const pageVersions = pgTable(
   (table) => [index('page_versions_book_path_idx').on(table.bookId, table.path, table.createdAt)],
 )
 
+/** Per-user LLM provider presets with AES-256-GCM encrypted API keys.
+ * See ADR 2026-11-20-builtin-epub-agent. */
+export const agentProfiles = pgTable(
+  'agent_profiles',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    userId: uuid('user_id')
+      .notNull()
+      .references(() => users.id, { onDelete: 'cascade' }),
+    name: text('name').notNull(),
+    provider: text('provider').notNull(),
+    baseUrl: text('base_url').notNull(),
+    model: text('model').notNull(),
+    apiKeyCiphertext: text('api_key_ciphertext'),
+    apiKeyLast4: text('api_key_last4'),
+    isDefault: boolean('is_default').notNull().default(false),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [index('agent_profiles_user_id_idx').on(table.userId)],
+)
+
+/** Per-book Agent conversation threads, persisted across reloads and devices. */
+export const agentThreads = pgTable(
+  'agent_threads',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    bookId: uuid('book_id')
+      .notNull()
+      .references(() => books.id, { onDelete: 'cascade' }),
+    userId: uuid('user_id')
+      .notNull()
+      .references(() => users.id, { onDelete: 'cascade' }),
+    title: text('title').notNull().default('新对话'),
+    profileId: uuid('profile_id').references(() => agentProfiles.id, { onDelete: 'set null' }),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [index('agent_threads_book_user_updated_idx').on(table.bookId, table.userId, table.updatedAt)],
+)
+
+/** Individual user/assistant turns within an Agent thread, including tool summaries and proposals. */
+export const agentMessages = pgTable(
+  'agent_messages',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    threadId: uuid('thread_id')
+      .notNull()
+      .references(() => agentThreads.id, { onDelete: 'cascade' }),
+    role: text('role').notNull(),
+    content: text('content').notNull().default(''),
+    contextJson: text('context_json'),
+    toolCallsJson: text('tool_calls_json'),
+    proposalJson: text('proposal_json'),
+    proposalStatus: text('proposal_status'),
+    error: text('error'),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [index('agent_messages_thread_created_idx').on(table.threadId, table.createdAt)],
+)
+
 export type User = typeof users.$inferSelect
 export type NewUser = typeof users.$inferInsert
 export type Book = typeof books.$inferSelect
 export type BookFile = typeof bookFiles.$inferSelect
 export type PageVersion = typeof pageVersions.$inferSelect
+export type AgentProfile = typeof agentProfiles.$inferSelect
+export type AgentThread = typeof agentThreads.$inferSelect
+export type AgentMessage = typeof agentMessages.$inferSelect
