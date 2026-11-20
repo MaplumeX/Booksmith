@@ -1,11 +1,14 @@
 import { dirname, resolvePath, splitFragment } from '@booksmith/core'
-import { Compartment, EditorState } from '@codemirror/state'
+import { Annotation, Compartment, EditorState } from '@codemirror/state'
 import { EditorView, keymap } from '@codemirror/view'
 import { search, searchKeymap } from '@codemirror/search'
 import { basicSetup } from 'codemirror'
 import { useCallback, useEffect, useRef } from 'react'
+import { normalizeEol, restoreEol } from '../editor/eol'
 import { languageFor } from '../editor/languages'
 import { editorTheme } from '../editor/theme'
+
+const externalSyncAnnotation = Annotation.define<boolean>()
 
 export interface RevealTarget {
   line: number
@@ -79,6 +82,7 @@ export function CodePane({
    * silently drops the user's last edit from history.
    * See ADR 2026-11-19-editor-state-per-tab. */
   const states = useRef(new Map<string, EditorState>())
+  const seedTexts = useRef(new Map<string, string>())
   const shownPath = useRef<string | null>(null)
   const lastResetVersion = useRef(resetVersion)
   const onChangeRef = useRef(onChange)
@@ -91,8 +95,9 @@ export function CodePane({
   latest.current = { path, content }
 
   const makeState = useCallback(
-    (forPath: string, doc: string): EditorState =>
-      EditorState.create({
+    (forPath: string, doc: string): EditorState => {
+      seedTexts.current.set(forPath, doc)
+      return EditorState.create({
         doc,
         extensions: [
           basicSetup,
@@ -102,7 +107,16 @@ export function CodePane({
           search({ top: true }),
           keymap.of(searchKeymap),
           EditorView.updateListener.of((update) => {
-            if (update.docChanged) onChangeRef.current(update.state.doc.toString())
+            if (update.docChanged) {
+              // Ignore programmatic syncs from props so opening CRLF files or returning from
+              // WYSIWYG after a save never loops back into `onChange` and marks the file dirty.
+              // See ADR 2026-11-20-baseline-derived-dirty-state.
+              const isExternal = update.transactions.every((tr) => tr.annotation(externalSyncAnnotation))
+              if (!isExternal) {
+                const seed = seedTexts.current.get(forPath) ?? ''
+                onChangeRef.current(restoreEol(update.state.doc.toString(), seed))
+              }
+            }
             if (update.selectionSet && onSelectionRef.current) {
               const { from, to } = update.state.selection.main
               onSelectionRef.current(from === to ? '' : update.state.sliceDoc(from, to))
@@ -119,7 +133,8 @@ export function CodePane({
             },
           }),
         ],
-      }),
+      })
+    },
     [editorTheme],
   )
 
@@ -128,6 +143,7 @@ export function CodePane({
   useEffect(() => {
     if (!host.current) return
     states.current.clear()
+    seedTexts.current.clear()
     const initial = makeState(latest.current.path, latest.current.content)
     const instance = new EditorView({ state: initial, parent: host.current })
     view.current = instance
@@ -180,6 +196,7 @@ export function CodePane({
     if (resetVersion !== lastResetVersion.current) {
       lastResetVersion.current = resetVersion
       states.current.clear()
+      seedTexts.current.clear()
       const next = makeState(path, content)
       states.current.set(path, next)
       instance.setState(next)
@@ -187,11 +204,14 @@ export function CodePane({
     }
 
     if (!visible) return
-    if (instance.state.doc.toString() === content) return
+    const normalizedContent = normalizeEol(content)
+    if (instance.state.doc.toString() === normalizedContent) return
 
     if (syncMode === 'transaction') {
+      if (!seedTexts.current.has(path)) seedTexts.current.set(path, content)
       instance.dispatch({
-        changes: { from: 0, to: instance.state.doc.length, insert: content },
+        changes: { from: 0, to: instance.state.doc.length, insert: normalizedContent },
+        annotations: externalSyncAnnotation.of(true),
       })
       states.current.set(path, instance.state)
       return
