@@ -42,7 +42,7 @@ export function App() {
   if (!user) return <Login onSuccess={setUser} />
 
   const match = /^\/books\/([^/]+)$/.exec(pathname)
-  if (match?.[1]) return <Editor bookId={match[1]} />
+  if (match?.[1]) return <Editor key={match[1]} bookId={match[1]} />
 
   return (
     <Library

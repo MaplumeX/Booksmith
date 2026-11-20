@@ -1,4 +1,5 @@
 import type { XmlDocumentParser } from '@booksmith/core'
+import { applyEol, detectEol } from './eol'
 
 export const ISLAND_SELECTOR = 'math, svg, video, audio'
 
@@ -331,7 +332,10 @@ export function serializeEditableBody(
 export function replaceBodyInXhtml(originalXhtml: string, serializedBody: string): string {
   const range = extractBodyRange(originalXhtml)
   if (!range) return originalXhtml
-  return `${originalXhtml.slice(0, range.openStart)}${serializedBody}${originalXhtml.slice(range.closeEnd)}`
+  // Preserve the chapter's original dominant line-ending style so visual edits on CRLF chapters
+  // do not turn the entire body into an EOL diff. See ADR 2026-11-20-baseline-derived-dirty-state.
+  const alignedBody = applyEol(serializedBody, detectEol(originalXhtml))
+  return `${originalXhtml.slice(0, range.openStart)}${alignedBody}${originalXhtml.slice(range.closeEnd)}`
 }
 
 export function isIslandTagName(tagName: string): boolean {

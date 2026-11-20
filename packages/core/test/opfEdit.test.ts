@@ -6,6 +6,7 @@ import {
   removeManifestEntry,
   renameManifestEntry,
   reorderSpine,
+  setManifestMediaType,
 } from '../src/opfEdit'
 import type { XmlCodec } from '../src/xml'
 
@@ -143,5 +144,20 @@ describe('reorderSpine', () => {
     const { opf, baseDir } = emptyBookOpf()
     const next = reorderSpine(opf, ['EPUB/text/nope.xhtml'], baseDir, codec)
     expect(parsePackage(next, 'EPUB/content.opf', codec.parse).spine).toEqual(['ch001'])
+  })
+})
+
+describe('setManifestMediaType', () => {
+  it('returns the original xml verbatim when media-type is already identical', () => {
+    const { opf, baseDir } = emptyBookOpf()
+    const next = setManifestMediaType(opf, 'EPUB/text/ch001.xhtml', 'application/xhtml+xml', baseDir, codec)
+    expect(next).toBe(opf)
+  })
+
+  it('updates media-type when it differs from the manifest value', () => {
+    const { opf, baseDir } = emptyBookOpf()
+    const next = setManifestMediaType(opf, 'EPUB/styles/stylesheet1.css', 'text/plain', baseDir, codec)
+    expect(next).not.toBe(opf)
+    expect(parsePackage(next, 'EPUB/content.opf', codec.parse).manifest.find((i) => i.path === 'EPUB/styles/stylesheet1.css')?.mediaType).toBe('text/plain')
   })
 })
