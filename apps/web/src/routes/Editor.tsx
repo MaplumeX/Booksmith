@@ -30,6 +30,23 @@ import {
   type SearchFile,
   type TocEntry,
 } from '@booksmith/core'
+import {
+  AlertCircle,
+  ArrowLeft,
+  Check,
+  Download,
+  Eye,
+  FolderTree,
+  History,
+  ImagePlus,
+  ListTree,
+  Loader2,
+  PanelRight,
+  Save,
+  Search,
+  ShieldCheck,
+  Tags,
+} from 'lucide-react'
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { ApiError, api, downloadUrl } from '../api/client'
 import { mediaTypeFromExtension, mediaTypeOf } from '../preview/render'
@@ -42,6 +59,7 @@ import { DRAFT_DEBOUNCE_MS, clearDraft, planDraftRestore, readDraft, writeDraft 
 import { Button } from '../ui/Button'
 import { CheckPanel } from '../ui/CheckPanel'
 import { CodePane } from '../ui/CodePane'
+import { Dialog } from '../ui/Dialog'
 import { EmptyState } from '../ui/EmptyState'
 import { FileTree } from '../ui/FileTree'
 import { MediaPane } from '../ui/MediaPane'
@@ -167,6 +185,14 @@ function pruneToc(entries: TocEntry[], tocPath: string, removed: string): { entr
     kept.push(children.changed ? { ...entry, children: children.entries } : entry)
   }
   return { entries: kept, changed }
+}
+
+const SIDEBAR_TAB_ICONS: Record<SidebarTab, typeof Eye> = {
+  preview: Eye,
+  search: Search,
+  metadata: Tags,
+  toc: ListTree,
+  check: ShieldCheck,
 }
 
 export function Editor({ bookId }: { bookId: string }) {
@@ -829,8 +855,9 @@ export function Editor({ bookId }: { bookId: string }) {
     return (
       <div className="shell">
         <header className="appbar">
-          <Button variant="ghost" onClick={() => navigate('/')}>
-            ← 书库
+          <Button variant="ghost" aria-label="← 书库" onClick={() => navigate('/')}>
+            <ArrowLeft size={14} strokeWidth={1.75} aria-hidden="true" />
+            <span>书库</span>
           </Button>
         </header>
         <main className="stage" aria-busy="true">
@@ -844,8 +871,9 @@ export function Editor({ bookId }: { bookId: string }) {
     return (
       <div className="shell">
         <header className="appbar">
-          <Button variant="ghost" onClick={() => navigate('/')}>
-            ← 书库
+          <Button variant="ghost" aria-label="← 书库" onClick={() => navigate('/')}>
+            <ArrowLeft size={14} strokeWidth={1.75} aria-hidden="true" />
+            <span>书库</span>
           </Button>
         </header>
         <main className="stage">
@@ -898,7 +926,9 @@ export function Editor({ bookId }: { bookId: string }) {
   const sidebarBody = () => {
     if (sidebarTab === 'preview') {
       if (!active) return <p className="sidebar-note">先打开一个文件。</p>
-      if (!editable) return mediaPane
+      if (!editable) {
+        return <p className="sidebar-note">当前资源已在主区预览，切换到 .xhtml 文件查看章节排版。</p>
+      }
       if (!previewable) {
         return <p className="sidebar-note">当前文件不是页面，切换到 .xhtml 文件查看预览。</p>
       }
@@ -993,17 +1023,21 @@ export function Editor({ bookId }: { bookId: string }) {
   return (
     <div className={`shell${treeOpen ? ' tree-open' : ''}${sideOpen ? ' side-open' : ''}`}>
       <header className="appbar">
-        <Button variant="ghost" onClick={() => navigate('/')}>
-          ← 书库
+        <Button variant="ghost" aria-label="← 书库" onClick={() => navigate('/')}>
+          <ArrowLeft size={14} strokeWidth={1.75} aria-hidden="true" />
+          <span>书库</span>
         </Button>
         <Button
           variant="ghost"
+          size="sm"
           className="tree-toggle"
           aria-expanded={treeOpen}
           onClick={() => setTreeOpen((openTree) => !openTree)}
         >
-          文件
+          <FolderTree size={14} strokeWidth={1.65} aria-hidden="true" />
+          <span>文件</span>
         </Button>
+        <span className="appbar-sep" aria-hidden="true" />
         <span className="appbar-title" title={book.pkg.metadata.title}>
           {book.pkg.metadata.title}
         </span>
@@ -1014,38 +1048,51 @@ export function Editor({ bookId }: { bookId: string }) {
           disabled={!active || !hasPageHistory(active)}
           onClick={() => active && setHistoryPath(active)}
         >
-          v{book.version}
+          <History size={12} strokeWidth={1.75} aria-hidden="true" />
+          <span>v{book.version}</span>
         </button>
         <span className="appbar-spacer" />
         {saveState === 'error' ? (
           <button type="button" className="appbar-save is-error" onClick={() => void save({ checkpoint: true })}>
-            保存失败 · 重试
+            <AlertCircle size={12} strokeWidth={1.8} aria-hidden="true" />
+            <span>保存失败 · 重试</span>
           </button>
         ) : saving ? (
-          <span className="appbar-save is-saving">保存中…</span>
+          <span className="appbar-save is-saving">
+            <Loader2 size={12} strokeWidth={1.8} className="spin" aria-hidden="true" />
+            <span>保存中…</span>
+          </span>
         ) : dirty.size > 0 ? (
           <span className="appbar-flag">{dirty.size} 处未保存</span>
         ) : savedAt ? (
-          <span className="appbar-save is-saved">已保存 {clockLabel(savedAt)}</span>
+          <span className="appbar-save is-saved">
+            <Check size={12} strokeWidth={2} aria-hidden="true" />
+            <span>已保存 {clockLabel(savedAt)}</span>
+          </span>
         ) : null}
         <Button
           variant="ghost"
+          size="sm"
           className="sidebar-toggle"
           aria-expanded={sideOpen}
           onClick={() => setSideOpen((openSide) => !openSide)}
         >
-          预览
+          <PanelRight size={14} strokeWidth={1.65} aria-hidden="true" />
+          <span>预览</span>
         </Button>
+        <span className="appbar-sep appbar-download" aria-hidden="true" />
         <a
           className="btn btn-ghost appbar-download"
           href={downloadUrl(book.id)}
           download
           title={dirty.size > 0 ? `下载已保存的版本（${dirty.size} 个文件未保存）` : '下载这本书的 EPUB'}
         >
-          下载
+          <Download size={14} strokeWidth={1.65} aria-hidden="true" />
+          <span>下载</span>
         </a>
         <Button variant="secondary" onClick={() => assetInput.current?.click()}>
-          加资源
+          <ImagePlus size={14} strokeWidth={1.65} aria-hidden="true" />
+          <span>加资源</span>
         </Button>
         <input
           ref={assetInput}
@@ -1064,7 +1111,8 @@ export function Editor({ bookId }: { bookId: string }) {
           onClick={() => void save({ checkpoint: true })}
           disabled={dirty.size === 0 || saving || conflict}
         >
-          {saving ? '保存中…' : '保存'}
+          <Save size={14} strokeWidth={1.65} aria-hidden="true" />
+          <span>{saving ? '保存中…' : '保存'}</span>
         </Button>
       </header>
 
@@ -1158,99 +1206,116 @@ export function Editor({ bookId }: { bookId: string }) {
 
         <aside className="sidebar" style={{ width: sidebarWidth }} aria-label="预览与结构">
           <div className="sidebar-tabs" role="tablist">
-            {SIDEBAR_TABS.map(([key, label]) => (
-              <button
-                key={key}
-                type="button"
-                role="tab"
-                aria-selected={sidebarTab === key}
-                className={`sidebar-tab${sidebarTab === key ? ' on' : ''}`}
-                onClick={() => setSidebarTab(key)}
-              >
-                {label}
-              </button>
-            ))}
+            {SIDEBAR_TABS.map(([key, label]) => {
+              const Icon = SIDEBAR_TAB_ICONS[key]
+              return (
+                <button
+                  key={key}
+                  type="button"
+                  role="tab"
+                  aria-selected={sidebarTab === key}
+                  className={`sidebar-tab${sidebarTab === key ? ' on' : ''}`}
+                  onClick={() => setSidebarTab(key)}
+                >
+                  <Icon size={13} strokeWidth={1.7} aria-hidden="true" />
+                  <span>{label}</span>
+                </button>
+              )
+            })}
           </div>
           <div className="sidebar-body">{sidebarBody()}</div>
         </aside>
       </div>
 
-      {renaming ? (
-        <div className="dialog-backdrop" role="dialog" aria-modal="true" aria-label="重命名文件">
-          <form
-            className="dialog"
-            onSubmit={(event) => {
-              event.preventDefault()
-              confirmRename()
-            }}
-          >
-            <h2>重命名 {basename(renaming.path)}</h2>
-            <p className="panel-note">
-              正文、目录与 manifest 里指向它的引用会一起改，位置在 {dirname(renaming.path)}/。
-            </p>
+      <Dialog
+        open={Boolean(renaming)}
+        onOpenChange={(openState) => {
+          if (!openState) setRenaming(null)
+        }}
+        ariaLabel="重命名文件"
+        title={renaming ? `重命名 ${basename(renaming.path)}` : ''}
+        description={
+          renaming
+            ? `正文、目录与 manifest 里指向它的引用会一起改，位置在 ${dirname(renaming.path)}/。`
+            : undefined
+        }
+        onSubmit={(event) => {
+          event.preventDefault()
+          confirmRename()
+        }}
+        footer={
+          <>
+            <Button variant="ghost" type="button" onClick={() => setRenaming(null)}>
+              取消
+            </Button>
+            <Button variant="primary" type="submit">
+              重命名
+            </Button>
+          </>
+        }
+      >
+        {renaming ? (
+          <>
             <label className="panel-field">
               <span>文件名</span>
               <input
                 autoFocus
                 type="text"
+                aria-invalid={renaming.error ? 'true' : undefined}
                 value={renaming.value}
                 onChange={(event) => setRenaming({ ...renaming, value: event.target.value, error: null })}
               />
             </label>
             {renaming.error ? <p className="banner banner-error">{renaming.error}</p> : null}
-            <div className="dialog-actions">
-              <Button variant="primary" type="submit">
-                重命名
-              </Button>
-              <Button variant="ghost" type="button" onClick={() => setRenaming(null)}>
-                取消
-              </Button>
-            </div>
-          </form>
-        </div>
-      ) : null}
+          </>
+        ) : null}
+      </Dialog>
 
-      {deleting ? (
-        <div className="dialog-backdrop" role="dialog" aria-modal="true" aria-label="删除文件">
-          <div className="dialog">
-            <h2>删除 {basename(deleting.path)}</h2>
-            {deleting.references.length === 0 ? (
-              <p className="panel-note">没有别的地方引用它。删除后这个文件从书里消失，目录里指向它的条目也会一并移除。</p>
-            ) : (
-              <>
-                <p className="panel-note">
-                  还有 {deleting.references.length} 处引用它。删除后这些引用会断开，需要你自己去改：
-                </p>
-                <ul className="reference-list">
-                  {deleting.references.map((reference, index) => (
-                    <li key={`${reference.from}:${reference.line}:${index}`}>
-                      <button
-                        type="button"
-                        className="reference-item"
-                        onClick={() => {
-                          setDeleting(null)
-                          open(reference.from)
-                          setReveal({ line: reference.line, column: 1, key: Date.now() })
-                        }}
-                      >
-                        {basename(reference.from)} 第 {reference.line} 行
-                      </button>
-                    </li>
-                  ))}
-                </ul>
-              </>
-            )}
-            <div className="dialog-actions">
-              <Button variant="primary" onClick={confirmDelete}>
-                删除
-              </Button>
-              <Button variant="ghost" onClick={() => setDeleting(null)}>
-                取消
-              </Button>
-            </div>
-          </div>
-        </div>
-      ) : null}
+      <Dialog
+        open={Boolean(deleting)}
+        onOpenChange={(openState) => {
+          if (!openState) setDeleting(null)
+        }}
+        ariaLabel="删除文件"
+        title={deleting ? `删除 ${basename(deleting.path)}` : ''}
+        description={
+          deleting
+            ? deleting.references.length === 0
+              ? '没有别的地方引用它。删除后这个文件从书里消失，目录里指向它的条目也会一并移除。'
+              : `还有 ${deleting.references.length} 处引用它。删除后这些引用会断开，需要你自己去改：`
+            : undefined
+        }
+        footer={
+          <>
+            <Button variant="ghost" type="button" onClick={() => setDeleting(null)}>
+              取消
+            </Button>
+            <Button variant="danger" type="button" onClick={confirmDelete}>
+              删除
+            </Button>
+          </>
+        }
+      >
+        {deleting && deleting.references.length > 0 ? (
+          <ul className="reference-list">
+            {deleting.references.map((reference, index) => (
+              <li key={`${reference.from}:${reference.line}:${index}`}>
+                <button
+                  type="button"
+                  className="reference-item"
+                  onClick={() => {
+                    setDeleting(null)
+                    open(reference.from)
+                    setReveal({ line: reference.line, column: 1, key: Date.now() })
+                  }}
+                >
+                  {basename(reference.from)} 第 {reference.line} 行
+                </button>
+              </li>
+            ))}
+          </ul>
+        ) : null}
+      </Dialog>
 
       {historyPath ? (
         <VersionHistory

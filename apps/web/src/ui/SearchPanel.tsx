@@ -1,7 +1,9 @@
 import { groupMatches, searchBook, type SearchFile, type SearchResult } from '@booksmith/core'
+import { FileText, Search } from 'lucide-react'
 import { useEffect, useMemo, useState } from 'react'
 import { basename } from '../state/bookStore'
 import { planReplace, type ReplacePlan } from '../state/replacePlan'
+import { Button } from './Button'
 
 interface SearchPanelProps {
   files: SearchFile[]
@@ -66,14 +68,17 @@ export function SearchPanel({ files, onOpen, onReplace, onReplaceUndo }: SearchP
   return (
     <div className="search-panel">
       <div className="search-controls">
-        <input
-          type="search"
-          className="search-input"
-          value={query}
-          placeholder="全书查找"
-          aria-label="全书查找"
-          onChange={(event) => setQuery(event.target.value)}
-        />
+        <div className="search-input-wrap">
+          <Search size={13} strokeWidth={1.75} className="search-input-icon" aria-hidden="true" />
+          <input
+            type="search"
+            className="search-input has-icon"
+            value={query}
+            placeholder="全书查找"
+            aria-label="全书查找"
+            onChange={(event) => setQuery(event.target.value)}
+          />
+        </div>
         <div className="search-options">
           <label className="search-option">
             <input
@@ -81,7 +86,7 @@ export function SearchPanel({ files, onOpen, onReplace, onReplaceUndo }: SearchP
               checked={caseSensitive}
               onChange={(event) => setCaseSensitive(event.target.checked)}
             />
-            区分大小写
+            <span>区分大小写</span>
           </label>
           <label className="search-option">
             <input
@@ -89,7 +94,7 @@ export function SearchPanel({ files, onOpen, onReplace, onReplaceUndo }: SearchP
               checked={regex}
               onChange={(event) => setRegex(event.target.checked)}
             />
-            正则
+            <span>正则</span>
           </label>
         </div>
         <div className="search-replace">
@@ -105,14 +110,9 @@ export function SearchPanel({ files, onOpen, onReplace, onReplaceUndo }: SearchP
               setApplied(null)
             }}
           />
-          <button
-            type="button"
-            className="btn btn-secondary"
-            disabled={!query.trim()}
-            onClick={startReplace}
-          >
+          <Button variant="secondary" size="sm" disabled={!query.trim()} onClick={startReplace}>
             替换全部
-          </button>
+          </Button>
         </div>
         <p className="search-status" role="status">
           {pending
@@ -123,7 +123,9 @@ export function SearchPanel({ files, onOpen, onReplace, onReplaceUndo }: SearchP
         </p>
         {confirming ? (
           <p className="search-confirm" role="status">
-            将替换 {confirming.total} 处，涉及 {confirming.files.length} 个文件
+            <span>
+              将替换 {confirming.total} 处，涉及 {confirming.files.length} 个文件
+            </span>
             <span className="search-confirm-actions">
               <button type="button" className="banner-action" onClick={runReplace}>
                 执行
@@ -136,7 +138,7 @@ export function SearchPanel({ files, onOpen, onReplace, onReplaceUndo }: SearchP
         ) : null}
         {applied !== null ? (
           <p className="search-confirm" role="status">
-            已替换 {applied} 处
+            <span>已替换 {applied} 处</span>
             <span className="search-confirm-actions">
               <button type="button" className="banner-action" onClick={undoReplace}>
                 撤销
@@ -156,7 +158,10 @@ export function SearchPanel({ files, onOpen, onReplace, onReplaceUndo }: SearchP
         {groups.map((group) => (
           <section key={group.path} className="search-group">
             <h3 className="search-group-head">
-              <span className="search-file">{basename(group.path)}</span>
+              <span className="search-file-wrap">
+                <FileText size={12} strokeWidth={1.65} aria-hidden="true" />
+                <span className="search-file">{basename(group.path)}</span>
+              </span>
               <span className="search-count">{group.matches.length}</span>
             </h3>
             <ul className="search-hits">

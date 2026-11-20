@@ -1,6 +1,8 @@
+import { FileArchive, RefreshCw, Trash2 } from 'lucide-react'
 import { useEffect, useRef, useState } from 'react'
 import { basename } from '../state/bookStore'
 import { Button } from './Button'
+import { Dialog } from './Dialog'
 
 interface MediaPaneProps {
   path: string
@@ -36,8 +38,17 @@ export function MediaPane({ path, bytes, mime, onReplace, onDelete }: MediaPaneP
 
   return (
     <div className="media-pane">
-      {isImage && url ? <img className="media-image" src={url} alt={basename(path)} /> : null}
-      {!isImage ? <p className="media-note">这是二进制资源，不能在编辑器里修改文字。</p> : null}
+      {isImage && url ? (
+        <div className="media-frame">
+          <img className="media-image" src={url} alt={basename(path)} />
+        </div>
+      ) : null}
+      {!isImage ? (
+        <div className="media-binary-badge">
+          <FileArchive size={28} strokeWidth={1.5} aria-hidden="true" />
+          <p className="media-note">这是二进制资源，不能在编辑器里修改文字。</p>
+        </div>
+      ) : null}
       <p className="media-meta">
         {basename(path)} · {meta}
       </p>
@@ -45,11 +56,13 @@ export function MediaPane({ path, bytes, mime, onReplace, onDelete }: MediaPaneP
       <div className="media-actions">
         {isImage ? (
           <Button variant="secondary" onClick={() => picker.current?.click()}>
-            替换图片
+            <RefreshCw size={14} strokeWidth={1.65} aria-hidden="true" />
+            <span>替换图片</span>
           </Button>
         ) : null}
-        <Button variant="ghost" onClick={() => onDelete(path)}>
-          删除
+        <Button variant="ghost" className="btn-danger-ghost" onClick={() => onDelete(path)}>
+          <Trash2 size={14} strokeWidth={1.65} aria-hidden="true" />
+          <span>删除</span>
         </Button>
       </div>
 
@@ -66,30 +79,38 @@ export function MediaPane({ path, bytes, mime, onReplace, onDelete }: MediaPaneP
         }}
       />
 
-      {pending ? (
-        <div className="dialog-backdrop" role="dialog" aria-modal="true" aria-label="替换图片">
-          <div className="dialog">
-            <h2>替换 {basename(path)}</h2>
-            <p className="panel-note">
-              用「{pending.name}」覆盖这个条目，路径与 manifest 项不变。图片不进快照历史，替换后无法退回旧图。
-            </p>
-            <div className="dialog-actions">
-              <Button
-                variant="primary"
-                onClick={() => {
-                  onReplace(path, pending)
-                  setPending(null)
-                }}
-              >
-                替换
-              </Button>
-              <Button variant="ghost" onClick={() => setPending(null)}>
-                取消
-              </Button>
-            </div>
-          </div>
-        </div>
-      ) : null}
+      <Dialog
+        open={Boolean(pending)}
+        onOpenChange={(openState) => {
+          if (!openState) setPending(null)
+        }}
+        ariaLabel="替换图片"
+        title={`替换 ${basename(path)}`}
+        description={
+          pending
+            ? `用「${pending.name}」覆盖这个条目，路径与 manifest 项不变。图片不进快照历史，替换后无法退回旧图。`
+            : undefined
+        }
+        footer={
+          <>
+            <Button variant="ghost" type="button" onClick={() => setPending(null)}>
+              取消
+            </Button>
+            <Button
+              variant="primary"
+              type="button"
+              onClick={() => {
+                if (pending) onReplace(path, pending)
+                setPending(null)
+              }}
+            >
+              替换
+            </Button>
+          </>
+        }
+      >
+        {null}
+      </Dialog>
     </div>
   )
 }

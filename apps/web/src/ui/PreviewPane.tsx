@@ -1,3 +1,4 @@
+import { AlertCircle } from 'lucide-react'
 import { useEffect, useRef, useState } from 'react'
 import type { EpubArchive, EpubPackage } from '@booksmith/core'
 import { buildPreview } from '../preview/render'
@@ -59,8 +60,9 @@ export function PreviewPane({ path, content, archive, pkg }: PreviewPaneProps) {
   if (failure) {
     return (
       <div className="preview-pane">
-        <p className="banner banner-error" role="alert">
-          预览渲染失败：{failure}
+        <p className="banner banner-error preview-error" role="alert">
+          <AlertCircle size={14} strokeWidth={1.75} aria-hidden="true" />
+          <span>预览渲染失败：{failure}</span>
         </p>
       </div>
     )

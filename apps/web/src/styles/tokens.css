@@ -1,7 +1,7 @@
 /*
  * Booksmith design tokens.
  * Components consume semantic aliases only; raw ramps exist for the palette page.
- * See ADR 2026-11-19-workbench-design-system.
+ * See ADR 2026-11-19-workbench-design-system and ADR 2026-11-20-precision-workbench-ui.
  */
 :root {
   color-scheme: light;
@@ -30,7 +30,9 @@
   --surface: #ffffff;
   --surface-raised: #f2f4f7;
   --surface-sunken: #eef1f5;
+  --surface-elevated: #ffffff;
   --hover-bg: #e3e8ef;
+  --scrim: rgb(15 23 36 / 42%);
 
   --text: #1b222c;
   --text-secondary: #404c5e;
@@ -54,6 +56,11 @@
   --status-warn-bg: #fdf1dc;
   --status-warn-fg: #8a5a12;
 
+  --danger: #b43b2a;
+  --danger-hover: #962f21;
+  --danger-fg: #ffffff;
+  --danger-subtle: #fbeae6;
+
   --focus-ring: #35618c;
   --disabled-bg: #f2f4f7;
   --disabled-fg: #8896aa;
@@ -66,6 +73,13 @@
   --cm-number: #a0562a;
 
   --radius: 4px;
+  --radius-sm: 4px;
+  --radius-md: 6px;
+  --radius-lg: 10px;
+  --shadow-sm: 0 1px 2px rgb(16 24 40 / 6%), 0 1px 1px rgb(16 24 40 / 4%);
+  --shadow-md: 0 8px 20px -4px rgb(16 24 40 / 14%), 0 2px 6px -1px rgb(16 24 40 / 8%);
+  --shadow-lg: 0 18px 40px -8px rgb(16 24 40 / 18%), 0 4px 12px -2px rgb(16 24 40 / 10%);
+  --shadow-inset: inset 0 1px 2px rgb(27 34 44 / 7%);
   --font-ui: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Noto Sans SC', 'Helvetica Neue',
     sans-serif;
   --font-mono: ui-monospace, SFMono-Regular, Menlo, Consolas, 'Noto Sans Mono CJK SC', monospace;
@@ -93,11 +107,14 @@
   --surface: #1b222c;
   --surface-raised: #242d38;
   --surface-sunken: #181f28;
-  --hover-bg: #33404f;
+  --surface-elevated: #2b3544;
+  --hover-bg: #354152;
+  --scrim: rgb(7 11 18 / 65%);
 
   --text: #e9edf2;
   --text-secondary: #aab5c6;
-  --text-muted: #8896aa;
+  /* Darker muted shades fall below 4.5:1 on --surface-elevated. See ADR 2026-11-20-precision-workbench-ui. */
+  --text-muted: #95a3b6;
 
   --border: #2d3746;
   --border-strong: #404c5e;
@@ -116,6 +133,18 @@
   --status-error-fg: #e3a99b;
   --status-warn-bg: #3a2c14;
   --status-warn-fg: #dcb877;
+
+  --danger: #e07a6b;
+  --danger-hover: #ea9083;
+  --danger-fg: #1b222c;
+  --danger-subtle: #3a1c17;
+
+  --shadow-sm: 0 1px 2px rgb(7 11 18 / 28%), inset 0 1px 0 rgb(255 255 255 / 4%);
+  --shadow-md: 0 10px 24px -4px rgb(7 11 18 / 48%), 0 2px 8px rgb(7 11 18 / 32%),
+    inset 0 1px 0 rgb(255 255 255 / 6%);
+  --shadow-lg: 0 20px 44px -8px rgb(7 11 18 / 62%), 0 6px 14px rgb(7 11 18 / 40%),
+    inset 0 1px 0 rgb(255 255 255 / 7%);
+  --shadow-inset: inset 0 1px 2px rgb(7 11 18 / 32%);
 
   --focus-ring: #82abd3;
   --disabled-bg: #242d38;

@@ -86,7 +86,7 @@ test('selection background covers whole line boxes, including wrapped lines', as
   await page.getByRole('button', { name: 'ch003.xhtml', exact: true }).click()
   await expect(page.locator('.cm-content')).toContainText('序言')
 
-  await page.locator('.cm-content').click()
+  await page.locator('.cm-line').first().click()
   await page.keyboard.press('Home')
   await page.keyboard.press('Shift+End')
   await page.keyboard.press('Shift+ArrowDown')

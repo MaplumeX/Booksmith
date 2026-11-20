@@ -4,17 +4,26 @@ import { describe, expect, it } from 'vitest'
 
 const css = readFileSync(fileURLToPath(new URL('./tokens.css', import.meta.url)), 'utf8')
 
-function blockVars(selector: string): Record<string, string> {
+function blockAllVars(selector: string): Record<string, string> {
   const start = css.indexOf(selector)
   if (start < 0) throw new Error(`missing selector ${selector}`)
   const open = css.indexOf('{', start)
   const close = css.indexOf('}', open)
   const body = css.slice(open + 1, close)
   const out: Record<string, string> = {}
-  for (const match of body.matchAll(/(--[a-z0-9-]+)\s*:\s*(#[0-9a-fA-F]{6})/g)) {
+  for (const match of body.matchAll(/(--[a-z0-9-]+)\s*:\s*([^;]+);/g)) {
     const name = match[1]
     const value = match[2]
-    if (name && value) out[name] = value
+    if (name && value) out[name] = value.trim()
+  }
+  return out
+}
+
+function blockVars(selector: string): Record<string, string> {
+  const all = blockAllVars(selector)
+  const out: Record<string, string> = {}
+  for (const [name, value] of Object.entries(all)) {
+    if (/^#[0-9a-fA-F]{6}$/.test(value)) out[name] = value
   }
   return out
 }
@@ -36,11 +45,18 @@ function contrast(a: string, b: string): number {
 const PAIRS: Array<[string, string, string]> = [
   ['body text on surface', '--text', '--surface'],
   ['body text on raised', '--text', '--surface-raised'],
+  ['body text on elevated', '--text', '--surface-elevated'],
   ['secondary text on surface', '--text-secondary', '--surface'],
+  ['secondary text on elevated', '--text-secondary', '--surface-elevated'],
   ['muted text on surface', '--text-muted', '--surface'],
   ['muted text on raised', '--text-muted', '--surface-raised'],
+  ['muted text on elevated', '--text-muted', '--surface-elevated'],
   ['secondary text on hover', '--text-secondary', '--hover-bg'],
   ['primary button', '--accent-fg', '--accent'],
+  ['danger button', '--danger-fg', '--danger'],
+  ['danger button hover', '--danger-fg', '--danger-hover'],
+  ['danger subtle item', '--status-error-fg', '--danger-subtle'],
+  ['error text on elevated', '--status-error-fg', '--surface-elevated'],
   ['selection', '--selection-fg', '--selection-bg'],
   ['ok status', '--status-ok-fg', '--status-ok-bg'],
   ['error status', '--status-error-fg', '--status-error-bg'],
@@ -70,11 +86,14 @@ describe.each(THEMES)('%s theme', (themeName, selector) => {
   })
 
   it('defines every semantic token', () => {
+    const allVars = blockAllVars(selector)
     const required = [
       '--surface',
       '--surface-raised',
       '--surface-sunken',
+      '--surface-elevated',
       '--hover-bg',
+      '--scrim',
       '--text',
       '--text-secondary',
       '--text-muted',
@@ -84,6 +103,14 @@ describe.each(THEMES)('%s theme', (themeName, selector) => {
       '--accent-hover',
       '--accent-subtle',
       '--accent-fg',
+      '--danger',
+      '--danger-hover',
+      '--danger-fg',
+      '--danger-subtle',
+      '--shadow-sm',
+      '--shadow-md',
+      '--shadow-lg',
+      '--shadow-inset',
       '--selection-bg',
       '--selection-fg',
       '--status-ok-bg',
@@ -100,7 +127,7 @@ describe.each(THEMES)('%s theme', (themeName, selector) => {
       '--cm-keyword',
       '--cm-number',
     ]
-    const missing = required.filter((token) => !(token in vars))
+    const missing = required.filter((token) => !(token in allVars))
     expect(missing).toEqual([])
   })
 })

@@ -1,8 +1,10 @@
 import { createEmptyEpub } from '@booksmith/core'
+import { AlertCircle, BookOpen, LogOut, Plus, Upload } from 'lucide-react'
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { ApiError, api, type BookDto, type UserDto } from '../api/client'
 import { BookCard } from '../ui/BookCard'
 import { Button } from '../ui/Button'
+import { Dialog } from '../ui/Dialog'
 import { EmptyState } from '../ui/EmptyState'
 import { SearchBar } from '../ui/SearchBar'
 import { navigate } from '../router'
@@ -105,15 +107,20 @@ export function Library({ user, onLogout }: { user: UserDto; onLogout: () => voi
       }}
     >
       <header className="appbar">
-        <span className="brand">Booksmith</span>
+        <span className="brand">
+          <BookOpen size={16} strokeWidth={1.75} className="brand-icon" aria-hidden="true" />
+          <span>Booksmith</span>
+        </span>
         <SearchBar value={query} onChange={setQuery} placeholder="搜索书名或作者" />
         <span className="appbar-spacer" />
         <Button variant="secondary" onClick={() => setCreating(true)}>
-          新建书
+          <Plus size={14} strokeWidth={1.75} aria-hidden="true" />
+          <span>新建书</span>
         </Button>
         <Button variant="primary" onClick={() => fileInput.current?.click()} disabled={uploading}>
+          <Upload size={14} strokeWidth={1.75} aria-hidden="true" />
           {uploading ? (
-            '导入中…'
+            <span>导入中…</span>
           ) : (
             <>
               <span className="btn-label-full">导入 EPUB</span>
@@ -122,7 +129,8 @@ export function Library({ user, onLogout }: { user: UserDto; onLogout: () => voi
           )}
         </Button>
         <Button variant="ghost" onClick={onLogout}>
-          退出
+          <LogOut size={14} strokeWidth={1.65} aria-hidden="true" />
+          <span>退出</span>
         </Button>
         <input
           ref={fileInput}
@@ -140,7 +148,8 @@ export function Library({ user, onLogout }: { user: UserDto; onLogout: () => voi
       <main className={`library${dragging ? ' is-dragging' : ''}`}>
         {error ? (
           <p className="banner banner-error" role="alert">
-            {error}
+            <AlertCircle size={14} strokeWidth={1.75} aria-hidden="true" />
+            <span>{error}</span>
             <button type="button" className="banner-action" onClick={() => void load()}>
               重试
             </button>
@@ -186,35 +195,41 @@ export function Library({ user, onLogout }: { user: UserDto; onLogout: () => voi
         )}
       </main>
 
-      {creating ? (
-        <div className="dialog-backdrop" role="dialog" aria-modal="true" aria-label="新建书">
-          <div className="dialog">
-            <h2>新建一本 EPUB</h2>
-            <p className="panel-note">生成一个最小可用的 EPUB 3 骨架，之后在编辑器里补内容。</p>
-            <label className="panel-field">
-              <span>书名</span>
-              <input
-                autoFocus
-                type="text"
-                value={newTitle}
-                onChange={(event) => setNewTitle(event.target.value)}
-              />
-            </label>
-            <label className="panel-field">
-              <span>作者（可留空）</span>
-              <input type="text" value={newAuthor} onChange={(event) => setNewAuthor(event.target.value)} />
-            </label>
-            <div className="dialog-actions">
-              <Button variant="primary" onClick={() => void createBook()} disabled={creatingPending}>
-                {creatingPending ? '创建中…' : '创建并打开'}
-              </Button>
-              <Button variant="ghost" onClick={() => setCreating(false)}>
-                取消
-              </Button>
-            </div>
-          </div>
-        </div>
-      ) : null}
+      <Dialog
+        open={creating}
+        onOpenChange={setCreating}
+        ariaLabel="新建书"
+        title="新建一本 EPUB"
+        description="生成一个最小可用的 EPUB 3 骨架，之后在编辑器里补内容。"
+        onSubmit={(event) => {
+          event.preventDefault()
+          if (!creatingPending) void createBook()
+        }}
+        footer={
+          <>
+            <Button variant="ghost" type="button" onClick={() => setCreating(false)}>
+              取消
+            </Button>
+            <Button variant="primary" type="submit" disabled={creatingPending}>
+              {creatingPending ? '创建中…' : '创建并打开'}
+            </Button>
+          </>
+        }
+      >
+        <label className="panel-field">
+          <span>书名</span>
+          <input
+            autoFocus
+            type="text"
+            value={newTitle}
+            onChange={(event) => setNewTitle(event.target.value)}
+          />
+        </label>
+        <label className="panel-field">
+          <span>作者（可留空）</span>
+          <input type="text" value={newAuthor} onChange={(event) => setNewAuthor(event.target.value)} />
+        </label>
+      </Dialog>
 
       <footer className="statusbar">
         <span>{needle ? `${filtered.length} / ${books.length} 本` : `${books.length} 本`}</span>

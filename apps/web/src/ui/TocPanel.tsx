@@ -10,7 +10,9 @@ import {
   type BrokenAnchor,
   type TocEntry,
 } from '@booksmith/core'
+import { ArrowDown, ArrowUp, IndentDecrease, IndentIncrease, Plus, Trash2 } from 'lucide-react'
 import { useMemo, useState } from 'react'
+import { Button } from './Button'
 
 interface TocPanelProps {
   entries: TocEntry[]
@@ -103,18 +105,21 @@ export function TocPanel({ entries, broken, tocPath, files, suggestTitle, onChan
             <input value={label} placeholder="这一章的标题" onChange={(event) => setLabel(event.target.value)} />
           </label>
           <div className="toc-add-actions">
-            <button type="submit" className="btn btn-primary" disabled={!target.trim() || !label.trim()}>
+            <Button variant="primary" size="sm" type="submit" disabled={!target.trim() || !label.trim()}>
               添加
-            </button>
-            <button type="button" className="btn btn-ghost" onClick={() => setAdding(false)}>
+            </Button>
+            <Button variant="ghost" size="sm" type="button" onClick={() => setAdding(false)}>
               取消
-            </button>
+            </Button>
           </div>
         </form>
       ) : (
-        <button type="button" className="btn btn-secondary toc-add-open" onClick={() => setAdding(true)}>
-          新增条目
-        </button>
+        <div className="toc-toolbar">
+          <Button variant="secondary" size="sm" className="toc-add-open" onClick={() => setAdding(true)}>
+            <Plus size={13} strokeWidth={1.75} aria-hidden="true" />
+            <span>新增条目</span>
+          </Button>
+        </div>
       )}
 
       <ul className="toc-list">
@@ -145,11 +150,21 @@ export function TocPanel({ entries, broken, tocPath, files, suggestTitle, onChan
                 </button>
               )}
               <span className="toc-actions">
-                <button type="button" aria-label={`上移 ${entry.label}`} onClick={() => onChange(moveTocEntry(entries, path, -1))}>
-                  ↑
+                <button
+                  type="button"
+                  aria-label={`上移 ${entry.label}`}
+                  title="上移"
+                  onClick={() => onChange(moveTocEntry(entries, path, -1))}
+                >
+                  <ArrowUp size={12} strokeWidth={1.75} aria-hidden="true" />
                 </button>
-                <button type="button" aria-label={`下移 ${entry.label}`} onClick={() => onChange(moveTocEntry(entries, path, 1))}>
-                  ↓
+                <button
+                  type="button"
+                  aria-label={`下移 ${entry.label}`}
+                  title="下移"
+                  onClick={() => onChange(moveTocEntry(entries, path, 1))}
+                >
+                  <ArrowDown size={12} strokeWidth={1.75} aria-hidden="true" />
                 </button>
                 <button
                   type="button"
@@ -158,7 +173,7 @@ export function TocPanel({ entries, broken, tocPath, files, suggestTitle, onChan
                   title="成为上一条的子项"
                   onClick={() => onChange(indentTocEntry(entries, path))}
                 >
-                  →
+                  <IndentIncrease size={12} strokeWidth={1.75} aria-hidden="true" />
                 </button>
                 <button
                   type="button"
@@ -167,10 +182,16 @@ export function TocPanel({ entries, broken, tocPath, files, suggestTitle, onChan
                   title="升为上一级"
                   onClick={() => onChange(outdentTocEntry(entries, path))}
                 >
-                  ←
+                  <IndentDecrease size={12} strokeWidth={1.75} aria-hidden="true" />
                 </button>
-                <button type="button" aria-label={`删除 ${entry.label}`} onClick={() => onChange(removeTocEntry(entries, path))}>
-                  ✕
+                <button
+                  type="button"
+                  className="is-danger"
+                  aria-label={`删除 ${entry.label}`}
+                  title="删除条目"
+                  onClick={() => onChange(removeTocEntry(entries, path))}
+                >
+                  <Trash2 size={12} strokeWidth={1.75} aria-hidden="true" />
                 </button>
               </span>
             </li>

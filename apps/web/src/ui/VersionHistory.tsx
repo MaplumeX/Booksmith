@@ -1,10 +1,12 @@
 import type { EpubPackage } from '@booksmith/core'
+import { Pin, PinOff, RotateCcw } from 'lucide-react'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { ApiError, api, type PageSnapshotDto } from '../api/client'
 import { diffLines, spinePaths, type LineDiff } from '../diff/document'
 import { formatBytes } from '../format'
 import { basename } from '../state/bookStore'
 import { Button } from './Button'
+import { Dialog } from './Dialog'
 import { EmptyState } from './EmptyState'
 
 interface VersionHistoryProps {
@@ -91,14 +93,6 @@ export function VersionHistory({ bookId, path, dirtyCount, pkg, texts, onRestore
   }, [loadList])
 
   useEffect(() => {
-    const onKey = (event: KeyboardEvent) => {
-      if (event.key === 'Escape') onClose()
-    }
-    window.addEventListener('keydown', onKey)
-    return () => window.removeEventListener('keydown', onKey)
-  }, [onClose])
-
-  useEffect(() => {
     if (!selected) return
     let cancelled = false
 
@@ -177,130 +171,130 @@ export function VersionHistory({ bookId, path, dirtyCount, pkg, texts, onRestore
   const selectedLabel = selected ? `${dayLabel(new Date(selected.createdAt), new Date())} ${timeLabel(selected.createdAt)}` : ''
 
   return (
-    <div
-      className="dialog-backdrop"
-      role="dialog"
-      aria-modal="true"
-      aria-label={`${basename(path)} 的版本历史`}
-      onMouseDown={(event) => {
-        if (event.target === event.currentTarget) onClose()
+    <Dialog
+      open
+      onOpenChange={(openState) => {
+        if (!openState) onClose()
       }}
+      size="wide"
+      className="snapshot-dialog"
+      headClassName="snapshot-head"
+      ariaLabel={`${basename(path)} 的版本历史`}
+      title={basename(path)}
+      headerExtra={
+        <span className="snapshot-path-label" title={path}>
+          {subtitle}
+        </span>
+      }
     >
-      <div className="snapshot-dialog">
-        <header className="snapshot-head">
-          <h2>{basename(path)}</h2>
-          <span className="snapshot-path-label" title={path}>
-            {subtitle}
-          </span>
-          <Button variant="ghost" onClick={onClose}>
-            关闭
-          </Button>
-        </header>
-
-        <div className="snapshot-body">
-          <nav className="snapshot-timeline" aria-label="版本列表">
-            <p className="snapshot-pin-note">置顶的快照不占 100 条上限，也不会被按天清理。</p>
-            {listError ? (
-              <p className="banner banner-error" role="alert">
-                {listError}
-                <button type="button" className="banner-action" onClick={() => void loadList()}>
-                  重试
-                </button>
-              </p>
-            ) : !snapshots ? (
-              <div className="snapshot-timeline-skeleton" aria-busy="true" />
-            ) : snapshots.length === 0 ? (
-              <p className="snapshot-note">这个文件还没有快照。</p>
-            ) : (
-              groups.map((group) => (
-                <section key={group.key} className="snapshot-group">
-                  <h3 className="snapshot-group-label">{group.label}</h3>
-                  {group.items.map((item, index) => (
-                    <div key={item.id} className={`snapshot-row${selected?.id === item.id ? ' on' : ''}`}>
-                      <button
-                        type="button"
-                        className="snapshot-item"
-                        aria-pressed={selected?.id === item.id}
-                        title={`${timeLabel(item.createdAt)} · ${formatBytes(item.byteSize)}`}
-                        onClick={() => setSelected(item)}
-                      >
-                        <span className="snapshot-time">{timeLabel(item.createdAt)}</span>
-                        {index === 0 && group.key === groups[0]?.key ? (
-                          <span className="snapshot-badge">最新</span>
-                        ) : null}
-                        <span className="snapshot-size">{formatBytes(item.byteSize)}</span>
-                      </button>
-                      <button
-                        type="button"
-                        className={`snapshot-pin${item.pinned ? ' on' : ''}`}
-                        aria-pressed={item.pinned}
-                        aria-label={`${item.pinned ? '取消置顶' : '置顶'} ${timeLabel(item.createdAt)}`}
-                        title={item.pinned ? '已置顶：自动清理不会删除它' : '置顶这条，自动清理时保留'}
-                        onClick={() => void togglePin(item)}
-                      >
-                        {item.pinned ? '◆' : '◇'}
-                      </button>
-                    </div>
-                  ))}
-                </section>
-              ))
-            )}
-          </nav>
-
-          <section className="snapshot-pane" aria-label="版本差异">
-            {diffState === 'idle' ? (
-              <p className="snapshot-note">从左侧选一个版本，查看它和现在的差别。</p>
-            ) : diffState === 'loading' ? (
-              <div className="snapshot-diff-skeleton" aria-busy="true" />
-            ) : diffState === 'error' ? (
-              <p className="banner banner-error" role="alert">
-                {diffError}
-              </p>
-            ) : diffState === 'empty' ? (
-              <EmptyState title="这一版和现在相同" description="这个快照的内容与编辑器里现在的文件完全一致。" />
-            ) : (
-              <>
-                <div className="snapshot-toolbar">
-                  <span className="snapshot-label">{selectedLabel}</span>
-                  <Button variant="primary" onClick={() => setConfirming(true)}>
-                    恢复这一版
-                  </Button>
-                </div>
-                <div className="snapshot-diff-wrap">
-                  <div className="diff-view" ref={diffBox} role="region" aria-label="源码差异">
-                    {(diffs ?? []).map((entry, index) => (
-                      <DiffRow key={index} entry={entry} />
-                    ))}
+      <div className="snapshot-body">
+        <nav className="snapshot-timeline" aria-label="版本列表">
+          <p className="snapshot-pin-note">置顶的快照不占 100 条上限，也不会被按天清理。</p>
+          {listError ? (
+            <p className="banner banner-error" role="alert">
+              {listError}
+              <button type="button" className="banner-action" onClick={() => void loadList()}>
+                重试
+              </button>
+            </p>
+          ) : !snapshots ? (
+            <div className="snapshot-timeline-skeleton" aria-busy="true" />
+          ) : snapshots.length === 0 ? (
+            <p className="snapshot-note">这个文件还没有快照。</p>
+          ) : (
+            groups.map((group) => (
+              <section key={group.key} className="snapshot-group">
+                <h3 className="snapshot-group-label">{group.label}</h3>
+                {group.items.map((item, index) => (
+                  <div key={item.id} className={`snapshot-row${selected?.id === item.id ? ' on' : ''}`}>
+                    <button
+                      type="button"
+                      className="snapshot-item"
+                      aria-pressed={selected?.id === item.id}
+                      title={`${timeLabel(item.createdAt)} · ${formatBytes(item.byteSize)}`}
+                      onClick={() => setSelected(item)}
+                    >
+                      <span className="snapshot-time">{timeLabel(item.createdAt)}</span>
+                      {index === 0 && group.key === groups[0]?.key ? (
+                        <span className="snapshot-badge">最新</span>
+                      ) : null}
+                      <span className="snapshot-size">{formatBytes(item.byteSize)}</span>
+                    </button>
+                    <button
+                      type="button"
+                      className={`snapshot-pin${item.pinned ? ' on' : ''}`}
+                      aria-pressed={item.pinned}
+                      aria-label={`${item.pinned ? '取消置顶' : '置顶'} ${timeLabel(item.createdAt)}`}
+                      title={item.pinned ? '已置顶：自动清理不会删除它' : '置顶这条，自动清理时保留'}
+                      onClick={() => void togglePin(item)}
+                    >
+                      {item.pinned ? (
+                        <Pin size={13} strokeWidth={2} aria-hidden="true" />
+                      ) : (
+                        <PinOff size={13} strokeWidth={1.6} aria-hidden="true" />
+                      )}
+                    </button>
                   </div>
-                </div>
-              </>
-            )}
+                ))}
+              </section>
+            ))
+          )}
+        </nav>
 
-            {confirming ? (
-              <div className="snapshot-confirm" role="alertdialog" aria-label="确认恢复">
-                <div className="snapshot-confirm-copy">
-                  <p>
-                    把 {basename(path)} 恢复到 {selectedLabel}？当前内容会被这个快照覆盖，并作为一条新快照保留。
-                  </p>
-                  {dirtyCount > 0 ? (
-                    <p className="snapshot-warn">编辑器里 {dirtyCount} 处未保存的改动将被丢弃。</p>
-                  ) : null}
-                  {restoreError ? <p className="snapshot-warn">{restoreError}</p> : null}
-                </div>
-                <div className="snapshot-confirm-actions">
-                  <Button variant="primary" onClick={() => void restore()} disabled={restoring}>
-                    {restoring ? '恢复中…' : '确认恢复'}
-                  </Button>
-                  <Button variant="ghost" onClick={() => setConfirming(false)} disabled={restoring}>
-                    取消
-                  </Button>
+        <section className="snapshot-pane" aria-label="版本差异">
+          {diffState === 'idle' ? (
+            <p className="snapshot-note">从左侧选一个版本，查看它和现在的差别。</p>
+          ) : diffState === 'loading' ? (
+            <div className="snapshot-diff-skeleton" aria-busy="true" />
+          ) : diffState === 'error' ? (
+            <p className="banner banner-error" role="alert">
+              {diffError}
+            </p>
+          ) : diffState === 'empty' ? (
+            <EmptyState title="这一版和现在相同" description="这个快照的内容与编辑器里现在的文件完全一致。" />
+          ) : (
+            <>
+              <div className="snapshot-toolbar">
+                <span className="snapshot-label">{selectedLabel}</span>
+                <Button variant="primary" size="sm" onClick={() => setConfirming(true)}>
+                  <RotateCcw size={13} strokeWidth={1.75} aria-hidden="true" />
+                  <span>恢复这一版</span>
+                </Button>
+              </div>
+              <div className="snapshot-diff-wrap">
+                <div className="diff-view" ref={diffBox} role="region" aria-label="源码差异">
+                  {(diffs ?? []).map((entry, index) => (
+                    <DiffRow key={index} entry={entry} />
+                  ))}
                 </div>
               </div>
-            ) : null}
-          </section>
-        </div>
+            </>
+          )}
+
+          {confirming ? (
+            <div className="snapshot-confirm" role="alertdialog" aria-label="确认恢复">
+              <div className="snapshot-confirm-copy">
+                <p>
+                  把 {basename(path)} 恢复到 {selectedLabel}？当前内容会被这个快照覆盖，并作为一条新快照保留。
+                </p>
+                {dirtyCount > 0 ? (
+                  <p className="snapshot-warn">编辑器里 {dirtyCount} 处未保存的改动将被丢弃。</p>
+                ) : null}
+                {restoreError ? <p className="snapshot-warn">{restoreError}</p> : null}
+              </div>
+              <div className="snapshot-confirm-actions">
+                <Button variant="ghost" size="sm" onClick={() => setConfirming(false)} disabled={restoring}>
+                  取消
+                </Button>
+                <Button variant="primary" size="sm" onClick={() => void restore()} disabled={restoring}>
+                  {restoring ? '恢复中…' : '确认恢复'}
+                </Button>
+              </div>
+            </div>
+          ) : null}
+        </section>
       </div>
-    </div>
+    </Dialog>
   )
 }
 

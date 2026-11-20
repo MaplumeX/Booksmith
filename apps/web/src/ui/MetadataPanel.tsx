@@ -5,6 +5,7 @@ import {
   type OpfMetaRow,
   type PackageMetadata,
 } from '@booksmith/core'
+import { Plus, RotateCcw, X } from 'lucide-react'
 import { useEffect, useState } from 'react'
 import { Button } from './Button'
 
@@ -119,13 +120,14 @@ export function MetadataPanel({ metadata, opfXml, version, onApply, onApplyMeta 
           )}
         </label>
       ))}
-      <Button variant="ghost" onClick={() => setDraft(toDraft(metadata))}>
-        还原未修改的值
+      <Button variant="ghost" size="sm" onClick={() => setDraft(toDraft(metadata))}>
+        <RotateCcw size={13} strokeWidth={1.7} aria-hidden="true" />
+        <span>还原未修改的值</span>
       </Button>
 
       <section className="meta-section">
         <h3 className="meta-section-label">
-          meta
+          <span>META</span>
           <span className="meta-count">{rows.length}</span>
         </h3>
         <p className="panel-note">
@@ -161,7 +163,7 @@ export function MetadataPanel({ metadata, opfXml, version, onApply, onApplyMeta 
                   aria-label={`删除 meta ${index + 1}`}
                   onClick={() => applyRows(rows.filter((_, at) => at !== index))}
                 >
-                  ✕
+                  <X size={13} strokeWidth={1.75} aria-hidden="true" />
                 </button>
               </div>
               <input
@@ -178,10 +180,12 @@ export function MetadataPanel({ metadata, opfXml, version, onApply, onApplyMeta 
           ))}
         </ul>
         <Button
-          variant="ghost"
+          variant="secondary"
+          size="sm"
           onClick={() => applyRows([...rows, { property: '', refines: '', value: '' }])}
         >
-          加一行 meta
+          <Plus size={13} strokeWidth={1.75} aria-hidden="true" />
+          <span>加一行 meta</span>
         </Button>
       </section>
     </div>

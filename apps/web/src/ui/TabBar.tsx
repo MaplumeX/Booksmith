@@ -1,4 +1,7 @@
+import { X } from 'lucide-react'
+import { useEffect, useRef } from 'react'
 import { basename } from '../state/bookStore'
+import { FileTypeIcon } from './FileTypeIcon'
 
 interface TabBarProps {
   tabs: string[]
@@ -9,8 +12,25 @@ interface TabBarProps {
 }
 
 export function TabBar({ tabs, active, dirty, onSelect, onClose }: TabBarProps) {
+  const listRef = useRef<HTMLDivElement>(null)
+
+  useEffect(() => {
+    const activeTab = listRef.current?.querySelector<HTMLElement>('.tab.on')
+    activeTab?.scrollIntoView({ block: 'nearest', inline: 'nearest' })
+  }, [active])
+
   return (
-    <div className="tabbar" role="tablist" aria-label="已打开的文件">
+    <div
+      ref={listRef}
+      className="tabbar"
+      role="tablist"
+      aria-label="已打开的文件"
+      onWheel={(event) => {
+        const el = listRef.current
+        if (!el || event.deltaY === 0 || el.scrollWidth <= el.clientWidth) return
+        el.scrollLeft += event.deltaY
+      }}
+    >
       {tabs.map((path) => (
         <div
           key={path}
@@ -25,7 +45,8 @@ export function TabBar({ tabs, active, dirty, onSelect, onClose }: TabBarProps) 
             onClick={() => onSelect(path)}
             title={path}
           >
-            {basename(path)}
+            <FileTypeIcon path={path} size={13} className="tab-icon" />
+            <span>{basename(path)}</span>
           </button>
           {dirty.has(path) ? <span className="dirty-dot" aria-hidden="true" /> : null}
           <button
@@ -34,7 +55,7 @@ export function TabBar({ tabs, active, dirty, onSelect, onClose }: TabBarProps) 
             aria-label={`关闭 ${basename(path)}`}
             onClick={() => onClose(path)}
           >
-            ×
+            <X size={12} strokeWidth={1.85} aria-hidden="true" />
           </button>
         </div>
       ))}

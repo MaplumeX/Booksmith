@@ -1,3 +1,4 @@
+import { AlertCircle, BookOpen } from 'lucide-react'
 import { useState, type FormEvent } from 'react'
 import { ApiError, api, type UserDto } from '../api/client'
 import { Button } from '../ui/Button'
@@ -36,8 +37,15 @@ export function Login({ onSuccess }: { onSuccess: (user: UserDto) => void }) {
   return (
     <div className="login-shell">
       <main className="login">
-        <h1>Booksmith</h1>
-        <p className="login-sub">登录后管理你的 EPUB 书库。</p>
+        <div className="login-brand">
+          <span className="login-mark" aria-hidden="true">
+            <BookOpen size={18} strokeWidth={1.75} />
+          </span>
+          <div>
+            <h1>Booksmith</h1>
+            <p className="login-sub">登录后管理你的 EPUB 书库。</p>
+          </div>
+        </div>
 
         <form onSubmit={submit} noValidate>
           <label className="field">
@@ -66,11 +74,12 @@ export function Login({ onSuccess }: { onSuccess: (user: UserDto) => void }) {
 
           {error ? (
             <p className="banner banner-error" role="alert">
-              {error}
+              <AlertCircle size={14} strokeWidth={1.75} aria-hidden="true" />
+              <span>{error}</span>
             </p>
           ) : null}
 
-          <Button type="submit" variant="primary" disabled={pending} className="login-submit">
+          <Button type="submit" variant="primary" size="lg" disabled={pending} className="login-submit">
             {pending ? '登录中…' : '登录'}
           </Button>
         </form>
