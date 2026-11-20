@@ -81,7 +81,7 @@ test('preserves MathML protection islands and non-blob image srcs when syncing b
   await expect(page.locator('.cm-content')).toContainText('·修订')
 
   // ch010.xhtml is 174KB so CodeMirror virtualizes offscreen lines; verify full synced text via book search.
-  await page.getByRole('tab', { name: '查找' }).click()
+  await page.getByRole('button', { name: '查找', exact: true }).click()
   const searchInput = page.getByLabel('全书查找')
   await searchInput.fill('<annotation encoding="application/x-tex">')
   await expect(page.locator('.search-group').filter({ hasText: 'ch010.xhtml' })).toBeVisible({ timeout: 15_000 })
@@ -90,6 +90,7 @@ test('preserves MathML protection islands and non-blob image srcs when syncing b
     await searchInput.fill(forbidden)
     await expect(page.getByText(/没有匹配/)).toBeVisible({ timeout: 15_000 })
   }
+  await page.getByRole('button', { name: '关闭', exact: true }).click()
 
   // Check image src fidelity on cover.xhtml
   await page.getByRole('button', { name: 'cover.xhtml', exact: true }).click()

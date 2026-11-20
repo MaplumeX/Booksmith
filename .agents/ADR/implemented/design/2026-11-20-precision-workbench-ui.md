@@ -4,7 +4,7 @@ Status: implemented
 
 ## Problem
 
-[The original workbench design system](2026-11-19-workbench-design-system.md) 建立了一套低噪声的冷灰印刷校样台基准，禁止卡片阴影、只保留单一 `4px` 圆角且未引入图标与浮层组件库。在实际界面中，这一极简约束放大了组件细节的粗糙感：
+[The original workbench design system](../../archived/design/2026-11-19-workbench-design-system.md) 建立了一套低噪声的冷灰印刷校样台基准，禁止卡片阴影、只保留单一 `4px` 圆角且未引入图标与浮层组件库。在实际界面中，这一极简约束放大了组件细节的粗糙感：
 
 - **浮层与工作区混为一体，暗色模式失效**：`FileTree` 右键菜单（`.context-menu`）使用了硬编码浅色阴影且底色仍为 `--surface`，暗色模式下边界模糊；`.dialog` 仅靠 `1px --border` 区分，遮罩使用硬编码 `rgb(...)`。
 - **交互原语缺失导致重复与行为漂移**：右键菜单内嵌在 `FileTree.tsx` 中，缺少键盘方向键导航与通用容器；`.dialog-backdrop` / `.dialog` 在 `Editor.tsx`、`Library.tsx`、`MediaPane.tsx` 与 `VersionHistory.tsx` 四处重复手写，缺少右上角关闭按钮、统一 `Escape`/遮罩关闭与右下角动作对齐。
@@ -13,7 +13,7 @@ Status: implemented
 
 ## Decision
 
-部分替代并扩展 [the original workbench design system](2026-11-19-workbench-design-system.md) 中的「无阴影 / 单一 4px 圆角 / 零外部 UI 原语」条款，保留其「冷灰 + 墨蓝」护眼色板、三栏 `100dvh` 工作区尺寸与低噪声排版骨架，将整体界面升级为「精密桌面校对工作台」。
+部分替代并扩展 [the original workbench design system](../../archived/design/2026-11-19-workbench-design-system.md) 中的「无阴影 / 单一 4px 圆角 / 零外部 UI 原语」条款，保留其「冷灰 + 墨蓝」护眼色板、三栏 `100dvh` 工作区尺寸与低噪声排版骨架，将整体界面升级为「精密桌面校对工作台」。
 
 ### Design Thesis
 
@@ -74,3 +74,7 @@ Status: implemented
 - 引入了 `lucide-react` 与 `radix-ui` 两个前端运行依赖，并由 `Dialog.tsx` 与 `ContextMenu.tsx` 显式透传 `aria-label`（置空 `aria-labelledby`）维持现有 E2E 可访问性名称契约，后续新增弹窗若传 `ariaLabel` 须沿用该包装组件。
 - `TabBar` 隐藏了原生横向滚动条以防止其挤占标签高度，窄窗口打开大量文件时依赖鼠标滚轮横向滚动或文件树切换定位。
 - 暗色浮层质感依赖 `--surface-elevated`（`#2b3544`）与 `--shadow-md`/`--shadow-lg` 的顶部 `1px` 内高光；未来新增抬升表面时需保持 `--text-muted` 对比度 ≥4.5:1（见 `tokens.test.ts`）。
+
+**后续演进（2026-11-20）**
+
+- 本文档中的「冷灰 + 墨蓝色板」「`4 / 6 / 10px` 圆角与 `26 / 30 / 36px` 控件高度」及「常驻三栏 + 右侧 5-Tab 栏 + 底部 `28px` 状态栏」壳层约束已由 [the Soft Craft Studio UI decision](2026-11-20-soft-craft-studio-ui.md) 部分替代；本文档确立的 Radix `Dialog` / `ContextMenu` 无障碍包装契约、`lucide-react` 图标体系及 `--surface-elevated` / `--danger*` / `--shadow-inset` 语义 Token 命名继续沿用。

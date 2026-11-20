@@ -1,4 +1,4 @@
-import { Code2, FilePenLine, X } from 'lucide-react'
+import { Code2, Columns2, FilePenLine, X } from 'lucide-react'
 import { useEffect, useRef } from 'react'
 import { basename } from '../state/bookStore'
 import { FileTypeIcon } from './FileTypeIcon'
@@ -14,6 +14,8 @@ interface TabBarProps {
   mode?: EditorViewMode
   canWysiwyg?: boolean
   onModeChange?: (mode: EditorViewMode) => void
+  previewOpen?: boolean
+  onPreviewToggle?: () => void
 }
 
 export function TabBar({
@@ -25,6 +27,8 @@ export function TabBar({
   mode = 'code',
   canWysiwyg = false,
   onModeChange,
+  previewOpen = true,
+  onPreviewToggle,
 }: TabBarProps) {
   const listRef = useRef<HTMLDivElement>(null)
 
@@ -79,27 +83,41 @@ export function TabBar({
       </div>
 
       {onModeChange && tabs.length > 0 ? (
-        <div className="mode-switch" role="group" aria-label="编辑模式">
-          <button
-            type="button"
-            className={`mode-switch-btn${effectiveMode === 'code' ? ' on' : ''}`}
-            aria-pressed={effectiveMode === 'code'}
-            onClick={() => onModeChange('code')}
-          >
-            <Code2 size={13} strokeWidth={1.75} aria-hidden="true" />
-            <span>代码</span>
-          </button>
-          <button
-            type="button"
-            className={`mode-switch-btn${effectiveMode === 'wysiwyg' ? ' on' : ''}`}
-            aria-pressed={effectiveMode === 'wysiwyg'}
-            disabled={!canWysiwyg}
-            title={canWysiwyg ? '切换到所见即所得校对模式' : '仅 .xhtml / .html 章节支持可视化编辑'}
-            onClick={() => onModeChange('wysiwyg')}
-          >
-            <FilePenLine size={13} strokeWidth={1.75} aria-hidden="true" />
-            <span>可视化</span>
-          </button>
+        <div className="tabbar-controls">
+          {canWysiwyg && effectiveMode === 'code' && onPreviewToggle ? (
+            <button
+              type="button"
+              className={`split-preview-btn${previewOpen ? ' on' : ''}`}
+              aria-pressed={previewOpen}
+              title={previewOpen ? '收起右侧书页对照预览' : '开启右侧书页对照预览'}
+              onClick={onPreviewToggle}
+            >
+              <Columns2 size={13} strokeWidth={1.75} aria-hidden="true" />
+              <span>对照预览</span>
+            </button>
+          ) : null}
+          <div className="mode-switch" role="group" aria-label="编辑模式">
+            <button
+              type="button"
+              className={`mode-switch-btn${effectiveMode === 'code' ? ' on' : ''}`}
+              aria-pressed={effectiveMode === 'code'}
+              onClick={() => onModeChange('code')}
+            >
+              <Code2 size={13} strokeWidth={1.75} aria-hidden="true" />
+              <span>代码</span>
+            </button>
+            <button
+              type="button"
+              className={`mode-switch-btn${effectiveMode === 'wysiwyg' ? ' on' : ''}`}
+              aria-pressed={effectiveMode === 'wysiwyg'}
+              disabled={!canWysiwyg}
+              title={canWysiwyg ? '切换到所见即所得校对模式' : '仅 .xhtml / .html 章节支持可视化编辑'}
+              onClick={() => onModeChange('wysiwyg')}
+            >
+              <FilePenLine size={13} strokeWidth={1.75} aria-hidden="true" />
+              <span>可视化</span>
+            </button>
+          </div>
         </div>
       ) : null}
     </div>

@@ -7,6 +7,10 @@ interface StatusBarProps {
   dirtyCount: number
 }
 
+/**
+ * Embedded inside the bottom of the central floating document card rather than spanning
+ * the full viewport width, eliminating the IDE statusbar chrome. See ADR 2026-11-20-soft-craft-studio-ui.
+ */
 export function StatusBar({ path, characters, dirtyCount }: StatusBarProps) {
   return (
     <footer className="statusbar">
@@ -18,8 +22,6 @@ export function StatusBar({ path, characters, dirtyCount }: StatusBarProps) {
         <>
           <span className="status-sep" aria-hidden="true" />
           <span className="status-mono">{characters.toLocaleString('zh-CN')} 字</span>
-          <span className="status-sep" aria-hidden="true" />
-          <span className="status-mono">UTF-8</span>
         </>
       ) : null}
       <span className={`status-item status-right${dirtyCount > 0 ? ' is-dirty' : ''}`}>

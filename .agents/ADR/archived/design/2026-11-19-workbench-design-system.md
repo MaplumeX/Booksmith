@@ -1,6 +1,7 @@
 # ADR: Workbench design system — press-proof desk
 
-Status: implemented
+Status: archived
+Archived: 2026-11-20
 
 ## Problem
 

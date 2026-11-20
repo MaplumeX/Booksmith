@@ -12,7 +12,7 @@ async function openSearch(page: Page) {
   await expectLoggedIn(page)
   await page.goto(`/books/${bookId}`)
   await expect(page.getByLabel('书籍文件')).toBeVisible()
-  await page.getByRole('tab', { name: '查找' }).click()
+  await page.getByRole('button', { name: '查找', exact: true }).click()
   await page.getByLabel('全书查找').fill('马克思')
   await expect(page.locator('.search-status')).toContainText('个文件')
 }
@@ -28,13 +28,14 @@ test('replaces across the whole book and persists through a save', async ({ page
   await expect(page.locator('.search-confirm')).toContainText('已替换')
   await expect(page.locator('.search-status')).toContainText('0 处')
   await expect(page.locator('.appbar-flag')).toContainText('未保存')
+  await page.getByRole('button', { name: '关闭', exact: true }).click()
 
   await page.getByRole('button', { name: '保存', exact: true }).click()
   await expect(page.locator('.appbar-meta')).toHaveText('v2')
 
   await page.reload()
   await expect(page.getByLabel('书籍文件')).toBeVisible()
-  await page.getByRole('tab', { name: '查找' }).click()
+  await page.getByRole('button', { name: '查找', exact: true }).click()
   await page.getByLabel('全书查找').fill('马克思')
   await expect(page.locator('.search-status')).toContainText('0 处')
   await page.getByLabel('全书查找').fill('马克斯')
@@ -51,6 +52,7 @@ test('undoes a replace batch in one click', async ({ page }) => {
 
   await page.getByRole('button', { name: '撤销' }).click()
   await expect(page.locator('.search-status')).not.toContainText('0 处')
+  await page.getByRole('button', { name: '关闭', exact: true }).click()
   // Nothing was saved, so the book went back to being untouched.
   await expect(page.locator('.status-right')).toContainText('未修改')
 })

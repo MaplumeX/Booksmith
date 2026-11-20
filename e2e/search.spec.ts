@@ -16,7 +16,7 @@ async function openBook(page: import('@playwright/test').Page) {
 
 test('searches the whole book and groups results by file', async ({ page }) => {
   await openBook(page)
-  await page.getByRole('tab', { name: '查找' }).click()
+  await page.getByRole('button', { name: '查找', exact: true }).click()
   await page.getByLabel('全书查找').fill('置盐定理')
 
   await expect(page.locator('.search-status')).toContainText('处', { timeout: 15_000 })
@@ -27,7 +27,7 @@ test('searches the whole book and groups results by file', async ({ page }) => {
 
 test('opens a hit and reveals it in the editor', async ({ page }) => {
   await openBook(page)
-  await page.getByRole('tab', { name: '查找' }).click()
+  await page.getByRole('button', { name: '查找', exact: true }).click()
   await page.getByLabel('全书查找').fill('置盐定理')
   await expect(page.locator('.search-group').first()).toBeVisible({ timeout: 15_000 })
 
@@ -38,7 +38,7 @@ test('opens a hit and reveals it in the editor', async ({ page }) => {
 
 test('shows an empty state for a term the book does not contain', async ({ page }) => {
   await openBook(page)
-  await page.getByRole('tab', { name: '查找' }).click()
+  await page.getByRole('button', { name: '查找', exact: true }).click()
   await page.getByLabel('全书查找').fill('这几个字书里肯定没有')
 
   await expect(page.getByText(/没有匹配/)).toBeVisible({ timeout: 15_000 })

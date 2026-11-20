@@ -16,11 +16,12 @@ async function openBook(page: Page) {
 
 test('edits metadata and persists it through a save', async ({ page }) => {
   await openBook(page)
-  await page.getByRole('tab', { name: '元数据' }).click()
+  await page.getByRole('button', { name: '元数据', exact: true }).click()
 
   const title = page.getByLabel('书名')
   await expect(title).toHaveValue('马克思经济学与数理分析')
   await title.fill('马克思经济学与数理分析（修订版）')
+  await page.getByRole('button', { name: '关闭', exact: true }).click()
 
   await page.getByRole('button', { name: '保存', exact: true }).click()
   await expect(page.locator('.appbar-meta')).toHaveText('v2')

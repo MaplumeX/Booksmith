@@ -77,12 +77,13 @@ export const editorTheme = [
       lineHeight: '1.65',
       overflow: 'auto',
     },
-    '.cm-content': { padding: '8px 0' },
+    '.cm-content': { padding: '18px 28px 40px 8px' },
     '.cm-gutters': {
-      backgroundColor: 'var(--surface-raised)',
+      backgroundColor: 'transparent',
       color: 'var(--text-muted)',
       border: 'none',
-      borderRight: '1px solid var(--border)',
+      paddingLeft: '18px',
+      paddingRight: '10px',
     },
     // 选区层在 z-index:-1（文字之下），行背景一定会盖住它，所以当前行不画背景：
     // 行号高亮 + 左侧竖条足够指认当前行，且不会跟选区抢同一块颜色。

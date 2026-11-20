@@ -95,7 +95,7 @@ export function Library({ user, onLogout }: { user: UserDto; onLogout: () => voi
 
   return (
     <div
-      className="shell"
+      className="library-shell"
       onDragOver={(event) => {
         event.preventDefault()
         setDragging(true)
@@ -108,47 +108,63 @@ export function Library({ user, onLogout }: { user: UserDto; onLogout: () => voi
         if (file) void upload(file)
       }}
     >
-      <header className="appbar">
-        <span className="brand">
-          <BookOpen size={16} strokeWidth={1.75} className="brand-icon" aria-hidden="true" />
-          <span>Booksmith</span>
-        </span>
-        <SearchBar value={query} onChange={setQuery} placeholder="搜索书名或作者" />
-        <span className="appbar-spacer" />
-        <Button variant="secondary" onClick={() => setCreating(true)}>
-          <Plus size={14} strokeWidth={1.75} aria-hidden="true" />
-          <span>新建书</span>
-        </Button>
-        <Button variant="primary" onClick={() => fileInput.current?.click()} disabled={uploading}>
-          <Upload size={14} strokeWidth={1.75} aria-hidden="true" />
-          {uploading ? (
-            <span>导入中…</span>
-          ) : (
-            <>
-              <span className="btn-label-full">导入 EPUB</span>
-              <span className="btn-label-short">导入</span>
-            </>
-          )}
-        </Button>
-        <Button variant="ghost" onClick={() => setSettingsOpen(true)} title="助手模型设置">
-          <SlidersHorizontal size={14} strokeWidth={1.65} aria-hidden="true" />
-          <span className="btn-label-full">模型设置</span>
-        </Button>
-        <Button variant="ghost" onClick={onLogout}>
-          <LogOut size={14} strokeWidth={1.65} aria-hidden="true" />
-          <span>退出</span>
-        </Button>
-        <input
-          ref={fileInput}
-          type="file"
-          accept=".epub,application/epub+zip"
-          hidden
-          data-testid="upload-input"
-          onChange={(event) => {
-            const file = event.target.files?.[0]
-            if (file) void upload(file)
-          }}
-        />
+      {/* Library is a floating gallery without the 28px workbench bottom statusbar. See ADR 2026-11-20-soft-craft-studio-ui. */}
+      <header className="library-header">
+        <div className="library-header-inner">
+          <div className="library-brand-group">
+            <span className="brand">
+              <span className="brand-badge" aria-hidden="true">
+                <BookOpen size={16} strokeWidth={1.8} />
+              </span>
+              <span className="brand-name">Booksmith</span>
+            </span>
+            <span className="library-count-pill">
+              {needle ? `${filtered.length} / ${books.length} 本` : `${books.length} 本`}
+            </span>
+          </div>
+
+          <SearchBar value={query} onChange={setQuery} placeholder="搜索书名或作者" />
+
+          <div className="library-actions">
+            <Button variant="secondary" onClick={() => setCreating(true)}>
+              <Plus size={14} strokeWidth={1.75} aria-hidden="true" />
+              <span>新建书</span>
+            </Button>
+            <Button variant="primary" onClick={() => fileInput.current?.click()} disabled={uploading}>
+              <Upload size={14} strokeWidth={1.75} aria-hidden="true" />
+              {uploading ? (
+                <span>导入中…</span>
+              ) : (
+                <>
+                  <span className="btn-label-full">导入 EPUB</span>
+                  <span className="btn-label-short">导入</span>
+                </>
+              )}
+            </Button>
+            <Button variant="ghost" onClick={() => setSettingsOpen(true)} title="助手模型设置">
+              <SlidersHorizontal size={14} strokeWidth={1.65} aria-hidden="true" />
+              <span className="btn-label-full">模型设置</span>
+            </Button>
+            <span className="library-user-email" title={user.email}>
+              {user.email}
+            </span>
+            <Button variant="ghost" onClick={onLogout}>
+              <LogOut size={14} strokeWidth={1.65} aria-hidden="true" />
+              <span>退出</span>
+            </Button>
+          </div>
+          <input
+            ref={fileInput}
+            type="file"
+            accept=".epub,application/epub+zip"
+            hidden
+            data-testid="upload-input"
+            onChange={(event) => {
+              const file = event.target.files?.[0]
+              if (file) void upload(file)
+            }}
+          />
+        </div>
       </header>
 
       <main className={`library${dragging ? ' is-dragging' : ''}`}>
@@ -165,10 +181,12 @@ export function Library({ user, onLogout }: { user: UserDto; onLogout: () => voi
         {loading ? (
           <div className="book-grid" aria-busy="true" aria-label="正在载入书库">
             {Array.from({ length: 6 }).map((_, index) => (
-              <div className="book-card skeleton" key={index}>
-                <span className="book-cover skeleton-block" />
-                <span className="skeleton-line" />
-                <span className="skeleton-line short" />
+              <div className="book-card-wrap skeleton" key={index}>
+                <div className="book-card">
+                  <span className="book-cover skeleton-block" />
+                  <span className="skeleton-line" />
+                  <span className="skeleton-line short" />
+                </div>
               </div>
             ))}
           </div>
@@ -238,11 +256,6 @@ export function Library({ user, onLogout }: { user: UserDto; onLogout: () => voi
       </Dialog>
 
       <AgentSettingsDialog open={settingsOpen} onOpenChange={setSettingsOpen} />
-
-      <footer className="statusbar">
-        <span>{needle ? `${filtered.length} / ${books.length} 本` : `${books.length} 本`}</span>
-        <span className="status-right">{user.email}</span>
-      </footer>
     </div>
   )
 }

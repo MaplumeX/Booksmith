@@ -103,18 +103,21 @@ await page.getByRole('button', { name: 'ch010.xhtml', exact: true }).click()
 await page.waitForTimeout(500)
 await page.screenshot({ path: `${OUT}/editor-ch010-1440.png` })
 
-await page.getByRole('tab', { name: '元数据' }).click()
+await page.getByRole('button', { name: '元数据', exact: true }).click()
 await page.waitForTimeout(300)
 await page.screenshot({ path: `${OUT}/editor-metadata-1440.png` })
+await page.getByRole('button', { name: '关闭', exact: true }).click()
 
 await page.getByRole('tab', { name: '目录' }).click()
 await page.waitForTimeout(300)
 await page.screenshot({ path: `${OUT}/editor-toc-1440.png` })
+await page.getByRole('tab', { name: '文件' }).click()
 
-await page.getByRole('tab', { name: '查找' }).click()
+await page.getByRole('button', { name: '查找', exact: true }).click()
 await page.getByLabel('全书查找').fill('置盐定理')
 await page.waitForTimeout(600)
 await page.screenshot({ path: `${OUT}/editor-search-1440.png` })
+await page.getByRole('button', { name: '关闭', exact: true }).click()
 
 await page.getByRole('button', { name: '助手' }).click()
 await page.waitForTimeout(400)
@@ -127,7 +130,6 @@ await page.screenshot({ path: `${OUT}/editor-agent-settings-1440.png` })
 await overflow('editor-agent-settings-1440')
 await page.getByRole('button', { name: '关闭', exact: true }).click()
 await page.getByRole('button', { name: '关闭助手栏' }).click()
-await page.getByRole('tab', { name: '预览' }).click()
 
 // Two saves that differ by one word, so the history overlay has a real character-level diff to show.
 const SNAPSHOT_DOC_A = [

@@ -33,22 +33,22 @@ import {
 } from '@booksmith/core'
 import {
   AlertCircle,
+  AlertTriangle,
   ArrowLeft,
   Check,
   Download,
-  Eye,
   FolderTree,
   History,
   ImagePlus,
   ListTree,
   Loader2,
-  PanelRight,
   Save,
   Search,
   ShieldCheck,
   Sparkles,
   Tags,
 } from 'lucide-react'
+import { Popover } from 'radix-ui'
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { ApiError, api, downloadUrl, type AgentProfileDto } from '../api/client'
 import { mediaTypeFromExtension, mediaTypeOf } from '../preview/render'
@@ -85,17 +85,10 @@ import { VersionHistory } from '../ui/VersionHistory'
 import { WysiwygPane, type WysiwygShortcut } from '../ui/WysiwygPane'
 
 type LoadState = { status: 'loading' } | { status: 'error'; message: string } | { status: 'ready' }
-type SidebarTab = 'preview' | 'search' | 'metadata' | 'toc' | 'check'
+type NavIslandTab = 'files' | 'toc'
 
 const SIDEBAR_MIN = 400
 const SIDEBAR_MAX = 560
-const SIDEBAR_TABS: Array<[SidebarTab, string]> = [
-  ['preview', '预览'],
-  ['search', '查找'],
-  ['metadata', '元数据'],
-  ['toc', '目录'],
-  ['check', '检查'],
-]
 
 function messageFor(error: unknown): string {
   if (error instanceof ApiError) {
@@ -199,14 +192,6 @@ function pruneToc(entries: TocEntry[], tocPath: string, removed: string): { entr
   return { entries: kept, changed }
 }
 
-const SIDEBAR_TAB_ICONS: Record<SidebarTab, typeof Eye> = {
-  preview: Eye,
-  search: Search,
-  metadata: Tags,
-  toc: ListTree,
-  check: ShieldCheck,
-}
-
 export function Editor({ bookId }: { bookId: string }) {
   const [state, setState] = useState<LoadState>({ status: 'loading' })
   const [book, setBook] = useState<LoadedBook | null>(null)
@@ -214,9 +199,12 @@ export function Editor({ bookId }: { bookId: string }) {
   const [active, setActive] = useState<string | null>(null)
   const [dirty, setDirty] = useState<Set<string>>(new Set())
   const [treeOpen, setTreeOpen] = useState(false)
-  const [sideOpen, setSideOpen] = useState(false)
+  const [navTab, setNavTab] = useState<NavIslandTab>('files')
+  const [previewOpen, setPreviewOpen] = useState(true)
+  const [searchOpen, setSearchOpen] = useState(false)
+  const [metadataOpen, setMetadataOpen] = useState(false)
+  const [checkOpen, setCheckOpen] = useState(false)
   const [agentOpen, setAgentOpen] = useState(false)
-  const [sidebarTab, setSidebarTab] = useState<SidebarTab>('preview')
   const [sidebarWidth, setSidebarWidth] = useState(440)
   const [reveal, setReveal] = useState<RevealTarget | null>(null)
   const assetInput = useRef<HTMLInputElement>(null)
@@ -857,11 +845,10 @@ export function Editor({ bookId }: { bookId: string }) {
           setSaveState('error')
           const reported = error instanceof ApiError ? (error.payload as { issues?: EpubIssue[] }).issues : null
           if (reported && reported.length > 0) {
-            // The server's rejection is the most authoritative issue list there is; show it where
-            // the rest of the issues live instead of leaving it in one status-bar sentence.
+            // The server's rejection is the most authoritative issue list there is; open the health
+            // popover directly so the user sees every failing path instead of a generic error line.
             setServerIssues(reported)
-            setSidebarTab('check')
-            setSideOpen(true)
+            setCheckOpen(true)
           }
         }
       } finally {
@@ -996,18 +983,13 @@ export function Editor({ bookId }: { bookId: string }) {
       }
       if (event.key.toLowerCase() === 'f' && event.shiftKey) {
         event.preventDefault()
-        setAgentOpen(false)
-        setSidebarTab('search')
-        setSideOpen(true)
+        setSearchOpen(true)
       }
       if (event.key.toLowerCase() === 'l' && event.shiftKey) {
         event.preventDefault()
         setAgentOpen((openAgent) => {
           const next = !openAgent
-          if (next) {
-            setSideOpen(false)
-            setTreeOpen(false)
-          }
+          if (next) setTreeOpen(false)
           return next
         })
       }
@@ -1098,9 +1080,7 @@ export function Editor({ bookId }: { bookId: string }) {
       return
     }
     if (action === 'search') {
-      setAgentOpen(false)
-      setSidebarTab('search')
-      setSideOpen(true)
+      setSearchOpen(true)
       return
     }
     const list = tabsRef.current
@@ -1124,105 +1104,10 @@ export function Editor({ bookId }: { bookId: string }) {
     }
   })()
   const brokenAnchors = tocPath ? findBrokenAnchors(tocEntries, tocPath, texts.current) : []
-  // Not a hook: this sits below the early returns. Linting only runs while the panel is visible.
-  const issues =
-    !agentOpen && sidebarTab === 'check'
-      ? [...serverIssues, ...lintBook(texts.current, book.pkg, book.archive, browserXmlCodec)]
-      : []
-
-  const sidebarBody = () => {
-    if (sidebarTab === 'preview') {
-      if (!active) return <p className="sidebar-note">先打开一个文件。</p>
-      if (!editable) {
-        return <p className="sidebar-note">当前资源已在主区预览，切换到 .xhtml 文件查看章节排版。</p>
-      }
-      if (!previewable) {
-        return <p className="sidebar-note">当前文件不是页面，切换到 .xhtml 文件查看预览。</p>
-      }
-      return (
-        <PreviewPane
-          path={active}
-          content={content}
-          archive={book.archive}
-          pkg={book.pkg}
-          subscribeTextChange={subscribeTextChange}
-        />
-      )
-    }
-    if (sidebarTab === 'search') {
-      return (
-        <SearchPanel
-          files={searchFiles}
-          onOpen={(path, line, column) => {
-            open(path)
-            setEditorMode('code')
-            setReveal({ line, column, key: Date.now() })
-          }}
-          onReplace={applyReplace}
-          onReplaceUndo={undoReplace}
-        />
-      )
-    }
-    if (sidebarTab === 'metadata') {
-      return (
-        <MetadataPanel
-          metadata={book.pkg.metadata}
-          opfXml={texts.current.get(book.pkg.opfPath) ?? ''}
-          version={book.version}
-          onApply={(draft) => {
-            handleChange(book.pkg.opfPath, writeOpfMetadata(texts.current.get(book.pkg.opfPath) ?? '', draft, browserXmlCodec))
-          }}
-          onApplyMeta={(rows: OpfMetaRow[]) => {
-            handleChange(
-              book.pkg.opfPath,
-              writeOpfMeta(texts.current.get(book.pkg.opfPath) ?? '', rows, browserXmlCodec),
-              { rerender: true },
-            )
-          }}
-        />
-      )
-    }
-    if (sidebarTab === 'check') {
-      return (
-        <CheckPanel
-          issues={issues}
-          onOpen={(path, line) => {
-            open(path)
-            if (line) {
-              setEditorMode('code')
-              setReveal({ line, column: 1, key: Date.now() })
-            }
-          }}
-        />
-      )
-    }
-    if (!tocPath) {
-      return <p className="sidebar-note">这本书没有 nav.xhtml 或 toc.ncx，暂时无法编辑目录。</p>
-    }
-    return (
-      <TocPanel
-        entries={tocEntries}
-        broken={brokenAnchors}
-        tocPath={tocPath}
-        files={spinePaths(book.pkg)}
-        suggestTitle={(path) => {
-          const text = texts.current.get(path) ?? ''
-          const match = /<h[1-3][^>]*>([\s\S]*?)<\/h[1-3]>/i.exec(text)
-          return match?.[1] ? match[1].replace(/<[^>]+>/g, '').trim() : basename(path).replace(/\.[^.]+$/, '')
-        }}
-        onChange={(next) => {
-          if (book.pkg.navPath) {
-            const navXml = texts.current.get(book.pkg.navPath)
-            if (navXml) handleChange(book.pkg.navPath, writeNavToc(navXml, next, browserXmlCodec), { rerender: true })
-          }
-          if (book.pkg.ncxPath) {
-            const ncxXml = texts.current.get(book.pkg.ncxPath)
-            if (ncxXml) handleChange(book.pkg.ncxPath, writeNcxToc(ncxXml, next, browserXmlCodec), { rerender: true })
-          }
-        }}
-      />
-    )
-  }
+  // Live book health status powers the topbar diagnostic pill and its Radix Popover card.
+  // See ADR 2026-11-20-soft-craft-studio-ui.
+  const issues = [...serverIssues, ...lintBook(texts.current, book.pkg, book.archive, browserXmlCodec)]
+  const showSplitPreview = Boolean(active && editable && previewable && !showWysiwyg && previewOpen)
 
   const applyDraft = () => {
     if (!draftPrompt) return
@@ -1245,37 +1130,43 @@ export function Editor({ bookId }: { bookId: string }) {
   const toggleAgentSidebar = () => {
     setAgentOpen((openAgent) => {
       const next = !openAgent
-      if (next) {
-        setSideOpen(false)
-        setTreeOpen(false)
-      }
+      if (next) setTreeOpen(false)
       return next
     })
   }
 
   return (
-    <div
-      className={`shell${treeOpen ? ' tree-open' : ''}${sideOpen ? ' side-open' : ''}${agentOpen ? ' agent-open' : ''}`}
-    >
+    <div className={`shell editor-shell${treeOpen ? ' tree-open' : ''}${agentOpen ? ' agent-open' : ''}`}>
       <header className="appbar">
         <Button variant="ghost" aria-label="← 书库" onClick={() => navigate('/')}>
           <ArrowLeft size={14} strokeWidth={1.75} aria-hidden="true" />
-          <span>书库</span>
+          <span className="appbar-back-label">书库</span>
         </Button>
         <Button
           variant="ghost"
           size="sm"
           className="tree-toggle"
+          aria-label="文件"
           aria-expanded={treeOpen}
           onClick={() => setTreeOpen((openTree) => !openTree)}
         >
           <FolderTree size={14} strokeWidth={1.65} aria-hidden="true" />
-          <span>文件</span>
+          <span className="appbar-tree-label">文件</span>
         </Button>
         <span className="appbar-sep" aria-hidden="true" />
         <span className="appbar-title" title={book.pkg.metadata.title}>
           {book.pkg.metadata.title}
         </span>
+        <button
+          type="button"
+          className="appbar-pill"
+          aria-label="元数据"
+          title="编辑书籍出版信息与 OPF 元数据"
+          onClick={() => setMetadataOpen(true)}
+        >
+          <Tags size={13} strokeWidth={1.7} aria-hidden="true" />
+          <span className="appbar-tool-label">元数据</span>
+        </button>
         <button
           type="button"
           className="appbar-meta appbar-history"
@@ -1305,20 +1196,60 @@ export function Editor({ bookId }: { bookId: string }) {
             <span>已保存 {clockLabel(savedAt)}</span>
           </span>
         ) : null}
-        <Button
-          variant="ghost"
-          size="sm"
-          className="sidebar-toggle"
-          aria-expanded={sideOpen && !agentOpen}
-          onClick={() => {
-            setAgentOpen(false)
-            setTreeOpen(false)
-            setSideOpen((openSide) => !openSide)
-          }}
+        <button
+          type="button"
+          className="appbar-search-trigger"
+          aria-label="查找"
+          title="全书查找与替换（Ctrl/Cmd+Shift+F）"
+          onClick={() => setSearchOpen(true)}
         >
-          <PanelRight size={14} strokeWidth={1.65} aria-hidden="true" />
-          <span>预览</span>
-        </Button>
+          <Search size={13} strokeWidth={1.75} aria-hidden="true" />
+          <span className="appbar-tool-label">查找</span>
+          <kbd className="appbar-kbd" aria-hidden="true">
+            ⌘⇧F
+          </kbd>
+        </button>
+        <Popover.Root open={checkOpen} onOpenChange={setCheckOpen}>
+          <Popover.Trigger asChild>
+            <button
+              type="button"
+              className={`appbar-pill appbar-check-pill${issues.length > 0 ? ' has-issues' : ' is-clean'}`}
+              aria-label="检查"
+              title={issues.length > 0 ? `发现 ${issues.length} 处结构问题` : '全书结构检查通过'}
+            >
+              {issues.length > 0 ? (
+                <AlertTriangle size={13} strokeWidth={1.8} aria-hidden="true" />
+              ) : (
+                <ShieldCheck size={13} strokeWidth={1.75} aria-hidden="true" />
+              )}
+              <span className="appbar-tool-label">检查</span>
+              {issues.length > 0 ? <span className="appbar-check-count">{issues.length}</span> : null}
+            </button>
+          </Popover.Trigger>
+          <Popover.Portal>
+            <Popover.Content className="check-popover" sideOffset={8} collisionPadding={12} align="end">
+              <div className="check-popover-head">
+                <span className="check-popover-title">全书结构检查</span>
+                <span className="check-popover-sub">
+                  {issues.length === 0 ? '0 项异常' : `${issues.length} 项待处理`}
+                </span>
+              </div>
+              <div className="check-popover-body">
+                <CheckPanel
+                  issues={issues}
+                  onOpen={(path, line) => {
+                    setCheckOpen(false)
+                    open(path)
+                    if (line) {
+                      setEditorMode('code')
+                      setReveal({ line, column: 1, key: Date.now() })
+                    }
+                  }}
+                />
+              </div>
+            </Popover.Content>
+          </Popover.Portal>
+        </Popover.Root>
         <Button
           variant="ghost"
           size="sm"
@@ -1341,9 +1272,9 @@ export function Editor({ bookId }: { bookId: string }) {
           <Download size={14} strokeWidth={1.65} aria-hidden="true" />
           <span>下载</span>
         </a>
-        <Button variant="secondary" onClick={() => assetInput.current?.click()}>
+        <Button variant="secondary" aria-label="加资源" onClick={() => assetInput.current?.click()}>
           <ImagePlus size={14} strokeWidth={1.65} aria-hidden="true" />
-          <span>加资源</span>
+          <span className="appbar-asset-label">加资源</span>
         </Button>
         <input
           ref={assetInput}
@@ -1399,146 +1330,249 @@ export function Editor({ bookId }: { bookId: string }) {
       ) : null}
 
       <div className="workspace">
-        <FileTree
-          groups={book.groups}
-          active={active}
-          dirty={dirty}
-          spinePaths={spinePaths(book.pkg)}
-          onOpen={(path) => {
-            open(path)
-            setTreeOpen(false)
-          }}
-          onHistory={(path) => {
-            setHistoryPath(path)
-            setTreeOpen(false)
-          }}
-          onCreate={() => {
-            createDocument()
-            setTreeOpen(false)
-          }}
-          onRename={(path) => {
-            startRename(path)
-            setTreeOpen(false)
-          }}
-          onDelete={(path) => {
-            requestDelete(path)
-            setTreeOpen(false)
-          }}
-          onMove={moveSpine}
-        />
-        <div className="editor-column">
-          <TabBar
-            tabs={tabs}
-            active={active}
-            dirty={dirty}
-            mode={editorMode}
-            canWysiwyg={canWysiwyg}
-            onModeChange={switchMode}
-            onSelect={selectTab}
-            onClose={close}
-          />
-          {active ? (
-            editable ? (
-              <>
-                <CodePane
-                  path={active}
-                  content={content}
-                  reveal={reveal}
-                  visible={!showWysiwyg}
-                  syncMode={canWysiwyg ? 'transaction' : 'reset'}
-                  resetVersion={externalResetVersion}
-                  onNavigate={navigateTo}
-                  onSelectionChange={setSelectionText}
-                  onChange={(value) => handleChange(active, value)}
-                />
-                {showWysiwyg ? (
-                  <WysiwygPane
+        {/* Left floating structure island merges file tree and TOC authoring into one navigation card. See ADR 2026-11-20-soft-craft-studio-ui. */}
+        <aside className="nav-island" aria-label="书籍结构与目录">
+          <div className="nav-island-tabs" role="tablist" aria-label="结构视图切换">
+            <button
+              type="button"
+              role="tab"
+              aria-selected={navTab === 'files'}
+              className={`nav-island-tab${navTab === 'files' ? ' on' : ''}`}
+              onClick={() => setNavTab('files')}
+            >
+              <FolderTree size={13} strokeWidth={1.7} aria-hidden="true" />
+              <span>文件</span>
+            </button>
+            <button
+              type="button"
+              role="tab"
+              aria-selected={navTab === 'toc'}
+              className={`nav-island-tab${navTab === 'toc' ? ' on' : ''}`}
+              onClick={() => setNavTab('toc')}
+            >
+              <ListTree size={13} strokeWidth={1.7} aria-hidden="true" />
+              <span>目录</span>
+              {brokenAnchors.length > 0 ? <span className="nav-island-badge">{brokenAnchors.length}</span> : null}
+            </button>
+          </div>
+          <div className="nav-island-body">
+            {navTab === 'files' ? (
+              <FileTree
+                groups={book.groups}
+                active={active}
+                dirty={dirty}
+                spinePaths={spinePaths(book.pkg)}
+                onOpen={(path) => {
+                  open(path)
+                  setTreeOpen(false)
+                }}
+                onHistory={(path) => {
+                  setHistoryPath(path)
+                  setTreeOpen(false)
+                }}
+                onCreate={() => {
+                  createDocument()
+                  setTreeOpen(false)
+                }}
+                onRename={(path) => {
+                  startRename(path)
+                  setTreeOpen(false)
+                }}
+                onDelete={(path) => {
+                  requestDelete(path)
+                  setTreeOpen(false)
+                }}
+                onMove={moveSpine}
+              />
+            ) : !tocPath ? (
+              <p className="sidebar-note">这本书没有 nav.xhtml 或 toc.ncx，暂时无法编辑目录。</p>
+            ) : (
+              <TocPanel
+                entries={tocEntries}
+                broken={brokenAnchors}
+                tocPath={tocPath}
+                files={spinePaths(book.pkg)}
+                suggestTitle={(path) => {
+                  const text = texts.current.get(path) ?? ''
+                  const match = /<h[1-3][^>]*>([\s\S]*?)<\/h[1-3]>/i.exec(text)
+                  return match?.[1]
+                    ? match[1].replace(/<[^>]+>/g, '').trim()
+                    : basename(path).replace(/\.[^.]+$/, '')
+                }}
+                onChange={(next) => {
+                  if (book.pkg.navPath) {
+                    const navXml = texts.current.get(book.pkg.navPath)
+                    if (navXml)
+                      handleChange(book.pkg.navPath, writeNavToc(navXml, next, browserXmlCodec), { rerender: true })
+                  }
+                  if (book.pkg.ncxPath) {
+                    const ncxXml = texts.current.get(book.pkg.ncxPath)
+                    if (ncxXml)
+                      handleChange(book.pkg.ncxPath, writeNcxToc(ncxXml, next, browserXmlCodec), { rerender: true })
+                  }
+                }}
+              />
+            )}
+          </div>
+        </aside>
+
+        <div className={`canvas-stage${showSplitPreview ? ' is-split' : ''}`}>
+          <div className="document-card editor-column">
+            <TabBar
+              tabs={tabs}
+              active={active}
+              dirty={dirty}
+              mode={editorMode}
+              canWysiwyg={canWysiwyg}
+              previewOpen={previewOpen}
+              onPreviewToggle={() => setPreviewOpen((v) => !v)}
+              onModeChange={switchMode}
+              onSelect={selectTab}
+              onClose={close}
+            />
+            {active ? (
+              editable ? (
+                <>
+                  <CodePane
                     path={active}
                     content={content}
-                    archive={book.archive}
-                    pkg={book.pkg}
-                    externalVersion={externalResetVersion}
-                    flushRef={wysiwygFlushRef}
-                    onChange={(value) => handleChange(active, value, { rerender: true })}
-                    onSwitchToCode={() => switchMode('code')}
-                    onNavigateLink={navigateTo}
-                    onShortcut={handleWysiwygShortcut}
+                    reveal={reveal}
+                    visible={!showWysiwyg}
+                    syncMode={canWysiwyg ? 'transaction' : 'reset'}
+                    resetVersion={externalResetVersion}
+                    onNavigate={navigateTo}
+                    onSelectionChange={setSelectionText}
+                    onChange={(value) => handleChange(active, value)}
                   />
-                ) : null}
-              </>
+                  {showWysiwyg ? (
+                    <WysiwygPane
+                      path={active}
+                      content={content}
+                      archive={book.archive}
+                      pkg={book.pkg}
+                      externalVersion={externalResetVersion}
+                      flushRef={wysiwygFlushRef}
+                      onChange={(value) => handleChange(active, value, { rerender: true })}
+                      onSwitchToCode={() => switchMode('code')}
+                      onNavigateLink={navigateTo}
+                      onShortcut={handleWysiwygShortcut}
+                    />
+                  ) : null}
+                </>
+              ) : (
+                mediaPane
+              )
             ) : (
-              mediaPane
-            )
-          ) : (
-            <div className="code-empty">
-              <EmptyState title="没有可编辑的文件" description="这本 EPUB 里没有识别到文本文件。" />
-            </div>
-          )}
+              <div className="code-empty">
+                <EmptyState title="没有可编辑的文件" description="这本 EPUB 里没有识别到文本文件。" />
+              </div>
+            )}
+            <StatusBar
+              path={active}
+              characters={editable ? proseLength(active, content) : null}
+              dirtyCount={dirty.size}
+            />
+          </div>
+
+          {active && editable && previewable ? (
+            <section className="preview-card" aria-label="实时书页预览" hidden={!showSplitPreview}>
+              <PreviewPane
+                path={active}
+                content={content}
+                archive={book.archive}
+                pkg={book.pkg}
+                subscribeTextChange={subscribeTextChange}
+              />
+            </section>
+          ) : null}
         </div>
 
-        <div
-          className="splitter"
-          role="separator"
-          aria-orientation="vertical"
-          aria-label={agentOpen ? '调整助手栏宽度' : '调整预览宽度'}
-          onPointerDown={startResize}
-        />
-
-        {/* Dedicated Agent sidebar is mutually exclusive with the 5-tab utility sidebar across viewports. See ADR 2026-11-20-agent-sidebar-chat-ui. */}
-        <aside
-          className={`sidebar${agentOpen ? ' is-agent' : ''}`}
-          style={{ width: sidebarWidth }}
-          aria-label={agentOpen ? 'EPUB 编辑助手' : '预览与结构'}
-        >
-          {agentOpen ? (
-            <AgentPanel
-              bookId={book.id}
-              bookTitle={book.pkg.metadata.title || '未命名'}
-              bookVersion={book.version}
-              activePath={active}
-              selectionText={selectionText}
-              profiles={agentProfiles}
-              profilesLoading={agentProfilesLoading}
-              undoMessageId={agentUndoMessageId}
-              getOverlay={() => {
-                wysiwygFlushRef.current?.()
-                const current = bookRef.current ?? book
-                return {
-                  dirtyTexts: collectDirtyTexts(texts.current, dirtyRef.current, current),
-                  deletedPaths: computeDeletedPaths(current),
-                }
-              }}
-              onOpenSettings={() => setAgentSettingsOpen(true)}
-              onClose={() => setAgentOpen(false)}
-              onReloadBook={() => void reload()}
-              onApplyProposal={handleApplyAgentProposal}
-              onUndoProposal={handleUndoAgentProposal}
+        {agentOpen ? (
+          <>
+            <div
+              className="splitter"
+              role="separator"
+              aria-orientation="vertical"
+              aria-label="调整助手栏宽度"
+              onPointerDown={startResize}
             />
-          ) : (
-            <>
-              <div className="sidebar-tabs" role="tablist">
-                {SIDEBAR_TABS.map(([key, label]) => {
-                  const Icon = SIDEBAR_TAB_ICONS[key]
-                  return (
-                    <button
-                      key={key}
-                      type="button"
-                      role="tab"
-                      aria-selected={sidebarTab === key}
-                      className={`sidebar-tab${sidebarTab === key ? ' on' : ''}`}
-                      onClick={() => setSidebarTab(key)}
-                    >
-                      <Icon size={13} strokeWidth={1.7} aria-hidden="true" />
-                      <span>{label}</span>
-                    </button>
-                  )
-                })}
-              </div>
-              <div className="sidebar-body">{sidebarBody()}</div>
-            </>
-          )}
-        </aside>
+            <aside className="sidebar is-agent" style={{ width: sidebarWidth }} aria-label="EPUB 编辑助手">
+              <AgentPanel
+                bookId={book.id}
+                bookTitle={book.pkg.metadata.title || '未命名'}
+                bookVersion={book.version}
+                activePath={active}
+                selectionText={selectionText}
+                profiles={agentProfiles}
+                profilesLoading={agentProfilesLoading}
+                undoMessageId={agentUndoMessageId}
+                getOverlay={() => {
+                  wysiwygFlushRef.current?.()
+                  const current = bookRef.current ?? book
+                  return {
+                    dirtyTexts: collectDirtyTexts(texts.current, dirtyRef.current, current),
+                    deletedPaths: computeDeletedPaths(current),
+                  }
+                }}
+                onOpenSettings={() => setAgentSettingsOpen(true)}
+                onClose={() => setAgentOpen(false)}
+                onReloadBook={() => void reload()}
+                onApplyProposal={handleApplyAgentProposal}
+                onUndoProposal={handleUndoAgentProposal}
+              />
+            </aside>
+          </>
+        ) : null}
       </div>
+
+      <Dialog
+        open={metadataOpen}
+        onOpenChange={setMetadataOpen}
+        ariaLabel="书籍信息"
+        title="书籍出版信息与元数据"
+        description="修改直接写入 OPF 并标脏，⌘S 保存后生效。"
+        className="metadata-dialog"
+      >
+        <MetadataPanel
+          metadata={book.pkg.metadata}
+          opfXml={texts.current.get(book.pkg.opfPath) ?? ''}
+          version={book.version}
+          onApply={(draft) => {
+            handleChange(
+              book.pkg.opfPath,
+              writeOpfMetadata(texts.current.get(book.pkg.opfPath) ?? '', draft, browserXmlCodec),
+            )
+          }}
+          onApplyMeta={(rows: OpfMetaRow[]) => {
+            handleChange(
+              book.pkg.opfPath,
+              writeOpfMeta(texts.current.get(book.pkg.opfPath) ?? '', rows, browserXmlCodec),
+              { rerender: true },
+            )
+          }}
+        />
+      </Dialog>
+
+      <Dialog
+        open={searchOpen}
+        onOpenChange={setSearchOpen}
+        ariaLabel="查找与替换"
+        title="全书查找与替换"
+        className="search-dialog"
+        onCloseAutoFocus={(event) => event.preventDefault()}
+      >
+        <SearchPanel
+          files={searchFiles}
+          onOpen={(path, line, column) => {
+            setSearchOpen(false)
+            open(path)
+            setEditorMode('code')
+            setReveal({ line, column, key: Date.now() })
+          }}
+          onReplace={applyReplace}
+          onReplaceUndo={undoReplace}
+        />
+      </Dialog>
 
       <Dialog
         open={Boolean(renaming)}
@@ -1650,12 +1684,6 @@ export function Editor({ bookId }: { bookId: string }) {
         open={agentSettingsOpen}
         onOpenChange={setAgentSettingsOpen}
         onChanged={setAgentProfiles}
-      />
-
-      <StatusBar
-        path={active}
-        characters={editable ? proseLength(active, content) : null}
-        dirtyCount={dirty.size}
       />
     </div>
   )
