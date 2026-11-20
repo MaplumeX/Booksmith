@@ -49,6 +49,7 @@ import {
   mediaTypeOf,
   PreviewBlobCache,
   previewResourcesChanged,
+  type PreviewAssetResolver,
   type PreviewResourceSnapshot,
 } from '../preview/render'
 import { basename } from '../state/bookStore'
@@ -62,6 +63,7 @@ export interface WysiwygPaneProps {
   content: string
   archive: EpubArchive
   pkg: EpubPackage
+  resolveAsset?: PreviewAssetResolver
   externalVersion?: number
   revealFragment?: { path: string; fragment: string; key: number } | null
   flushRef?: React.MutableRefObject<(() => void) | null>
@@ -139,6 +141,7 @@ export function WysiwygPane({
   content,
   archive,
   pkg,
+  resolveAsset,
   externalVersion = 0,
   revealFragment,
   flushRef,
@@ -183,7 +186,7 @@ export function WysiwygPane({
   const loadedDeps = useRef<Map<string, PreviewResourceSnapshot>>(new Map())
   const paperThemeRef = useRef<'light' | 'dark'>(paperTheme)
   paperThemeRef.current = paperTheme
-  const latest = useRef({ path, content, archive, pkg, externalVersion })
+  const latest = useRef({ path, content, archive, pkg, externalVersion, resolveAsset })
   const liveSession = useRef<{ path: string; xhtml: string; islands: string[] }>({
     path,
     xhtml: content,
@@ -542,7 +545,14 @@ export function WysiwygPane({
   )
 
   const syncResourcesInPlace = useCallback(
-    (doc: Document, nextPath: string, nextContent: string, nextArchive: EpubArchive, nextPkg: EpubPackage) => {
+    (
+      doc: Document,
+      nextPath: string,
+      nextContent: string,
+      nextArchive: EpubArchive,
+      nextPkg: EpubPackage,
+      nextResolveAsset?: PreviewAssetResolver,
+    ) => {
       const built = buildPreviewDocument({
         xhtml: nextContent,
         path: nextPath,
@@ -550,6 +560,7 @@ export function WysiwygPane({
         pkg: nextPkg,
         editable: { paperTheme: paperThemeRef.current },
         blobCache: blobCache.current,
+        resolveAsset: nextResolveAsset,
       })
       patchHead(doc, built.doc)
 
@@ -559,11 +570,19 @@ export function WysiwygPane({
           const rawSrc = img.getAttribute('data-booksmith-src')
           if (!rawSrc) continue
           const targetPath = resolvePath(base, rawSrc)
-          const bytes = nextArchive.entries.get(targetPath)
-          const mime = mediaTypeOf(targetPath, nextPkg)
-          built.dependencies.set(targetPath, { bytes, mime })
-          if (bytes) {
-            const url = blobCache.current.urlFor(targetPath, bytes, mime)
+          const resolved = nextResolveAsset?.(targetPath)
+          let url: string | null = null
+          if (resolved?.kind === 'url') {
+            built.dependencies.set(targetPath, { bytes: undefined, assetKey: resolved.key, mime: resolved.mime })
+            url = resolved.url
+          } else {
+            const bytes = resolved?.kind === 'bytes' ? resolved.bytes : nextArchive.entries.get(targetPath)
+            const mime = resolved?.kind === 'bytes' ? resolved.mime : mediaTypeOf(targetPath, nextPkg)
+            built.dependencies.set(targetPath, { bytes, mime })
+            if (bytes) url = blobCache.current.urlFor(targetPath, bytes, mime)
+          }
+
+          if (url) {
             if (img.getAttribute('src') !== url) img.setAttribute('src', url)
             if (img.hasAttribute('data-missing')) {
               if (img.hasAttribute('data-booksmith-no-alt')) {
@@ -602,6 +621,7 @@ export function WysiwygPane({
       nextArchive: EpubArchive,
       nextPkg: EpubPackage,
       nextExternalVersion: number,
+      nextResolveAsset?: PreviewAssetResolver,
     ) => {
       const iframe = frame.current
       const doc = iframe?.contentDocument
@@ -622,6 +642,7 @@ export function WysiwygPane({
         pkg: nextPkg,
         editable: { paperTheme: paperThemeRef.current },
         blobCache: blobCache.current,
+        resolveAsset: nextResolveAsset,
       })
 
       readyDocs.current.add(doc)
@@ -669,7 +690,7 @@ export function WysiwygPane({
       setXmlError(wellFormed.message)
       return
     }
-    loadDocumentIntoFrame(cur.path, cur.content, cur.archive, cur.pkg, cur.externalVersion)
+    loadDocumentIntoFrame(cur.path, cur.content, cur.archive, cur.pkg, cur.externalVersion, cur.resolveAsset)
   }, [loadDocumentIntoFrame])
 
   useEffect(() => {
@@ -691,7 +712,7 @@ export function WysiwygPane({
   }, [paperTheme, isDocReady])
 
   useEffect(() => {
-    latest.current = { path, content, archive, pkg, externalVersion }
+    latest.current = { path, content, archive, pkg, externalVersion, resolveAsset }
 
     const isSameSession =
       loadedPath.current === path &&
@@ -700,10 +721,10 @@ export function WysiwygPane({
       loadedExternalVersion.current === externalVersion
 
     if (isSameSession) {
-      if (!previewResourcesChanged(loadedDeps.current, archive, pkg)) return
+      if (!previewResourcesChanged(loadedDeps.current, archive, pkg, resolveAsset)) return
       const doc = frame.current?.contentDocument
       if (doc && isDocReady()) {
-        syncResourcesInPlace(doc, path, content, archive, pkg)
+        syncResourcesInPlace(doc, path, content, archive, pkg, resolveAsset)
       }
       return
     }
@@ -730,12 +751,13 @@ export function WysiwygPane({
       return
     }
 
-    loadDocumentIntoFrame(path, content, archive, pkg, externalVersion)
+    loadDocumentIntoFrame(path, content, archive, pkg, externalVersion, resolveAsset)
   }, [
     path,
     content,
     archive,
     pkg,
+    resolveAsset,
     externalVersion,
     xmlError,
     clearTimers,
@@ -769,21 +791,30 @@ export function WysiwygPane({
   }, [archive, path])
 
   const imageThumbnails = useMemo(() => {
-    if (popover !== 'image') return new Map<string, string>()
-    const map = new Map<string, string>()
+    if (popover !== 'image') return { urls: new Map<string, string>(), blobs: [] as string[] }
+    const urls = new Map<string, string>()
+    const blobs: string[] = []
     for (const item of bookImages) {
-      const bytes = archive.entries.get(item.path)
+      const resolved = resolveAsset?.(item.path)
+      if (resolved?.kind === 'url') {
+        urls.set(item.path, resolved.url)
+        continue
+      }
+      const bytes = resolved?.kind === 'bytes' ? resolved.bytes : archive.entries.get(item.path)
       if (!bytes) continue
+      const mime = resolved?.kind === 'bytes' ? resolved.mime : mediaTypeOf(item.path, pkg)
       const copy = new Uint8Array(bytes.length)
       copy.set(bytes)
-      map.set(item.path, URL.createObjectURL(new Blob([copy.buffer], { type: mediaTypeOf(item.path, pkg) })))
+      const url = URL.createObjectURL(new Blob([copy.buffer], { type: mime }))
+      urls.set(item.path, url)
+      blobs.push(url)
     }
-    return map
-  }, [popover, bookImages, archive, pkg])
+    return { urls, blobs }
+  }, [popover, bookImages, archive, pkg, resolveAsset])
 
   useEffect(() => {
     return () => {
-      for (const url of imageThumbnails.values()) URL.revokeObjectURL(url)
+      for (const url of imageThumbnails.blobs) URL.revokeObjectURL(url)
     }
   }, [imageThumbnails])
 
@@ -848,16 +879,23 @@ export function WysiwygPane({
   const handleInsertImage = (targetPath: string, relativeHref: string) => {
     const doc = frame.current?.contentDocument
     if (!doc?.body) return
-    const bytes = archive.entries.get(targetPath)
-    if (!bytes) return
-    const mime = mediaTypeOf(targetPath, pkg)
-    const blobUrl = blobCache.current.urlFor(targetPath, bytes, mime)
-    loadedDeps.current.set(targetPath, { bytes, mime })
+    const resolved = resolveAsset?.(targetPath)
+    let imgUrl: string | null = null
+    if (resolved?.kind === 'url') {
+      imgUrl = resolved.url
+      loadedDeps.current.set(targetPath, { bytes: undefined, assetKey: resolved.key, mime: resolved.mime })
+    } else {
+      const bytes = resolved?.kind === 'bytes' ? resolved.bytes : archive.entries.get(targetPath)
+      if (!bytes) return
+      const mime = resolved?.kind === 'bytes' ? resolved.mime : mediaTypeOf(targetPath, pkg)
+      imgUrl = blobCache.current.urlFor(targetPath, bytes, mime)
+      loadedDeps.current.set(targetPath, { bytes, mime })
+    }
 
     const sel = restoreRange(doc)
     if (!sel || sel.rangeCount === 0) return
     const altText = insertAltDraft.trim() || basename(targetPath).replace(/\.[^.]+$/, '')
-    insertImageAtRange(doc, sel.getRangeAt(0), blobUrl, relativeHref, altText)
+    insertImageAtRange(doc, sel.getRangeAt(0), imgUrl, relativeHref, altText)
     setInsertAltDraft('')
     setPopover(null)
     commitDomMutation(doc)
@@ -1093,7 +1131,7 @@ export function WysiwygPane({
                     title={item.relativeHref}
                     onClick={() => handleInsertImage(item.path, item.relativeHref)}
                   >
-                    <img src={imageThumbnails.get(item.path)} alt="" />
+                    <img src={imageThumbnails.urls.get(item.path)} alt="" />
                     <span className="wysiwyg-image-name">{basename(item.path)}</span>
                   </button>
                 ))}

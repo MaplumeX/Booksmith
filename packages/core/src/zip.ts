@@ -18,6 +18,29 @@ export function unzipArchive(bytes: Uint8Array): EpubArchive {
   return { order, entries }
 }
 
+// Already-compressed media entries are stored at level 0 so on-demand export of large books avoids
+// wasting CPU re-deflating images and fonts. See ADR 2026-11-20-entry-level-book-storage.
+const PRECOMPRESSED_EXTENSIONS = new Set([
+  'jpg',
+  'jpeg',
+  'png',
+  'gif',
+  'webp',
+  'woff',
+  'woff2',
+  'mp3',
+  'mp4',
+  'm4a',
+  'ogg',
+  'webm',
+])
+
+function compressionLevelFor(path: string): 0 | 6 {
+  const dot = path.lastIndexOf('.')
+  if (dot < 0) return 6
+  return PRECOMPRESSED_EXTENSIONS.has(path.slice(dot + 1).toLowerCase()) ? 0 : 6
+}
+
 /**
  * Repacks the archive in its original entry order.
  * `mimetype` is forced first and stored uncompressed, as the EPUB spec requires.
@@ -32,12 +55,12 @@ export function zipArchive(archive: EpubArchive): Uint8Array {
   for (const path of archive.order) {
     if (path === 'mimetype') continue
     const data = archive.entries.get(path)
-    if (data) zippable[path] = [data, { level: 6 }]
+    if (data) zippable[path] = [data, { level: compressionLevelFor(path) }]
   }
   // Entries added after unpacking keep their insertion order at the end.
   for (const [path, data] of archive.entries) {
     if (path === 'mimetype' || zippable[path]) continue
-    zippable[path] = [data, { level: 6 }]
+    zippable[path] = [data, { level: compressionLevelFor(path) }]
   }
 
   return zipSync(zippable)

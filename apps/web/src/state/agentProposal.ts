@@ -1,5 +1,6 @@
 import {
   browserXmlParser,
+  isTextEntry,
   parsePackage,
   type AgentProposal,
   type EpubArchive,
@@ -76,6 +77,10 @@ export function createUndoSnapshot(state: WorkspaceSnapshot): WorkspaceSnapshot 
       texts,
       groups: state.book.groups.map((group) => ({ ...group, paths: [...group.paths] })),
       serverPaths: new Set(state.book.serverPaths),
+      entryMeta: new Map(state.book.entryMeta),
+      entryOrigins: new Map(state.book.entryOrigins),
+      serverEntries: new Map(state.book.serverEntries),
+      localBinaries: new Map(state.book.localBinaries),
     },
     texts,
     dirty: new Set(state.dirty),
@@ -134,6 +139,9 @@ export function applyProposalToBook(input: ApplyProposalInput): ApplyProposalRes
   let nextOrder = [...input.book.archive.order]
   const nextTexts = new Map(input.texts)
   const nextDirty = new Set(input.dirty)
+  const nextMeta = new Map(input.book.entryMeta)
+  const nextOrigins = new Map(input.book.entryOrigins)
+  const nextLocalBinaries = new Map(input.book.localBinaries)
   let nextTabs = [...input.tabs]
   let nextActive = input.active
 
@@ -146,14 +154,39 @@ export function applyProposalToBook(input: ApplyProposalInput): ApplyProposalRes
     const existingBytes = nextEntries.get(from)
     nextEntries.delete(from)
     if (file.afterText !== undefined) {
-      nextEntries.set(to, encoder.encode(file.afterText))
+      const encoded = encoder.encode(file.afterText)
+      nextEntries.set(to, encoded)
       nextTexts.set(to, file.afterText)
+      const prevMeta = nextMeta.get(from)
+      nextMeta.delete(from)
+      nextMeta.set(to, {
+        path: to,
+        isText: isTextEntry(to),
+        mediaType: prevMeta?.mediaType ?? 'application/xhtml+xml',
+        byteSize: encoded.byteLength,
+        sha256: null,
+      })
     } else if (existingBytes) {
       nextEntries.set(to, existingBytes)
       const movedText = nextTexts.get(from)
       if (movedText !== undefined) nextTexts.set(to, movedText)
+      const prevMeta = nextMeta.get(from)
+      if (prevMeta) {
+        nextMeta.delete(from)
+        nextMeta.set(to, { ...prevMeta, path: to })
+      }
     }
     nextTexts.delete(from)
+
+    const prevOrigin = nextOrigins.get(from)
+    nextOrigins.delete(from)
+    if (prevOrigin) nextOrigins.set(to, prevOrigin)
+
+    const movedBin = nextLocalBinaries.get(from)
+    if (movedBin) {
+      nextLocalBinaries.delete(from)
+      nextLocalBinaries.set(to, movedBin)
+    }
 
     nextOrder = nextOrder.map((entry) => (entry === from ? to : entry))
     if (!nextOrder.includes(to)) nextOrder.push(to)
@@ -171,6 +204,9 @@ export function applyProposalToBook(input: ApplyProposalInput): ApplyProposalRes
     nextEntries.delete(file.path)
     nextOrder = nextOrder.filter((entry) => entry !== file.path)
     nextTexts.delete(file.path)
+    nextMeta.delete(file.path)
+    nextOrigins.delete(file.path)
+    nextLocalBinaries.delete(file.path)
     nextDirty.delete(file.path)
     nextTabs = nextTabs.filter((tab) => tab !== file.path)
     if (nextActive === file.path) nextActive = null
@@ -180,9 +216,18 @@ export function applyProposalToBook(input: ApplyProposalInput): ApplyProposalRes
   for (const file of targetFiles) {
     if (file.kind !== 'create' && file.kind !== 'update') continue
     if (file.afterText === undefined) continue
-    nextEntries.set(file.path, encoder.encode(file.afterText))
+    const encoded = encoder.encode(file.afterText)
+    nextEntries.set(file.path, encoded)
     if (!nextOrder.includes(file.path)) nextOrder.push(file.path)
     nextTexts.set(file.path, file.afterText)
+    const prevMeta = nextMeta.get(file.path)
+    nextMeta.set(file.path, {
+      path: file.path,
+      isText: isTextEntry(file.path),
+      mediaType: prevMeta?.mediaType ?? 'application/xhtml+xml',
+      byteSize: encoded.byteLength,
+      sha256: null,
+    })
     nextDirty.add(file.path)
   }
 
@@ -198,6 +243,10 @@ export function applyProposalToBook(input: ApplyProposalInput): ApplyProposalRes
     texts: nextTexts,
     groups: nextGroups,
     serverPaths: input.book.serverPaths,
+    entryMeta: nextMeta,
+    entryOrigins: nextOrigins,
+    serverEntries: input.book.serverEntries,
+    localBinaries: nextLocalBinaries,
   }
 
   if (nextActive === null) {

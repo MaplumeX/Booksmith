@@ -18,7 +18,7 @@ Status: implemented
 - `GET /api/books/:id/download` 返回当前已保存的整包，头：
   `content-type: application/epub+zip`、
   `content-disposition: attachment; filename*=UTF-8''<percent-encoded-title>.epub`。
-  同时给 `filename="book.epub"` 作为不理解 `filename*` 的客户端的兜底。
+  同时给 `filename="book.epub"` 作为不理解 `filename*` 的客户端的兜底。（*更新：依据 [entry-level book storage](../architecture/2026-11-20-entry-level-book-storage.md)，该端点现按 `book_entries.position` 实时打包输出，原内部读取端点 `GET /api/books/:id/epub` 已下线。*）
 - 入口两处：书库卡片菜单/动作、编辑器顶栏。都用同源 `<a download href="...">` 触发，
   不经过 fetch，避免把 2MB 整包读进 JS 再拼 blob。
 - 文件名取 `book.title`，去掉归档非法字符（`/ \ : * ? " < > |`），空标题回退 `book.epub`。

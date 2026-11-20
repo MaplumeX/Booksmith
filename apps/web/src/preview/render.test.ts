@@ -135,6 +135,40 @@ describe('previewResourcesChanged', () => {
     }
     expect(previewResourcesChanged(deps, missingAdded, pkg)).toBe(true)
   })
+
+  it('tracks remote asset keys so lazy HTTP images re-render only on replacement, rename, or deletion', () => {
+    const pkg = makePkg()
+    const archive: EpubArchive = { order: ['OEBPS/Images/cover.jpg'], entries: new Map() }
+    const deps = new Map<string, PreviewResourceSnapshot>([
+      ['OEBPS/Images/cover.jpg', { bytes: undefined, assetKey: 'remote:book-1:OEBPS/Images/cover.jpg:sha1', mime: 'image/jpeg' }],
+    ])
+
+    const sameRemote = () => ({
+      kind: 'url' as const,
+      url: 'http://localhost/api/books/book-1/entry?path=OEBPS%2FImages%2Fcover.jpg&sha=sha1',
+      key: 'remote:book-1:OEBPS/Images/cover.jpg:sha1',
+      mime: 'image/jpeg',
+    })
+    expect(previewResourcesChanged(deps, archive, pkg, sameRemote)).toBe(false)
+
+    const updatedRemote = () => ({
+      kind: 'url' as const,
+      url: 'http://localhost/api/books/book-1/entry?path=OEBPS%2FImages%2Fcover.jpg&sha=sha2',
+      key: 'remote:book-1:OEBPS/Images/cover.jpg:sha2',
+      mime: 'image/jpeg',
+    })
+    expect(previewResourcesChanged(deps, archive, pkg, updatedRemote)).toBe(true)
+
+    const localReplacement = () => ({
+      kind: 'bytes' as const,
+      bytes: new Uint8Array([7, 8, 9]),
+      mime: 'image/jpeg',
+    })
+    expect(previewResourcesChanged(deps, archive, pkg, localReplacement)).toBe(true)
+
+    const deletedRemote = () => null
+    expect(previewResourcesChanged(deps, archive, pkg, deletedRemote)).toBe(true)
+  })
 })
 
 describe('preview & editor theme CSS', () => {

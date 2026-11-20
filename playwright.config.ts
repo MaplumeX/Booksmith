@@ -1,7 +1,8 @@
 import { defineConfig } from '@playwright/test'
 
-const BASE_URL = process.env.E2E_BASE_URL ?? 'http://127.0.0.1:5173'
-const WEB_PORT = Number(new URL(BASE_URL).port || 5173)
+const DEFAULT_PORT = Number(process.env.E2E_WEB_PORT ?? 5173)
+const BASE_URL = process.env.E2E_BASE_URL ?? `http://127.0.0.1:${DEFAULT_PORT}`
+const WEB_PORT = Number(new URL(BASE_URL).port || DEFAULT_PORT)
 
 export default defineConfig({
   testDir: './e2e',

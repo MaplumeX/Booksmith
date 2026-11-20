@@ -105,6 +105,20 @@ function buildSnapshot(): WorkspaceSnapshot {
     texts,
     groups: groupFiles(pkg, archive),
     serverPaths: new Set(entries.keys()),
+    entryMeta: new Map(
+      [...entries].map(([path, bytes]) => [
+        path,
+        { path, isText: true, mediaType: 'application/xhtml+xml', byteSize: bytes.byteLength, sha256: `sha-${path}` },
+      ]),
+    ),
+    entryOrigins: new Map([...entries.keys()].map((path) => [path, path])),
+    serverEntries: new Map(
+      [...entries].map(([path, bytes], position) => [
+        path,
+        { path, position, isText: true, mediaType: 'application/xhtml+xml', byteSize: bytes.byteLength, sha256: `sha-${path}` },
+      ]),
+    ),
+    localBinaries: new Map(),
   }
   return {
     book,

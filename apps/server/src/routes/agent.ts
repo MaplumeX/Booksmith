@@ -1,6 +1,6 @@
 import { and, asc, desc, eq } from 'drizzle-orm'
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify'
-import { openEpub, type AgentProposal } from '@booksmith/core'
+import type { AgentProposal, EpubArchive } from '@booksmith/core'
 import {
   AgentKeyDecryptError,
   AgentSecretNotConfiguredError,
@@ -40,7 +40,6 @@ import {
   type Book,
   type User,
 } from '../db/schema'
-import { nodeXmlParser } from '../epub/ingest'
 import type { FileStore } from '../storage/fileStore'
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
@@ -891,12 +890,20 @@ export function registerAgentRoutes(app: FastifyInstance, deps: AgentDeps): void
       return
     }
 
-    const rawEpub = await fileStore.getCurrent(book.id)
-    if (!rawEpub) {
+    // Build AgentWorkspace directly from unpacked `book_entries` (text + mimetype bytes only,
+    // zero binary bytea detoasting or zip unpacking). See ADR 2026-11-20-entry-level-book-storage.
+    const workspaceRows = await fileStore.listWorkspaceEntries(book.id)
+    if (workspaceRows.length === 0) {
       reply.code(404).send({ error: 'not_found' })
       return
     }
-    const { archive } = openEpub(new Uint8Array(rawEpub), nodeXmlParser)
+    const emptyBinary = new Uint8Array(0)
+    const archive: EpubArchive = {
+      order: workspaceRows.map((row) => row.path),
+      entries: new Map(
+        workspaceRows.map((row) => [row.path, row.bytes ? new Uint8Array(row.bytes) : emptyBinary]),
+      ),
+    }
     const overlay = parseOverlay(body)
     const userSettings = await loadUserSettings(db, user.id)
 

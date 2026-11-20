@@ -26,7 +26,6 @@ import {
   writeNcxToc,
   writeOpfMeta,
   writeOpfMetadata,
-  zipArchive,
   type AgentProposal,
   type EpubArchive,
   type EpubIssue,
@@ -65,7 +64,16 @@ import {
   createUndoSnapshot,
   type WorkspaceSnapshot,
 } from '../state/agentProposal'
-import { basename, extensionOf, groupFiles, loadBook, proseLength, type LoadedBook } from '../state/bookStore'
+import {
+  basename,
+  extensionOf,
+  groupFiles,
+  loadBook,
+  proseLength,
+  resolveBookAsset,
+  type LoadedBook,
+} from '../state/bookStore'
+import { applySavedEntriesToBook, buildEntryDelta } from '../state/entryDelta'
 import { createAutosave, type Autosave } from '../state/autosave'
 import {
   computeDirtySummary,
@@ -585,10 +593,19 @@ export function Editor({ bookId }: { bookId: string }) {
     const nextTexts = new Map(texts.current)
     nextTexts.set(opfPath, nextOpf)
     nextTexts.set(path, skeleton)
+    const encoded = encoder.encode(skeleton)
     const entries = new Map(current.archive.entries)
-    entries.set(path, encoder.encode(skeleton))
+    entries.set(path, encoded)
+    const entryMeta = new Map(current.entryMeta)
+    entryMeta.set(path, {
+      path,
+      isText: true,
+      mediaType: 'application/xhtml+xml',
+      byteSize: encoded.byteLength,
+      sha256: null,
+    })
 
-    const next = refreshPackage(current, nextTexts, entries)
+    const next = { ...refreshPackage(current, nextTexts, entries), entryMeta }
     texts.current = nextTexts
     bookRef.current = next
     setBook(next)
@@ -649,12 +666,32 @@ export function Editor({ bookId }: { bookId: string }) {
       entries.set(target, bytes)
     }
 
+    const entryMeta = new Map(current.entryMeta)
+    const prevMeta = entryMeta.get(path)
+    if (prevMeta) {
+      entryMeta.delete(path)
+      entryMeta.set(target, { ...prevMeta, path: target })
+    }
+
+    const entryOrigins = new Map(current.entryOrigins)
+    const prevOrigin = entryOrigins.get(path)
+    entryOrigins.delete(path)
+    if (prevOrigin) entryOrigins.set(target, prevOrigin)
+
+    const localBinaries = new Map(current.localBinaries)
+    const prevLocalBin = localBinaries.get(path)
+    if (prevLocalBin) {
+      localBinaries.delete(path)
+      localBinaries.set(target, prevLocalBin)
+    }
+
     const nextTexts = new Map(rewritten.files)
     const moved = nextTexts.get(path)
     nextTexts.delete(path)
     if (moved !== undefined) nextTexts.set(target, moved)
 
-    const next = refreshPackage(current, nextTexts, entries)
+    const refreshed = refreshPackage(current, nextTexts, entries)
+    const next = { ...refreshed, entryMeta, entryOrigins, localBinaries }
     texts.current = nextTexts
     bookRef.current = next
     setBook(next)
@@ -722,7 +759,14 @@ export function Editor({ bookId }: { bookId: string }) {
     entries.delete(path)
     nextTexts.delete(path)
 
-    const next = refreshPackage(current, nextTexts, entries)
+    const entryMeta = new Map(current.entryMeta)
+    entryMeta.delete(path)
+    const entryOrigins = new Map(current.entryOrigins)
+    entryOrigins.delete(path)
+    const localBinaries = new Map(current.localBinaries)
+    localBinaries.delete(path)
+
+    const next = { ...refreshPackage(current, nextTexts, entries), entryMeta, entryOrigins, localBinaries }
     texts.current = nextTexts
     bookRef.current = next
     setBook(next)
@@ -901,9 +945,18 @@ export function Editor({ bookId }: { bookId: string }) {
       nextTexts.set(current.pkg.opfPath, init.opfXml)
       nextTexts.set(init.tocPath, init.tocContent)
       const entries = new Map(current.archive.entries)
-      entries.set(init.tocPath, encoder.encode(init.tocContent))
+      const tocEncoded = encoder.encode(init.tocContent)
+      entries.set(init.tocPath, tocEncoded)
       entries.set(current.pkg.opfPath, encoder.encode(init.opfXml))
-      const next = refreshPackage(current, nextTexts, entries)
+      const entryMeta = new Map(current.entryMeta)
+      entryMeta.set(init.tocPath, {
+        path: init.tocPath,
+        isText: true,
+        mediaType: init.tocPath.endsWith('.ncx') ? 'application/x-dtbncx+xml' : 'application/xhtml+xml',
+        byteSize: tocEncoded.byteLength,
+        sha256: null,
+      })
+      const next = { ...refreshPackage(current, nextTexts, entries), entryMeta }
       texts.current = nextTexts
       bookRef.current = next
       setBook(next)
@@ -996,32 +1049,31 @@ export function Editor({ bookId }: { bookId: string }) {
           }
         }
 
-        const uploadedEntries = new Map(currentBook.archive.entries)
-        for (const path of summary.texts) {
-          const text = uploadedTexts.get(path)
-          if (typeof text === 'string') uploadedEntries.set(path, encoder.encode(text))
+        const delta = buildEntryDelta({ book: currentBook, texts: uploadedTexts, dirty: summary.texts })
+        if (!delta.hasChanges) {
+          syncDirtyFromBaseline(currentBook)
+          setSaveState('idle')
+          return
         }
-        const order = [
-          ...currentBook.archive.order.filter((path) => uploadedEntries.has(path)),
-          ...[...uploadedEntries.keys()].filter((path) => !currentBook.archive.order.includes(path)),
-        ]
-        const bytes = zipArchive({ order, entries: uploadedEntries })
-        const result = await api.save(currentBook.id, currentBook.version, bytes, options)
+
+        const result = await api.saveEntries(currentBook.id, currentBook.version, delta, options)
+        const uploadedSavedBook = applySavedEntriesToBook(currentBook, result.version, result.entries, uploadedTexts)
 
         // Advance the saved baseline only to the exact snapshot uploaded above, then recompute
         // dirty against the live workspace so edits typed while the save was in flight survive.
-        // See ADR 2026-11-20-baseline-derived-dirty-state.
-        baselineRef.current = createSavedBaseline(uploadedTexts, uploadedEntries)
+        // See ADR 2026-11-20-baseline-derived-dirty-state and ADR 2026-11-20-entry-level-book-storage.
+        baselineRef.current = createSavedBaseline(uploadedTexts, uploadedSavedBook.archive.entries)
 
         const latestBook = bookRef.current ?? currentBook
-        const nextArchive =
-          latestBook === currentBook ? { order, entries: uploadedEntries } : latestBook.archive
-        const next: LoadedBook = {
-          ...latestBook,
-          version: result.version,
-          archive: nextArchive,
-          serverPaths: new Set(uploadedEntries.keys()),
-        }
+        const next: LoadedBook =
+          latestBook === currentBook
+            ? uploadedSavedBook
+            : {
+                ...latestBook,
+                version: result.version,
+                serverPaths: uploadedSavedBook.serverPaths,
+                serverEntries: uploadedSavedBook.serverEntries,
+              }
         bookRef.current = next
         setBook(next)
         agentUndoRef.current = null
@@ -1070,8 +1122,10 @@ export function Editor({ bookId }: { bookId: string }) {
         const current = bookRef.current
         if (!current) return
 
+        const bytes = new Uint8Array(buffer)
+        const mediaType = file.type || mediaTypeFromExtension(path)
         const entries = new Map(current.archive.entries)
-        entries.set(path, new Uint8Array(buffer))
+        entries.set(path, bytes)
 
         const opfPath = current.pkg.opfPath
         const opf = texts.current.get(opfPath) ?? ''
@@ -1089,8 +1143,19 @@ export function Editor({ bookId }: { bookId: string }) {
         }
         if (nextOpf !== opf) texts.current.set(opfPath, nextOpf)
 
+        const entryMeta = new Map(current.entryMeta)
+        entryMeta.set(path, {
+          path,
+          isText: false,
+          mediaType,
+          byteSize: bytes.byteLength,
+          sha256: null,
+        })
+        const localBinaries = new Map(current.localBinaries)
+        localBinaries.set(path, { bytes, mediaType })
+
         const archive: EpubArchive = { order: archiveOrder(current.archive.order, entries), entries }
-        const next = { ...current, archive, groups: groupFiles(current.pkg, archive) }
+        const next = { ...current, archive, groups: groupFiles(current.pkg, archive), entryMeta, localBinaries }
         bookRef.current = next
         setBook(next)
         const summary = syncDirtyFromBaseline(next)
@@ -1118,15 +1183,26 @@ export function Editor({ bookId }: { bookId: string }) {
       const href = target.slice(baseDir.length + 1)
       const id = href.replace(/[/.\-]+/g, '_')
 
+      const mediaType = file.type || mediaTypeFromExtension(target)
       const opf = texts.current.get(latest.pkg.opfPath) ?? ''
-      const nextOpf = addManifestItem(opf, { id, href, mediaType: file.type || 'application/octet-stream' }, browserXmlCodec)
+      const nextOpf = addManifestItem(opf, { id, href, mediaType }, browserXmlCodec)
       texts.current.set(latest.pkg.opfPath, nextOpf)
 
       const entries = new Map(latest.archive.entries)
       entries.set(target, bytes)
       const order = latest.archive.order.includes(target) ? latest.archive.order : [...latest.archive.order, target]
       const archive = { order, entries }
-      const next = { ...latest, archive, groups: groupFiles(latest.pkg, archive) }
+      const entryMeta = new Map(latest.entryMeta)
+      entryMeta.set(target, {
+        path: target,
+        isText: false,
+        mediaType,
+        byteSize: bytes.byteLength,
+        sha256: null,
+      })
+      const localBinaries = new Map(latest.localBinaries)
+      localBinaries.set(target, { bytes, mediaType })
+      const next = { ...latest, archive, groups: groupFiles(latest.pkg, archive), entryMeta, localBinaries }
       bookRef.current = next
       setBook(next)
       const summary = syncDirtyFromBaseline(next)
@@ -1200,6 +1276,11 @@ export function Editor({ bookId }: { bookId: string }) {
     return () => window.removeEventListener('keydown', handler)
   }, [save, active, close])
 
+  const resolveAsset = useCallback(
+    (targetPath: string) => (book ? resolveBookAsset(book, targetPath) : null),
+    [book],
+  )
+
   const startResize = (event: React.PointerEvent<HTMLDivElement>) => {
     event.preventDefault()
     const startX = event.clientX
@@ -1226,7 +1307,7 @@ export function Editor({ bookId }: { bookId: string }) {
           </Button>
         </header>
         <main className="stage" aria-busy="true">
-          <span className="boot-text">正在解包 EPUB…</span>
+          <span className="boot-text">正在载入书籍…</span>
         </main>
       </div>
     )
@@ -1256,13 +1337,16 @@ export function Editor({ bookId }: { bookId: string }) {
     )
   }
 
+  const activeAsset = active ? resolveAsset(active) : null
   const content = active ? (texts.current.get(active) ?? '') : ''
   // Binary entries (images, fonts) never live in `texts`, so they get a read-only view instead of the editor.
   const editable = active !== null && texts.current.has(active)
   const mediaPane = active ? (
     <MediaPane
       path={active}
-      bytes={book.archive.entries.get(active)}
+      bytes={activeAsset?.kind === 'bytes' ? activeAsset.bytes : undefined}
+      srcUrl={activeAsset?.kind === 'url' ? activeAsset.url : null}
+      byteSize={book.entryMeta.get(active)?.byteSize}
       mime={mediaTypeOf(active, book.pkg)}
       onReplace={replaceAsset}
       onDelete={requestDelete}
@@ -1662,6 +1746,7 @@ export function Editor({ bookId }: { bookId: string }) {
                       content={content}
                       archive={book.archive}
                       pkg={book.pkg}
+                      resolveAsset={resolveAsset}
                       externalVersion={externalResetVersion}
                       revealFragment={revealFragment}
                       flushRef={wysiwygFlushRef}
@@ -1694,6 +1779,7 @@ export function Editor({ bookId }: { bookId: string }) {
                 content={content}
                 archive={book.archive}
                 pkg={book.pkg}
+                resolveAsset={resolveAsset}
                 revealFragment={revealFragment}
                 subscribeTextChange={subscribeTextChange}
               />

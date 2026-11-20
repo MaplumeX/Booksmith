@@ -32,7 +32,7 @@ Status: implemented
 **整本书那一层没有历史。** `book_files` 每本一行（`bytes` / `sha256` / `updated_at`），每次保存
 原地覆盖；`books.current_version` 仍是 `ETag` 与乐观锁编号，语义不变。迁移 `0003` 建两张新表并
 把 `version_no = current_version` 的整包搬进 `book_files`，`0004` 删除 `book_versions`。拆成两份
-是因为 drizzle-kit 在「同时加表又删表」时会要求交互确认重命名，非 TTY 环境无法作答。
+是因为 drizzle-kit 在「同时加表又删表」时会要求交互确认重命名，非 TTY 环境无法作答。（*更新：当前态存储与恢复路径已由 [entry-level book storage](../architecture/2026-11-20-entry-level-book-storage.md) 迁至 `book_entries` 表并移除 `book_files`，快照比对与单页恢复现直接基于 `book_entries` 完成，页面快照粒度、10 分钟窗口、剪枝与 UI 语义保持不变。*）
 
 **保存时只记录真正变化的条目。** `apps/server/src/routes/books.ts` 的 `changedTextEntries` 拿上一份
 整包与新整包逐条目比字节，变化的条目才可能写入 `page_versions`。迁移、恢复、导入都走同一条路径：

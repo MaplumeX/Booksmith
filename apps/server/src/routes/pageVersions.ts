@@ -1,11 +1,17 @@
 import { and, eq } from 'drizzle-orm'
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify'
-import { openEpub, zipArchive } from '@booksmith/core'
+import { isTextEntry } from '@booksmith/core'
 import type { Db } from '../db/client'
 import { books, type User } from '../db/schema'
-import { IngestError, ingestEpub, nodeXmlParser } from '../epub/ingest'
+import {
+  IngestError,
+  inferMediaType,
+  nodeXmlParser,
+  sha256Hex,
+  validateEntriesAndExtractMeta,
+} from '../epub/ingest'
 import type { FileStore } from '../storage/fileStore'
-import { sha256, toBookDto } from './books'
+import { toBookDto } from './books'
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
 
@@ -33,8 +39,9 @@ function findOwnedBook(db: Db, id: string | undefined, ownerId: string) {
 }
 
 /**
- * Page-level snapshot history: one list per book, restored one entry at a time.
- * See ADR 2026-11-19-page-level-snapshots.
+ * Page-level snapshot history: one list per book, restored one entry at a time directly into
+ * `book_entries` without unpacking or repacking any zip.
+ * See ADR 2026-11-19-page-level-snapshots and ADR 2026-11-20-entry-level-book-storage.
  */
 export function registerPageVersionRoutes(app: FastifyInstance, deps: PageVersionDeps): void {
   const { db, fileStore } = deps
@@ -118,56 +125,79 @@ export function registerPageVersionRoutes(app: FastifyInstance, deps: PageVersio
     const stored = await fileStore.getPageVersion(book.id, snapshot)
     if (!stored) return reply.code(404).send({ error: 'snapshot_not_found' })
 
-    const current = await fileStore.getCurrent(book.id)
-    if (!current) return reply.code(410).send({ error: 'version_missing' })
+    const hash = sha256Hex(stored.bytes)
 
-    const entries = new Map(openEpub(new Uint8Array(current), nodeXmlParser).archive.entries)
-    const order = [...entries.keys()]
-    entries.set(stored.path, stored.bytes)
-    if (!order.includes(stored.path)) order.push(stored.path)
-
-    const pack = Buffer.from(zipArchive({ order, entries }))
-
-    let ingested: ReturnType<typeof ingestEpub>
     try {
-      ingested = ingestEpub(pack)
+      const result = await db.transaction(async (tx) => {
+        const existing = await fileStore.listWorkspaceEntries(book.id, tx)
+        if (existing.length === 0) return { missing: true as const }
+
+        await fileStore.applyEntryDelta(
+          book.id,
+          {
+            deletes: [],
+            renames: [],
+            upserts: [
+              {
+                path: stored.path,
+                isText: isTextEntry(stored.path),
+                mediaType: inferMediaType(stored.path),
+                bytes: stored.bytes,
+                sha256: hash,
+              },
+            ],
+          },
+          tx,
+        )
+
+        const afterRows = await fileStore.listWorkspaceEntries(book.id, tx)
+        const validated = validateEntriesAndExtractMeta(afterRows, nodeXmlParser)
+
+        let coverBytes: Buffer | null = null
+        let coverMime: string | null = null
+        if (validated.coverPath) {
+          const coverRow = await fileStore.getEntry(book.id, validated.coverPath, tx)
+          if (coverRow) {
+            coverBytes = coverRow.bytes
+            coverMime = validated.coverMime
+          }
+        }
+
+        const nextVersion = book.currentVersion + 1
+        const rows = await tx
+          .update(books)
+          .set({
+            title: validated.title,
+            author: validated.author,
+            language: validated.language,
+            identifier: validated.identifier,
+            chapterCount: validated.chapterCount,
+            byteSize: validated.byteSize,
+            sha256: validated.sha256,
+            cover: coverBytes,
+            coverMime,
+            currentVersion: nextVersion,
+            updatedAt: new Date(),
+          })
+          .where(and(eq(books.id, book.id), eq(books.currentVersion, book.currentVersion)))
+          .returning()
+
+        const updated = rows[0]
+        if (!updated) throw new Error('concurrent update detected')
+
+        await fileStore.putPageVersion(book.id, stored.path, stored.bytes, hash, tx)
+        await fileStore.prunePages(book.id, tx)
+
+        return { missing: false as const, updated, nextVersion }
+      })
+
+      if (result.missing) return reply.code(410).send({ error: 'version_missing' })
+      return reply.send({ book: toBookDto(result.updated), version: result.nextVersion, path: stored.path })
     } catch (error) {
       if (error instanceof IngestError) {
         return reply.code(400).send({ error: 'invalid_epub', message: error.message, issues: error.issues })
       }
       throw error
     }
-
-    const nextVersion = book.currentVersion + 1
-    await fileStore.putCurrent(book.id, pack, ingested.sha256)
-
-    const updated = await db.transaction(async (tx) => {
-      const rows = await tx
-        .update(books)
-        .set({
-          title: ingested.title,
-          author: ingested.author,
-          language: ingested.language,
-          identifier: ingested.identifier,
-          chapterCount: ingested.chapterCount,
-          byteSize: ingested.byteSize,
-          sha256: ingested.sha256,
-          cover: ingested.cover?.bytes ?? null,
-          coverMime: ingested.cover?.mimeType ?? null,
-          currentVersion: nextVersion,
-          updatedAt: new Date(),
-        })
-        .where(and(eq(books.id, book.id), eq(books.currentVersion, book.currentVersion)))
-        .returning()
-
-      const row = rows[0]
-      if (!row) throw new Error('concurrent update detected')
-      return row
-    })
-
-    await fileStore.putPageVersion(book.id, stored.path, stored.bytes, sha256(stored.bytes))
-    await fileStore.prunePages(book.id)
-
-    return reply.send({ book: toBookDto(updated), version: nextVersion, path: stored.path })
   })
 }

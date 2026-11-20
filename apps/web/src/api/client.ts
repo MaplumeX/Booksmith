@@ -29,6 +29,29 @@ export interface BookDto {
   hasCover: boolean
 }
 
+export interface WorkspaceEntryDto {
+  path: string
+  position: number
+  isText: boolean
+  mediaType: string
+  byteSize: number
+  sha256: string
+}
+
+export interface WorkspaceDto {
+  version: number
+  entries: WorkspaceEntryDto[]
+  texts: Record<string, string>
+}
+
+export interface EntryDeltaPayload {
+  textUpserts: Record<string, string>
+  binaryUpserts: Map<string, { bytes: Uint8Array; mediaType: string }>
+  renames: Array<{ from: string; to: string }>
+  deletes: string[]
+  order: string[]
+}
+
 export type AgentProviderType = 'openai-compatible' | 'anthropic'
 export type AgentApprovalMode = 'ask' | 'review' | 'auto'
 
@@ -149,6 +172,10 @@ export class ApiError extends Error {
   }
 }
 
+/** In-memory conditional ETag cache for `/workspace` so switching back to an unchanged book
+ * resolves via HTTP 304 without re-transferring text payloads. */
+const workspaceCache = new Map<string, { etag: string; data: WorkspaceDto }>()
+
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const response = await fetch(`/api${path}`, { credentials: 'include', ...init })
   if (!response.ok) {
@@ -214,28 +241,93 @@ export const api = {
       body: JSON.stringify({ email, password }),
     }),
 
-  logout: () => request<void>('/auth/logout', { method: 'POST' }),
+  logout: () => {
+    workspaceCache.clear()
+    return request<void>('/auth/logout', { method: 'POST' })
+  },
 
   books: () => request<{ books: BookDto[] }>('/books'),
 
-  deleteBook: (id: string) => request<void>(`/books/${id}`, { method: 'DELETE' }),
+  deleteBook: (id: string) => {
+    workspaceCache.delete(id)
+    return request<void>(`/books/${id}`, { method: 'DELETE' })
+  },
 
-  save: async (id: string, version: number, bytes: Uint8Array, options: { checkpoint?: boolean } = {}): Promise<{ version: number }> => {
-    const copy = new Uint8Array(bytes.length)
-    copy.set(bytes)
-    const headers: Record<string, string> = { 'content-type': 'application/epub+zip', 'if-match': `"${version}"` }
-    if (options.checkpoint) headers['x-booksmith-checkpoint'] = 'manual'
-    const response = await fetch(`/api/books/${id}/epub`, {
-      method: 'PUT',
+  workspace: async (id: string): Promise<WorkspaceDto> => {
+    const cached = workspaceCache.get(id)
+    const headers: Record<string, string> = {}
+    if (cached) headers['if-none-match'] = cached.etag
+    const response = await fetch(`/api/books/${id}/workspace`, {
       credentials: 'include',
       headers,
-      body: copy.buffer,
+    })
+    if (response.status === 304 && cached) {
+      return cached.data
+    }
+    if (!response.ok) {
+      const payload = await response.json().catch(() => ({}))
+      throw new ApiError(response.status, (payload as { error?: string }).error ?? 'http_error', payload)
+    }
+    const data = (await response.json()) as WorkspaceDto
+    const etag = response.headers.get('etag') ?? `"${data.version}"`
+    workspaceCache.set(id, { etag, data })
+    return data
+  },
+
+  saveEntries: async (
+    id: string,
+    version: number,
+    delta: EntryDeltaPayload,
+    options: { checkpoint?: boolean } = {},
+  ): Promise<{ book: BookDto; version: number; entries: WorkspaceEntryDto[] }> => {
+    const headers: Record<string, string> = { 'if-match': `"${version}"` }
+    if (options.checkpoint) headers['x-booksmith-checkpoint'] = 'manual'
+
+    let body: BodyInit
+    if (delta.binaryUpserts.size === 0) {
+      headers['content-type'] = 'application/json'
+      body = JSON.stringify({
+        textUpserts: delta.textUpserts,
+        renames: delta.renames,
+        deletes: delta.deletes,
+        order: delta.order,
+      })
+    } else {
+      const form = new FormData()
+      const binaryMediaTypes: Record<string, string> = {}
+      for (const [path, file] of delta.binaryUpserts) {
+        binaryMediaTypes[path] = file.mediaType
+      }
+      form.append(
+        'ops',
+        JSON.stringify({
+          textUpserts: delta.textUpserts,
+          renames: delta.renames,
+          deletes: delta.deletes,
+          order: delta.order,
+          binaryMediaTypes,
+        }),
+      )
+      for (const [path, file] of delta.binaryUpserts) {
+        const copy = new Uint8Array(file.bytes.byteLength)
+        copy.set(file.bytes)
+        form.append(`bin:${path}`, new Blob([copy.buffer], { type: file.mediaType }), path.split('/').pop() || 'asset')
+      }
+      body = form
+    }
+
+    const response = await fetch(`/api/books/${id}/entries`, {
+      method: 'PATCH',
+      credentials: 'include',
+      headers,
+      body,
     })
     const payload = await response.json().catch(() => ({}))
     if (!response.ok) {
       throw new ApiError(response.status, (payload as { error?: string }).error ?? 'http_error', payload)
     }
-    return payload as { version: number }
+    workspaceCache.delete(id)
+    return payload as { book: BookDto; version: number; entries: WorkspaceEntryDto[] }
   },
 
   pageVersions: (id: string) => request<{ snapshots: PageSnapshotDto[] }>(`/books/${id}/page-versions`),
@@ -256,8 +348,12 @@ export const api = {
       body: JSON.stringify({ pinned }),
     }),
 
-  restorePage: (id: string, snapshotId: string) =>
-    request<{ version: number; path: string }>(`/books/${id}/page-versions/${snapshotId}/restore`, { method: 'POST' }),
+  restorePage: (id: string, snapshotId: string) => {
+    workspaceCache.delete(id)
+    return request<{ version: number; path: string }>(`/books/${id}/page-versions/${snapshotId}/restore`, {
+      method: 'POST',
+    })
+  },
 
   upload: (file: File) =>
     request<{ book: BookDto }>('/books', {
@@ -265,19 +361,6 @@ export const api = {
       headers: { 'content-type': 'application/epub+zip' },
       body: file,
     }),
-
-  epub: async (id: string): Promise<{ bytes: Uint8Array; version: number }> => {
-    const response = await fetch(`/api/books/${id}/epub`, { credentials: 'include' })
-    if (!response.ok) {
-      const payload = await response.json().catch(() => ({}))
-      throw new ApiError(response.status, (payload as { error?: string }).error ?? 'http_error', payload)
-    }
-    const etag = response.headers.get('etag') ?? ''
-    return {
-      bytes: new Uint8Array(await response.arrayBuffer()),
-      version: Number(etag.replace(/[^0-9]/g, '')) || 0,
-    }
-  },
 
   agentSettings: () => request<{ settings: AgentUserSettingsDto }>('/agent/settings'),
 
@@ -433,3 +516,17 @@ export const coverUrl = (id: string): string => `/api/books/${id}/cover`
 
 /** Direct link so the browser's download manager streams the pack instead of JS buffering it. */
 export const downloadUrl = (id: string): string => `/api/books/${id}/download`
+
+/**
+ * Origin-qualified URL for a single book entry. Preview and WYSIWYG run inside `iframe srcDoc`
+ * where relative URLs fail against `about:srcdoc`, so the host origin must be prepended.
+ * See ADR 2026-11-20-entry-level-book-storage.
+ */
+export function entryAssetUrl(bookId: string, path: string, sha256?: string | null): string {
+  const origin =
+    typeof window !== 'undefined' && window.location?.origin && window.location.origin !== 'null'
+      ? window.location.origin
+      : ''
+  const query = `path=${encodeURIComponent(path)}${sha256 ? `&sha=${encodeURIComponent(sha256)}` : ''}`
+  return `${origin}/api/books/${bookId}/entry?${query}`
+}

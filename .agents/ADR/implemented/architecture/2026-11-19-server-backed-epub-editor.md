@@ -27,7 +27,7 @@ packages/core EPUB 引擎（同构）：unpack / parse / pack / validate / searc
 
 **编辑在浏览器完成，存储在服务端。** `GET /api/books/:id/epub` 取回整包（响应带
 `ETag: "<version>"`）→ `core.openEpub` 进内存 → 用户编辑 → `core.zipArchive` 重新打包 →
-`PUT` 整包。单实例、2MB 量级，不做增量协议。
+`PUT` 整包。单实例、2MB 量级，不做增量协议。（*更新：此整包存储与 `GET/PUT /epub` 传输条款已由 [entry-level book storage](2026-11-20-entry-level-book-storage.md) 替代，当前改用 `book_entries` 按条目存储、`/workspace` + `/entry` 按需加载与 `PATCH /entries` 增量提交，其余单库 Postgres / `pg_dump` / 乐观锁 / 结构门禁约束保持不变。*）
 
 **服务端是信任边界。** 落库前由 `apps/server/src/epub/ingest.ts` 校验：zip 可读、`mimetype`
 为首条且内容为 `application/epub+zip`、`META-INF/container.xml` 与 OPF 可解析、结构自检

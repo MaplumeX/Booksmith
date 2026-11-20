@@ -1,11 +1,12 @@
-import { migrate } from 'drizzle-orm/postgres-js/migrator'
 import { loadConfig } from '../src/config'
 import { createDb } from '../src/db/client'
+import { runMigrations } from '../src/db/migrate'
 
 const { db, sql } = createDb(loadConfig().databaseUrl)
-const folder = new URL('../drizzle', import.meta.url).pathname
 
 console.log(`migrating ${loadConfig().databaseUrl}`)
-await migrate(db, { migrationsFolder: folder })
+const result = await runMigrations(db, sql)
 await sql.end()
-console.log('migrations applied')
+console.log(
+  `migrations applied (backfilled ${result.migratedBooks} legacy book(s), droppedLegacyTable=${result.droppedLegacyTable})`,
+)
