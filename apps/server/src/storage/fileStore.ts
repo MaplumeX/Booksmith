@@ -1,9 +1,14 @@
-import { and, eq, inArray, sql } from 'drizzle-orm'
+import { randomUUID } from 'node:crypto'
+import { and, asc, eq, inArray, sql } from 'drizzle-orm'
+import { isTextEntry } from '@booksmith/core'
 import type { Db } from '../db/client'
-import { bookFiles, pageVersions } from '../db/schema'
+import { bookEntries, pageVersions } from '../db/schema'
 
 const RECENT_KEEP = 10
 const PAGE_CAP = 100
+const ENTRY_BATCH_SIZE = 50
+
+export type DbExecutor = Pick<Db, 'select' | 'insert' | 'update' | 'delete' | 'execute'>
 
 export interface PageVersionMeta {
   id: string
@@ -14,41 +19,271 @@ export interface PageVersionMeta {
   createdAt: Date
 }
 
+export interface StoredEntryInput {
+  path: string
+  position: number
+  isText: boolean
+  mediaType: string
+  bytes: Buffer
+  sha256: string
+}
+
+export interface WorkspaceEntryRow {
+  path: string
+  position: number
+  isText: boolean
+  mediaType: string
+  byteSize: number
+  sha256: string
+  /** Populated only for text entries and `mimetype`; null for binaries so Postgres never detoasts them. */
+  bytes: Buffer | null
+}
+
+export interface StoredEntryRow {
+  path: string
+  position: number
+  isText: boolean
+  mediaType: string
+  bytes: Buffer
+  byteSize: number
+  sha256: string
+}
+
+export interface EntryDelta {
+  deletes: string[]
+  renames: Array<{ from: string; to: string }>
+  upserts: Array<{
+    path: string
+    isText: boolean
+    mediaType: string
+    bytes: Buffer
+    sha256: string
+  }>
+  order?: string[]
+}
+
 export interface FileStore {
-  getCurrent(bookId: string): Promise<Buffer | null>
-  putCurrent(bookId: string, bytes: Buffer, sha256: string): Promise<void>
+  replaceAllEntries(bookId: string, entries: ReadonlyArray<StoredEntryInput>, executor?: DbExecutor): Promise<void>
+  listWorkspaceEntries(bookId: string, executor?: DbExecutor): Promise<WorkspaceEntryRow[]>
+  getEntry(bookId: string, path: string, executor?: DbExecutor): Promise<StoredEntryRow | null>
+  getAllEntriesForPack(bookId: string, executor?: DbExecutor): Promise<StoredEntryRow[]>
+  applyEntryDelta(bookId: string, delta: EntryDelta, executor?: DbExecutor): Promise<void>
+
   listPageVersions(bookId: string): Promise<PageVersionMeta[]>
   getPageVersion(bookId: string, id: string): Promise<{ path: string; bytes: Buffer } | null>
   /** Newest snapshot of one entry, used to decide whether the throttle window is still open. */
-  newestFor(bookId: string, path: string): Promise<{ sha256: string; createdAt: Date } | null>
-  putPageVersion(bookId: string, path: string, bytes: Buffer, sha256: string): Promise<void>
+  newestFor(bookId: string, path: string, executor?: DbExecutor): Promise<{ sha256: string; createdAt: Date } | null>
+  putPageVersion(
+    bookId: string,
+    path: string,
+    bytes: Buffer,
+    sha256: string,
+    executor?: DbExecutor,
+  ): Promise<void>
   /** Marks a snapshot as protected from pruning. Returns null when the snapshot is not in this book. */
   setPinned(bookId: string, id: string, pinned: boolean): Promise<PageVersionMeta | null>
-  prunePages(bookId: string): Promise<number>
+  prunePages(bookId: string, executor?: DbExecutor): Promise<number>
 }
 
-/** Postgres-backed storage: one row for the current pack, one table of per-entry snapshots.
- * See ADR 2026-11-19-page-level-snapshots. */
+async function insertEntriesBatched(
+  executor: DbExecutor,
+  bookId: string,
+  entries: ReadonlyArray<StoredEntryInput>,
+): Promise<void> {
+  const now = new Date()
+  for (let offset = 0; offset < entries.length; offset += ENTRY_BATCH_SIZE) {
+    const chunk = entries.slice(offset, offset + ENTRY_BATCH_SIZE)
+    await executor
+      .insert(bookEntries)
+      .values(
+        chunk.map((entry) => ({
+          bookId,
+          path: entry.path,
+          position: entry.position,
+          isText: entry.isText,
+          mediaType: entry.mediaType,
+          bytes: entry.bytes,
+          byteSize: entry.bytes.byteLength,
+          sha256: entry.sha256,
+          updatedAt: now,
+        })),
+      )
+      .onConflictDoUpdate({
+        target: [bookEntries.bookId, bookEntries.path],
+        set: {
+          position: sql`excluded.position`,
+          isText: sql`excluded.is_text`,
+          mediaType: sql`excluded.media_type`,
+          bytes: sql`excluded.bytes`,
+          byteSize: sql`excluded.byte_size`,
+          sha256: sql`excluded.sha256`,
+          updatedAt: sql`excluded.updated_at`,
+        },
+      })
+  }
+}
+
+/** Postgres-backed entry-level storage: `book_entries` holds current unpacked state, `page_versions`
+ * holds per-entry text snapshots. See ADR 2026-11-20-entry-level-book-storage. */
 export function createPostgresFileStore(db: Db): FileStore {
-  return {
-    async getCurrent(bookId) {
-      const rows = await db
-        .select({ bytes: bookFiles.bytes })
-        .from(bookFiles)
-        .where(eq(bookFiles.bookId, bookId))
-        .limit(1)
-      return rows[0]?.bytes ?? null
+  const store: FileStore = {
+    async replaceAllEntries(bookId, entries, executor = db) {
+      await executor.delete(bookEntries).where(eq(bookEntries.bookId, bookId))
+      if (entries.length === 0) return
+      await insertEntriesBatched(executor, bookId, entries)
     },
 
-    /** Overwrites in place: the pack is the current state, never history. */
-    async putCurrent(bookId, bytes, sha256) {
-      await db
-        .insert(bookFiles)
-        .values({ bookId, bytes, byteSize: bytes.byteLength, sha256, updatedAt: new Date() })
-        .onConflictDoUpdate({
-          target: bookFiles.bookId,
-          set: { bytes, byteSize: bytes.byteLength, sha256, updatedAt: new Date() },
+    async listWorkspaceEntries(bookId, executor = db) {
+      // Skip selecting binary `bytes` via CASE so Postgres never detoasts large images or fonts
+      // during editor opens, incremental saves, or Agent turns.
+      // See ADR 2026-11-20-entry-level-book-storage.
+      const rows = await executor
+        .select({
+          path: bookEntries.path,
+          position: bookEntries.position,
+          isText: bookEntries.isText,
+          mediaType: bookEntries.mediaType,
+          byteSize: bookEntries.byteSize,
+          sha256: bookEntries.sha256,
+          bytes: sql<Buffer | null>`CASE WHEN ${bookEntries.isText} OR ${bookEntries.path} = 'mimetype' THEN ${bookEntries.bytes} ELSE NULL END`,
         })
+        .from(bookEntries)
+        .where(eq(bookEntries.bookId, bookId))
+        .orderBy(asc(bookEntries.position), asc(bookEntries.path))
+
+      return rows
+    },
+
+    async getEntry(bookId, path, executor = db) {
+      const rows = await executor
+        .select({
+          path: bookEntries.path,
+          position: bookEntries.position,
+          isText: bookEntries.isText,
+          mediaType: bookEntries.mediaType,
+          bytes: bookEntries.bytes,
+          byteSize: bookEntries.byteSize,
+          sha256: bookEntries.sha256,
+        })
+        .from(bookEntries)
+        .where(and(eq(bookEntries.bookId, bookId), eq(bookEntries.path, path)))
+        .limit(1)
+      return rows[0] ?? null
+    },
+
+    async getAllEntriesForPack(bookId, executor = db) {
+      return executor
+        .select({
+          path: bookEntries.path,
+          position: bookEntries.position,
+          isText: bookEntries.isText,
+          mediaType: bookEntries.mediaType,
+          bytes: bookEntries.bytes,
+          byteSize: bookEntries.byteSize,
+          sha256: bookEntries.sha256,
+        })
+        .from(bookEntries)
+        .where(eq(bookEntries.bookId, bookId))
+        .orderBy(asc(bookEntries.position), asc(bookEntries.path))
+    },
+
+    async applyEntryDelta(bookId, delta, executor = db) {
+      const now = new Date()
+
+      // 1. Apply deletes first so renamed paths can move into vacated slots cleanly.
+      if (delta.deletes.length > 0) {
+        await executor
+          .delete(bookEntries)
+          .where(and(eq(bookEntries.bookId, bookId), inArray(bookEntries.path, delta.deletes)))
+      }
+
+      // 2. Two-phase temp-path renames avoid PK collisions on swaps (a <-> b) and chains
+      // without transferring binary bytes out of Postgres.
+      // See ADR 2026-11-20-entry-level-book-storage.
+      const effectiveRenames = delta.renames.filter((item) => item.from !== item.to)
+      if (effectiveRenames.length > 0) {
+        const nonce = randomUUID()
+        const staged: Array<{ tmp: string; to: string }> = []
+        for (let i = 0; i < effectiveRenames.length; i += 1) {
+          const item = effectiveRenames[i]!
+          const tmp = `__booksmith_rename_${nonce}_${i}`
+          const updated = await executor
+            .update(bookEntries)
+            .set({ path: tmp, updatedAt: now })
+            .where(and(eq(bookEntries.bookId, bookId), eq(bookEntries.path, item.from)))
+            .returning({ path: bookEntries.path })
+          if (updated.length === 0) {
+            throw new Error(`rename source not found: ${item.from}`)
+          }
+          staged.push({ tmp, to: item.to })
+        }
+
+        for (const item of staged) {
+          await executor
+            .update(bookEntries)
+            .set({
+              path: item.to,
+              isText: isTextEntry(item.to),
+              updatedAt: now,
+            })
+            .where(and(eq(bookEntries.bookId, bookId), eq(bookEntries.path, item.tmp)))
+        }
+      }
+
+      // 3. Apply upserts in chunks to stay well under Postgres parameter limits.
+      if (delta.upserts.length > 0) {
+        const existingPos = await executor
+          .select({ path: bookEntries.path, position: bookEntries.position })
+          .from(bookEntries)
+          .where(eq(bookEntries.bookId, bookId))
+        const posByPath = new Map(existingPos.map((row) => [row.path, row.position]))
+        let nextPos = existingPos.reduce((max, row) => Math.max(max, row.position), -1) + 1
+
+        const inputs: StoredEntryInput[] = delta.upserts.map((item) => {
+          const position = posByPath.get(item.path) ?? nextPos++
+          return {
+            path: item.path,
+            position,
+            isText: item.isText,
+            mediaType: item.mediaType,
+            bytes: item.bytes,
+            sha256: item.sha256,
+          }
+        })
+        await insertEntriesBatched(executor, bookId, inputs)
+      }
+
+      // 4. Normalize `position` so `mimetype` stays at 0 and caller-provided order is preserved.
+      const currentRows = await executor
+        .select({ path: bookEntries.path, position: bookEntries.position })
+        .from(bookEntries)
+        .where(eq(bookEntries.bookId, bookId))
+        .orderBy(asc(bookEntries.position), asc(bookEntries.path))
+
+      const existingSet = new Set(currentRows.map((row) => row.path))
+      const desiredOrder: string[] = []
+      const seen = new Set<string>()
+      const pushPath = (path: string) => {
+        if (seen.has(path) || !existingSet.has(path)) return
+        seen.add(path)
+        desiredOrder.push(path)
+      }
+
+      pushPath('mimetype')
+      if (delta.order) {
+        for (const path of delta.order) pushPath(path)
+      }
+      for (const row of currentRows) pushPath(row.path)
+
+      const currentPos = new Map(currentRows.map((row) => [row.path, row.position]))
+      for (let idx = 0; idx < desiredOrder.length; idx += 1) {
+        const path = desiredOrder[idx]!
+        if (currentPos.get(path) === idx) continue
+        await executor
+          .update(bookEntries)
+          .set({ position: idx })
+          .where(and(eq(bookEntries.bookId, bookId), eq(bookEntries.path, path)))
+      }
     },
 
     async listPageVersions(bookId) {
@@ -75,8 +310,8 @@ export function createPostgresFileStore(db: Db): FileStore {
       return rows[0] ?? null
     },
 
-    async newestFor(bookId, path) {
-      const rows = await db
+    async newestFor(bookId, path, executor = db) {
+      const rows = await executor
         .select({ sha256: pageVersions.sha256, createdAt: pageVersions.createdAt })
         .from(pageVersions)
         .where(and(eq(pageVersions.bookId, bookId), eq(pageVersions.path, path)))
@@ -101,8 +336,8 @@ export function createPostgresFileStore(db: Db): FileStore {
       return rows[0] ?? null
     },
 
-    async putPageVersion(bookId, path, bytes, sha256) {
-      await db.insert(pageVersions).values({
+    async putPageVersion(bookId, path, bytes, sha256, executor = db) {
+      await executor.insert(pageVersions).values({
         bookId,
         path,
         bytes,
@@ -120,8 +355,8 @@ export function createPostgresFileStore(db: Db): FileStore {
      * evicting the quiet chapters around it. Returns rows removed.
      * See ADR 2026-11-19-page-level-snapshots.
      */
-    async prunePages(bookId) {
-      const rows = await db
+    async prunePages(bookId, executor = db) {
+      const rows = await executor
         .select({
           id: pageVersions.id,
           path: pageVersions.path,
@@ -168,10 +403,12 @@ export function createPostgresFileStore(db: Db): FileStore {
       const removable = rows.filter((row) => !row.pinned && !keep.has(row.id)).map((row) => row.id)
       if (removable.length === 0) return 0
 
-      await db
+      await executor
         .delete(pageVersions)
         .where(and(eq(pageVersions.bookId, bookId), inArray(pageVersions.id, removable)))
       return removable.length
     },
   }
+
+  return store
 }

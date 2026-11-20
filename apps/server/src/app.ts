@@ -38,6 +38,12 @@ export async function createApp(options: CreateAppOptions = {}): Promise<Fastify
   app.addContentTypeParser('application/epub+zip', { parseAs: 'buffer' }, (_request, body, done) => {
     done(null, body)
   })
+  // Parse multipart/form-data as a raw Buffer and decode via Node's built-in Response.formData()
+  // so incremental binary saves need zero extra multipart dependencies.
+  // See ADR 2026-11-20-entry-level-book-storage.
+  app.addContentTypeParser('multipart/form-data', { parseAs: 'buffer' }, (_request, body, done) => {
+    done(null, body)
+  })
 
   app.decorateRequest('currentUser', null)
 

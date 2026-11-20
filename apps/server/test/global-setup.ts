@@ -1,8 +1,8 @@
 import EmbeddedPostgres from 'embedded-postgres'
 import { rmSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
-import { migrate } from 'drizzle-orm/postgres-js/migrator'
 import { createDb } from '../src/db/client'
+import { runMigrations } from '../src/db/migrate'
 
 export const TEST_PORT = 55433
 export const TEST_URL = `postgres://booksmith:booksmith@127.0.0.1:${TEST_PORT}/booksmith_test`
@@ -25,7 +25,7 @@ export default async function setup() {
   await pg.createDatabase('booksmith_test')
 
   const { db, sql } = createDb(TEST_URL)
-  await migrate(db, { migrationsFolder: new URL('../drizzle', import.meta.url).pathname })
+  await runMigrations(db, sql)
   await sql.end()
 
   return async () => {

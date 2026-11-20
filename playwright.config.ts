@@ -1,5 +1,8 @@
 import { defineConfig } from '@playwright/test'
 
+const WEB_PORT = Number(process.env.E2E_WEB_PORT ?? 5173)
+const BASE_URL = process.env.E2E_BASE_URL ?? `http://127.0.0.1:${WEB_PORT}`
+
 export default defineConfig({
   testDir: './e2e',
   timeout: 45_000,
@@ -7,13 +10,13 @@ export default defineConfig({
   workers: 1,
   reporter: [['list']],
   use: {
-    baseURL: 'http://127.0.0.1:5173',
+    baseURL: BASE_URL,
     trace: 'retain-on-failure',
     viewport: { width: 1440, height: 900 },
   },
   webServer: {
-    command: 'pnpm --filter @booksmith/web dev --port 5173 --strictPort',
-    url: 'http://127.0.0.1:5173',
+    command: `pnpm --filter @booksmith/web dev --port ${WEB_PORT} --strictPort`,
+    url: BASE_URL,
     reuseExistingServer: true,
     timeout: 90_000,
   },

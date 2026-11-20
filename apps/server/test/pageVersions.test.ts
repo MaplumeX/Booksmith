@@ -1,6 +1,5 @@
 import type { FastifyInstance } from 'fastify'
-import { createEmptyEpub, openEpub, unzipArchive, zipArchive } from '@booksmith/core'
-import { nodeXmlParser } from '../src/epub/ingest'
+import { createEmptyEpub, unzipArchive, zipArchive } from '@booksmith/core'
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest'
 import { createApp } from '../src/app'
 import { createDb } from '../src/db/client'
@@ -37,8 +36,14 @@ function syntheticBook(bodies: string[]): Buffer {
   }
 
   const opf = decoder.decode(archive.entries.get('EPUB/content.opf'))
-  const items = names.slice(1).map((name) => `    <item id="${name}" href="text/${name}.xhtml" media-type="application/xhtml+xml"/>\n`).join('')
-  const spine = names.slice(1).map((name) => `    <itemref idref="${name}"/>\n`).join('')
+  const items = names
+    .slice(1)
+    .map((name) => `    <item id="${name}" href="text/${name}.xhtml" media-type="application/xhtml+xml"/>\n`)
+    .join('')
+  const spine = names
+    .slice(1)
+    .map((name) => `    <itemref idref="${name}"/>\n`)
+    .join('')
   const patched = opf.replace('  </manifest>', `${items}  </manifest>`).replace('  </spine>', `${spine}  </spine>`)
   archive.entries.set('EPUB/content.opf', encoder.encode(patched))
 
@@ -84,29 +89,6 @@ beforeEach(async () => {
   cookie = await registerAndLogin('pages@booksmith.test')
 })
 
-describe('current pack storage', () => {
-  it('keeps exactly one row per book and overwrites it', async () => {
-    const id = await seedBook()
-    expect(await fileStore.getCurrent(id)).toBeNull()
-
-    const first = syntheticBook(['第一章'])
-    await fileStore.putCurrent(id, first, 'sha-first')
-    expect((await fileStore.getCurrent(id))?.equals(first)).toBe(true)
-
-    const replacement = syntheticBook(['第二章', '新增一章'])
-    await fileStore.putCurrent(id, replacement, 'sha-replacement')
-
-    const stored = await fileStore.getCurrent(id)
-    expect(stored?.equals(replacement)).toBe(true)
-    const rows = await store.db.select().from(pageVersions)
-    expect(rows).toHaveLength(0)
-  })
-
-  it('returns null for a book without stored bytes', async () => {
-    expect(await fileStore.getCurrent(crypto.randomUUID())).toBeNull()
-  })
-})
-
 describe('page snapshots', () => {
   it('lists snapshots newest first and finds the newest one per entry', async () => {
     const id = await seedBook()
@@ -147,7 +129,10 @@ describe('pruning', () => {
       sha256: `sha-${index}`,
       createdAt: new Date(base - index * stepMs),
     }))
-    const inserted = await store.db.insert(pageVersions).values(rows).returning({ id: pageVersions.id, sha256: pageVersions.sha256 })
+    const inserted = await store.db
+      .insert(pageVersions)
+      .values(rows)
+      .returning({ id: pageVersions.id, sha256: pageVersions.sha256 })
     return inserted.map((row) => row.sha256)
   }
 
@@ -220,26 +205,24 @@ async function upload(payload: Buffer): Promise<string> {
   return (response.json() as { book: { id: string } }).book.id
 }
 
-function save(id: string, version: number, payload: Buffer, headers: Record<string, string> = {}) {
+function saveText(
+  id: string,
+  version: number,
+  textUpserts: Record<string, string>,
+  headers: Record<string, string> = {},
+) {
   return app.inject({
-    method: 'PUT',
-    url: `/api/books/${id}/epub`,
-    headers: { cookie, 'content-type': 'application/epub+zip', 'if-match': `"${version}"`, ...headers },
-    payload,
+    method: 'PATCH',
+    url: `/api/books/${id}/entries`,
+    headers: { cookie, 'content-type': 'application/json', 'if-match': `"${version}"`, ...headers },
+    payload: { textUpserts },
   })
 }
 
-/** Decodes one entry out of the stored pack; the zip body itself is binary. */
 async function currentText(id: string, path: string): Promise<string> {
-  const epub = await app.inject({ method: 'GET', url: `/api/books/${id}/epub`, headers: { cookie } })
-  const opened = openEpub(new Uint8Array(epub.rawPayload), nodeXmlParser)
-  return decoder.decode(opened.archive.entries.get(path))
-}
-
-function editChapter(pack: Buffer, path: string, text: string): Buffer {
-  const archive = unzipArchive(new Uint8Array(pack))
-  archive.entries.set(path, encoder.encode(text))
-  return Buffer.from(zipArchive(archive))
+  const ws = await app.inject({ method: 'GET', url: `/api/books/${id}/workspace`, headers: { cookie } })
+  const body = ws.json() as { texts: Record<string, string> }
+  return body.texts[path] ?? ''
 }
 
 describe('saving', () => {
@@ -257,13 +240,15 @@ describe('saving', () => {
   })
 
   it('bumps the version and records only the entry that changed', async () => {
-    const pack = syntheticBook(['第一章', '第二章'])
-    const id = await upload(pack)
+    const id = await upload(syntheticBook(['第一章', '第二章']))
     const before = await fileStore.listPageVersions(id)
 
-    const response = await save(id, 1, editChapter(pack, 'EPUB/text/ch002.xhtml', '改过的第二章'), {
-      'x-booksmith-checkpoint': 'manual',
-    })
+    const response = await saveText(
+      id,
+      1,
+      { 'EPUB/text/ch002.xhtml': '改过的第二章' },
+      { 'x-booksmith-checkpoint': 'manual' },
+    )
     expect(response.statusCode).toBe(200)
     expect((response.json() as { version: number }).version).toBe(2)
 
@@ -273,12 +258,12 @@ describe('saving', () => {
   })
 
   it('does not write anything when the bytes are unchanged', async () => {
-    const pack = syntheticBook(['第一章'])
-    const id = await upload(pack)
+    const id = await upload(syntheticBook(['第一章']))
     const before = await fileStore.listPageVersions(id)
     const bookBefore = await store.db.select().from(books).where(eq(books.id, id)).limit(1)
+    const original = await currentText(id, 'EPUB/text/ch001.xhtml')
 
-    const response = await save(id, 1, pack)
+    const response = await saveText(id, 1, { 'EPUB/text/ch001.xhtml': original })
     expect(response.statusCode).toBe(200)
     expect((response.json() as { version: number }).version).toBe(1)
 
@@ -288,39 +273,42 @@ describe('saving', () => {
   })
 
   it('skips a second snapshot for the same entry inside the ten minute window', async () => {
-    const pack = syntheticBook(['第一章'])
-    const id = await upload(pack)
+    const id = await upload(syntheticBook(['第一章']))
     const baseline = await fileStore.listPageVersions(id)
 
-    const first = await save(id, 1, editChapter(pack, 'EPUB/text/ch001.xhtml', '第一次改'))
+    const first = await saveText(id, 1, { 'EPUB/text/ch001.xhtml': '第一次改' })
     expect(first.statusCode).toBe(200)
     expect((first.json() as { version: number }).version).toBe(2)
     expect(await fileStore.listPageVersions(id)).toHaveLength(baseline.length)
 
-    // The content still landed in the current pack even though no snapshot row was written.
+    // The content still landed in book_entries even though no snapshot row was written.
     expect(await currentText(id, 'EPUB/text/ch001.xhtml')).toContain('第一次改')
   })
 
   it('records a snapshot for a manual checkpoint even inside the window', async () => {
-    const pack = syntheticBook(['第一章'])
-    const id = await upload(pack)
+    const id = await upload(syntheticBook(['第一章']))
     const baseline = await fileStore.listPageVersions(id)
 
-    const response = await save(id, 1, editChapter(pack, 'EPUB/text/ch001.xhtml', '手动保存'), {
-      'x-booksmith-checkpoint': 'manual',
-    })
+    const response = await saveText(
+      id,
+      1,
+      { 'EPUB/text/ch001.xhtml': '手动保存' },
+      { 'x-booksmith-checkpoint': 'manual' },
+    )
     expect(response.statusCode).toBe(200)
     expect(await fileStore.listPageVersions(id)).toHaveLength(baseline.length + 1)
   })
 
   it('rejects a stale If-Match without touching history', async () => {
-    const pack = syntheticBook(['第一章'])
-    const id = await upload(pack)
+    const id = await upload(syntheticBook(['第一章']))
     const baseline = await fileStore.listPageVersions(id)
 
-    const response = await save(id, 7, editChapter(pack, 'EPUB/text/ch001.xhtml', '过期'), {
-      'x-booksmith-checkpoint': 'manual',
-    })
+    const response = await saveText(
+      id,
+      7,
+      { 'EPUB/text/ch001.xhtml': '过期' },
+      { 'x-booksmith-checkpoint': 'manual' },
+    )
     expect(response.statusCode).toBe(409)
     expect(await fileStore.listPageVersions(id)).toHaveLength(baseline.length)
   })
@@ -400,14 +388,16 @@ describe('reading and restoring snapshots', () => {
     expect(content.body).toContain('第二章')
   })
 
-  it('restores one entry into the current pack and bumps the version', async () => {
-    const pack = syntheticBook(['第一章', '第二章'])
-    const id = await upload(pack)
+  it('restores one entry directly into book_entries and bumps the version', async () => {
+    const id = await upload(syntheticBook(['第一章', '第二章']))
     const origin = (await fileStore.listPageVersions(id)).find((entry) => entry.path === 'EPUB/text/ch002.xhtml')!
 
-    const saved = await save(id, 1, editChapter(pack, 'EPUB/text/ch002.xhtml', '改坏了的第二章'), {
-      'x-booksmith-checkpoint': 'manual',
-    })
+    const saved = await saveText(
+      id,
+      1,
+      { 'EPUB/text/ch002.xhtml': '改坏了的第二章' },
+      { 'x-booksmith-checkpoint': 'manual' },
+    )
     expect((saved.json() as { version: number }).version).toBe(2)
 
     const restored = await app.inject({

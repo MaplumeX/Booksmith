@@ -1,4 +1,4 @@
-import { boolean, customType, index, integer, pgTable, text, timestamp, uuid } from 'drizzle-orm/pg-core'
+import { boolean, customType, index, integer, pgTable, primaryKey, text, timestamp, uuid } from 'drizzle-orm/pg-core'
 
 const bytea = customType<{ data: Buffer; driverData: Buffer }>({
   dataType: () => 'bytea',
@@ -49,18 +49,29 @@ export const books = pgTable(
   (table) => [index('books_owner_updated_idx').on(table.ownerId, table.updatedAt)],
 )
 
-/** The current whole-book pack, one row per book, overwritten on every save.
- * Whole-book history is gone on purpose; per-entry history lives in `page_versions`.
- * See ADR 2026-11-19-page-level-snapshots. */
-export const bookFiles = pgTable('book_files', {
-  bookId: uuid('book_id')
-    .primaryKey()
-    .references(() => books.id, { onDelete: 'cascade' }),
-  bytes: bytea('bytes').notNull(),
-  byteSize: integer('byte_size').notNull(),
-  sha256: text('sha256').notNull(),
-  updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
-})
+/** Unpacked entries of the current book state, preserving zip order via `position`.
+ * Single source of truth for editing, Agent, page restores, and on-demand export.
+ * See ADR 2026-11-20-entry-level-book-storage. */
+export const bookEntries = pgTable(
+  'book_entries',
+  {
+    bookId: uuid('book_id')
+      .notNull()
+      .references(() => books.id, { onDelete: 'cascade' }),
+    path: text('path').notNull(),
+    position: integer('position').notNull(),
+    isText: boolean('is_text').notNull(),
+    mediaType: text('media_type').notNull(),
+    bytes: bytea('bytes').notNull(),
+    byteSize: integer('byte_size').notNull(),
+    sha256: text('sha256').notNull(),
+    updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [
+    primaryKey({ columns: [table.bookId, table.path] }),
+    index('book_entries_book_position_idx').on(table.bookId, table.position),
+  ],
+)
 
 export const pageVersions = pgTable(
   'page_versions',
@@ -143,7 +154,7 @@ export const agentMessages = pgTable(
 export type User = typeof users.$inferSelect
 export type NewUser = typeof users.$inferInsert
 export type Book = typeof books.$inferSelect
-export type BookFile = typeof bookFiles.$inferSelect
+export type BookEntry = typeof bookEntries.$inferSelect
 export type PageVersion = typeof pageVersions.$inferSelect
 export type AgentProfile = typeof agentProfiles.$inferSelect
 export type AgentThread = typeof agentThreads.$inferSelect

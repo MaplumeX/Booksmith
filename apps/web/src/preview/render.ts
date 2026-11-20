@@ -24,8 +24,15 @@ const MIME_BY_EXTENSION: Record<string, string> = {
 export const EMPTY_IFRAME_DOC =
   '<!DOCTYPE html><html data-booksmith-shell="ready"><head><meta charset="utf-8"></head><body></body></html>'
 
+export type PreviewAsset =
+  | { kind: 'bytes'; bytes: Uint8Array; mime: string }
+  | { kind: 'url'; url: string; key: string; mime: string }
+
+export type PreviewAssetResolver = (path: string) => PreviewAsset | null
+
 export interface PreviewResourceSnapshot {
   bytes: Uint8Array | undefined
+  assetKey?: string
   mime: string
 }
 
@@ -92,14 +99,23 @@ export class PreviewBlobCache {
   }
 }
 
-/** Returns true when any stylesheet, image, or font referenced by a preview changed bytes or MIME type. */
+/** Returns true when any stylesheet, image, or font referenced by a preview changed bytes, remote key, or MIME type. */
 export function previewResourcesChanged(
   dependencies: ReadonlyMap<string, PreviewResourceSnapshot>,
   archive: EpubArchive,
   pkg: EpubPackage,
+  resolveAsset?: PreviewAssetResolver,
 ): boolean {
   for (const [depPath, snapshot] of dependencies) {
-    if (archive.entries.get(depPath) !== snapshot.bytes) return true
+    const resolved = resolveAsset?.(depPath)
+    if (resolved?.kind === 'url') {
+      if (snapshot.assetKey !== resolved.key) return true
+      if (resolved.mime !== snapshot.mime) return true
+      continue
+    }
+    if (snapshot.assetKey !== undefined) return true
+    const bytes = resolved?.kind === 'bytes' ? resolved.bytes : archive.entries.get(depPath)
+    if (bytes !== snapshot.bytes) return true
     if (mediaTypeOf(depPath, pkg) !== snapshot.mime) return true
   }
   return false
@@ -263,8 +279,9 @@ export function buildPreviewDocument(args: {
   theme?: 'light' | 'dark'
   editable?: { paperTheme?: 'light' | 'dark' }
   blobCache?: PreviewBlobCache
+  resolveAsset?: PreviewAssetResolver
 }): BuiltPreviewDocument {
-  const { xhtml, path, archive, pkg, theme = 'light', editable, blobCache } = args
+  const { xhtml, path, archive, pkg, theme = 'light', editable, blobCache, resolveAsset } = args
   const doc = new DOMParser().parseFromString(xhtml, 'text/html')
   const ephemeralUrls: string[] = []
   const dependencies = new Map<string, PreviewResourceSnapshot>()
@@ -276,8 +293,15 @@ export function buildPreviewDocument(args: {
     return { bytes, mime }
   }
 
-  const blobFor = (targetPath: string): string | null => {
-    const { bytes, mime } = recordDependency(targetPath)
+  const assetUrlFor = (targetPath: string): string | null => {
+    const resolved = resolveAsset?.(targetPath)
+    if (resolved?.kind === 'url') {
+      dependencies.set(targetPath, { bytes: undefined, assetKey: resolved.key, mime: resolved.mime })
+      return resolved.url
+    }
+    const bytes = resolved?.kind === 'bytes' ? resolved.bytes : archive.entries.get(targetPath)
+    const mime = resolved?.kind === 'bytes' ? resolved.mime : mediaTypeOf(targetPath, pkg)
+    dependencies.set(targetPath, { bytes, mime })
     if (!bytes) return null
     if (blobCache) return blobCache.urlFor(targetPath, bytes, mime)
     const copy = new Uint8Array(bytes.length)
@@ -291,7 +315,7 @@ export function buildPreviewDocument(args: {
     css.replace(/url\(\s*(['"]?)([^)'"]+)\1\s*\)/g, (match, _quote: string, raw: string) => {
       const target = raw.trim()
       if (/^(data:|https?:|blob:|#)/i.test(target)) return match
-      const url = blobFor(resolvePath(baseDir, target))
+      const url = assetUrlFor(resolvePath(baseDir, target))
       return url ? `url("${url}")` : match
     })
 
@@ -322,7 +346,7 @@ export function buildPreviewDocument(args: {
     if (editable) {
       image.setAttribute('data-booksmith-src', src)
     }
-    const url = blobFor(resolvePath(dirname(path), src))
+    const url = assetUrlFor(resolvePath(dirname(path), src))
     if (url) {
       image.setAttribute('src', url)
     } else {

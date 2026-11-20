@@ -120,3 +120,39 @@ test('brings back an unsaved draft after a reload', async ({ page }) => {
   await expect(page.locator('.cm-content')).toContainText('本地草稿标记')
   await expect(page.locator('.statusbar')).toContainText('未保存')
 })
+
+test('opens via /workspace without /epub and saves text edits as incremental JSON delta', async ({ page }) => {
+  const requests: Array<{ method: string; url: string; contentType: string; postData: string | null }> = []
+  page.on('request', (req) => {
+    if (req.url().includes(`/api/books/${bookId}`)) {
+      requests.push({
+        method: req.method(),
+        url: req.url(),
+        contentType: req.headers()['content-type'] ?? '',
+        postData: req.postData(),
+      })
+    }
+  })
+
+  await openChapter(page)
+  expect(requests.some((r) => r.method === 'GET' && r.url.includes('/workspace'))).toBe(true)
+  expect(requests.some((r) => r.url.endsWith('/epub'))).toBe(false)
+
+  await page.locator('.cm-content').click()
+  await page.keyboard.type('增量保存')
+  await page.getByRole('button', { name: '保存', exact: true }).click()
+  await expect(page.locator('.appbar-meta')).toHaveText('v2')
+
+  const patch = requests.find((r) => r.method === 'PATCH' && r.url.includes('/entries'))
+  expect(patch).toBeTruthy()
+  expect(patch?.contentType).toContain('application/json')
+  const parsed = JSON.parse(patch?.postData ?? '{}') as {
+    textUpserts?: Record<string, string>
+    renames?: unknown[]
+    deletes?: unknown[]
+  }
+  expect(Object.keys(parsed.textUpserts ?? {})).toEqual(['EPUB/text/ch003.xhtml'])
+  expect(parsed.textUpserts?.['EPUB/text/ch003.xhtml']).toContain('增量保存')
+  expect(parsed.renames).toEqual([])
+  expect(parsed.deletes).toEqual([])
+})

@@ -8,6 +8,7 @@ import {
   EMPTY_IFRAME_DOC,
   PreviewBlobCache,
   previewResourcesChanged,
+  type PreviewAssetResolver,
   type PreviewResourceSnapshot,
 } from '../preview/render'
 import { useResolvedTheme } from '../state/settingsStore'
@@ -23,6 +24,7 @@ interface PreviewPaneProps {
   content: string
   archive: EpubArchive
   pkg: EpubPackage
+  resolveAsset?: PreviewAssetResolver
   revealFragment?: FragmentRevealTarget | null
   subscribeTextChange?: (listener: (changedPath: string, value: string) => void) => () => void
 }
@@ -47,7 +49,15 @@ function scrollIframeToFragment(doc: Document, win: Window, fragment: string): v
   }
 }
 
-export function PreviewPane({ path, content, archive, pkg, revealFragment, subscribeTextChange }: PreviewPaneProps) {
+export function PreviewPane({
+  path,
+  content,
+  archive,
+  pkg,
+  resolveAsset,
+  revealFragment,
+  subscribeTextChange,
+}: PreviewPaneProps) {
   const theme = useResolvedTheme()
   const [failure, setFailure] = useState<string | null>(null)
   const frame = useRef<HTMLIFrameElement>(null)
@@ -60,7 +70,7 @@ export function PreviewPane({ path, content, archive, pkg, revealFragment, subsc
     deps: Map<string, PreviewResourceSnapshot>
   } | null>(null)
   const liveContent = useRef(content)
-  const latest = useRef({ path, archive, pkg })
+  const latest = useRef({ path, archive, pkg, resolveAsset })
   const revealRef = useRef(revealFragment ?? null)
   revealRef.current = revealFragment ?? null
   const appliedRevealKey = useRef<number | null>(null)
@@ -81,7 +91,13 @@ export function PreviewPane({ path, content, archive, pkg, revealFragment, subsc
   }, [])
 
   const renderNow = useCallback(
-    (nextPath: string, nextContent: string, nextArchive: EpubArchive, nextPkg: EpubPackage) => {
+    (
+      nextPath: string,
+      nextContent: string,
+      nextArchive: EpubArchive,
+      nextPkg: EpubPackage,
+      nextResolveAsset?: PreviewAssetResolver,
+    ) => {
       const iframe = frame.current
       const doc = iframe?.contentDocument
       const win = iframe?.contentWindow
@@ -92,7 +108,7 @@ export function PreviewPane({ path, content, archive, pkg, revealFragment, subsc
         prev &&
         prev.path === nextPath &&
         prev.content === nextContent &&
-        !previewResourcesChanged(prev.deps, nextArchive, nextPkg)
+        !previewResourcesChanged(prev.deps, nextArchive, nextPkg, nextResolveAsset)
       ) {
         return
       }
@@ -105,6 +121,7 @@ export function PreviewPane({ path, content, archive, pkg, revealFragment, subsc
           pkg: nextPkg,
           theme: themeRef.current,
           blobCache: blobCache.current,
+          resolveAsset: nextResolveAsset,
         })
         readyDocs.current.add(doc)
         const pathChanged = prev !== null && prev.path !== nextPath
@@ -129,7 +146,13 @@ export function PreviewPane({ path, content, archive, pkg, revealFragment, subsc
   const handleFrameLoad = useCallback(() => {
     const doc = frame.current?.contentDocument
     if (doc) readyDocs.current.add(doc)
-    renderNow(latest.current.path, liveContent.current, latest.current.archive, latest.current.pkg)
+    renderNow(
+      latest.current.path,
+      liveContent.current,
+      latest.current.archive,
+      latest.current.pkg,
+      latest.current.resolveAsset,
+    )
   }, [renderNow])
 
   useEffect(() => {
@@ -146,34 +169,40 @@ export function PreviewPane({ path, content, archive, pkg, revealFragment, subsc
 
   useEffect(() => {
     liveContent.current = content
-    latest.current = { path, archive, pkg }
+    latest.current = { path, archive, pkg, resolveAsset }
     clearTimer()
 
     if (!isDocReady()) return
 
     const prev = applied.current
     if (!prev || prev.path !== path) {
-      renderNow(path, content, archive, pkg)
+      renderNow(path, content, archive, pkg, resolveAsset)
       return
     }
 
-    const resourcesChanged = previewResourcesChanged(prev.deps, archive, pkg)
+    const resourcesChanged = previewResourcesChanged(prev.deps, archive, pkg, resolveAsset)
     if (prev.content === content && !resourcesChanged) {
       return
     }
 
     if (resourcesChanged && prev.content === content) {
-      renderNow(path, content, archive, pkg)
+      renderNow(path, content, archive, pkg, resolveAsset)
       return
     }
 
     timer.current = window.setTimeout(() => {
       timer.current = null
-      renderNow(latest.current.path, liveContent.current, latest.current.archive, latest.current.pkg)
+      renderNow(
+        latest.current.path,
+        liveContent.current,
+        latest.current.archive,
+        latest.current.pkg,
+        latest.current.resolveAsset,
+      )
     }, DEBOUNCE_MS)
 
     return clearTimer
-  }, [content, path, archive, pkg, clearTimer, isDocReady, renderNow])
+  }, [content, path, archive, pkg, resolveAsset, clearTimer, isDocReady, renderNow])
 
   useEffect(() => {
     if (!subscribeTextChange) return
@@ -183,7 +212,13 @@ export function PreviewPane({ path, content, archive, pkg, revealFragment, subsc
       clearTimer()
       timer.current = window.setTimeout(() => {
         timer.current = null
-        renderNow(latest.current.path, liveContent.current, latest.current.archive, latest.current.pkg)
+        renderNow(
+          latest.current.path,
+          liveContent.current,
+          latest.current.archive,
+          latest.current.pkg,
+          latest.current.resolveAsset,
+        )
       }, DEBOUNCE_MS)
     })
   }, [subscribeTextChange, path, clearTimer, renderNow])

@@ -6,7 +6,9 @@ import { Dialog } from './Dialog'
 
 interface MediaPaneProps {
   path: string
-  bytes: Uint8Array | undefined
+  bytes?: Uint8Array
+  srcUrl?: string | null
+  byteSize?: number
   mime: string
   onReplace: (path: string, file: File) => void
   onDelete: (path: string) => void
@@ -19,28 +21,33 @@ function formatBytes(size: number): string {
 }
 
 /** Read-only view for archive entries that have no text form, e.g. images and fonts. */
-export function MediaPane({ path, bytes, mime, onReplace, onDelete }: MediaPaneProps) {
+export function MediaPane({ path, bytes, srcUrl, byteSize, mime, onReplace, onDelete }: MediaPaneProps) {
   const isImage = mime.startsWith('image/')
-  const [url, setUrl] = useState<string | null>(null)
+  const [blobUrl, setBlobUrl] = useState<string | null>(null)
   const [pending, setPending] = useState<File | null>(null)
   const picker = useRef<HTMLInputElement>(null)
 
   useEffect(() => {
-    if (!isImage || !bytes) return
+    if (!isImage || !bytes) {
+      setBlobUrl(null)
+      return
+    }
     const copy = new Uint8Array(bytes.length)
     copy.set(bytes)
     const next = URL.createObjectURL(new Blob([copy.buffer], { type: mime }))
-    setUrl(next)
+    setBlobUrl(next)
     return () => URL.revokeObjectURL(next)
   }, [bytes, mime, isImage])
 
-  const meta = bytes ? `${mime} · ${formatBytes(bytes.length)}` : `${mime} · 文件缺失`
+  const imageUrl = blobUrl ?? srcUrl ?? null
+  const resolvedSize = bytes ? bytes.length : byteSize
+  const meta = resolvedSize !== undefined ? `${mime} · ${formatBytes(resolvedSize)}` : `${mime} · 文件缺失`
 
   return (
     <div className="media-pane">
-      {isImage && url ? (
+      {isImage && imageUrl ? (
         <div className="media-frame">
-          <img className="media-image" src={url} alt={basename(path)} />
+          <img className="media-image" src={imageUrl} alt={basename(path)} />
         </div>
       ) : null}
       {!isImage ? (
