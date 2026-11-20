@@ -149,3 +149,50 @@ test('does not mark an untouched chapter dirty when closing or switching back to
   await expect(page.locator('.statusbar')).toContainText('未修改')
   await expect(page.locator('.tab[data-dirty="true"]')).toHaveCount(0)
 })
+
+test('preserves WYSIWYG iframe, undo stack, and paper theme without reloading on save', async ({ page }) => {
+  await openChapter(page, 'ch003.xhtml')
+  await page.getByRole('button', { name: '可视化', exact: true }).click()
+
+  const frame = page.frameLocator('.wysiwyg-frame')
+  const firstPara = frame.locator('p').first()
+  await expect(firstPara).toBeVisible()
+
+  await page.evaluate(() => {
+    const wysiwyg = document.querySelector<HTMLIFrameElement>('.wysiwyg-frame')!
+    const preview = document.querySelector<HTMLIFrameElement>('.preview-frame')!
+    ;(wysiwyg.contentWindow as unknown as Record<string, unknown>).__wysiwygSessionId = 'stable-wysiwyg'
+    ;(preview.contentWindow as unknown as Record<string, unknown>).__previewSessionId = 'stable-preview'
+  })
+
+  await firstPara.click()
+  await page.keyboard.type('【保存不闪烁】')
+  await expect(page.locator('.statusbar')).toContainText('1 个文件未保存')
+  await expect(page.frameLocator('.preview-frame').locator('body')).toContainText('【保存不闪烁】')
+
+  await page.getByRole('button', { name: '保存', exact: true }).click()
+  await expect(page.locator('.appbar-meta')).toHaveText('v2')
+  await expect(page.locator('.statusbar')).toContainText('未修改')
+
+  // Toggling dark paper theme should also update in place without reloading the iframe.
+  await page.getByRole('button', { name: '切换暗色纸面' }).click()
+
+  const afterSaveAndTheme = await page.evaluate(() => {
+    const wysiwyg = document.querySelector<HTMLIFrameElement>('.wysiwyg-frame')!
+    const preview = document.querySelector<HTMLIFrameElement>('.preview-frame')!
+    return {
+      wysiwygIntact: (wysiwyg.contentWindow as unknown as Record<string, unknown>).__wysiwygSessionId === 'stable-wysiwyg',
+      previewIntact: (preview.contentWindow as unknown as Record<string, unknown>).__previewSessionId === 'stable-preview',
+      darkBg: getComputedStyle(wysiwyg.contentDocument!.body).backgroundColor,
+    }
+  })
+  expect(afterSaveAndTheme.wysiwygIntact).toBe(true)
+  expect(afterSaveAndTheme.previewIntact).toBe(true)
+  expect(afterSaveAndTheme.darkBg).toBe('rgb(27, 34, 44)')
+
+  // Undo stack must still work after saving and toggling paper theme.
+  const undoBtn = page.getByRole('button', { name: '撤销', exact: true })
+  await expect(undoBtn).toBeEnabled()
+  await undoBtn.click()
+  await expect(frame.locator('body')).not.toContainText('【保存不闪烁】')
+})

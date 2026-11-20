@@ -43,7 +43,16 @@ import {
   type InlineTag,
 } from '../editor/wysiwygDom'
 import { checkXmlWellFormed, replaceBodyInXhtml, serializeEditableBody } from '../editor/wysiwygXhtml'
-import { buildPreview, mediaTypeOf } from '../preview/render'
+import { patchDocument, patchHead } from '../preview/patchDocument'
+import {
+  buildEditorStyleCss,
+  buildPreviewDocument,
+  EMPTY_IFRAME_DOC,
+  mediaTypeOf,
+  PreviewBlobCache,
+  previewResourcesChanged,
+  type PreviewResourceSnapshot,
+} from '../preview/render'
 import { basename } from '../state/bookStore'
 import { Button } from './Button'
 
@@ -119,8 +128,10 @@ export function WysiwygPane({
   onShortcut,
   onNavigateLink,
 }: WysiwygPaneProps) {
-  const [srcDoc, setSrcDoc] = useState('')
-  const [xmlError, setXmlError] = useState<string | null>(null)
+  const [xmlError, setXmlError] = useState<string | null>(() => {
+    const check = checkXmlWellFormed(content, browserXmlParser)
+    return check.ok ? null : check.message
+  })
   const [paperTheme, setPaperTheme] = useState<'light' | 'dark'>('light')
   const [toolbar, setToolbar] = useState<ActiveToolbarState>(DEFAULT_TOOLBAR)
   const [canUndo, setCanUndo] = useState(false)
@@ -133,10 +144,10 @@ export function WysiwygPane({
   const [insertAltDraft, setInsertAltDraft] = useState('')
 
   const frame = useRef<HTMLIFrameElement>(null)
-  const revokePreview = useRef<(() => void) | null>(null)
-  const insertedBlobUrls = useRef<string[]>([])
+  const blobCache = useRef<PreviewBlobCache>(new PreviewBlobCache())
+  const readyDocs = useRef<WeakSet<Document>>(new WeakSet())
+  const attachedDoc = useRef<Document | null>(null)
   const savedRange = useRef<Range | null>(null)
-  const scrollRatio = useRef(0)
 
   const syncTimer = useRef<number | null>(null)
   const undoTimer = useRef<number | null>(null)
@@ -145,9 +156,11 @@ export function WysiwygPane({
   const hasPendingEdit = useRef(false)
 
   const lastSyncedXhtml = useRef<string | null>(null)
-  const loadedKey = useRef<string | null>(null)
-  const loadedArchive = useRef<EpubArchive | null>(null)
-  const loadedPkg = useRef<EpubPackage | null>(null)
+  const loadedPath = useRef<string | null>(null)
+  const loadedExternalVersion = useRef<number | null>(null)
+  const loadedDeps = useRef<Map<string, PreviewResourceSnapshot>>(new Map())
+  const paperThemeRef = useRef<'light' | 'dark'>(paperTheme)
+  const latest = useRef({ path, content, archive, pkg, externalVersion })
   const liveSession = useRef<{ path: string; xhtml: string; islands: string[] }>({
     path,
     xhtml: content,
@@ -352,230 +365,357 @@ export function WysiwygPane({
     }
   }, [commitDomMutation, restoreRange])
 
+  const frameListenersCleanup = useRef<(() => void) | null>(null)
+
+  const isDocReady = useCallback((): boolean => {
+    const doc = frame.current?.contentDocument
+    if (!doc?.documentElement || !doc.body) return false
+    return doc.documentElement.hasAttribute('data-booksmith-shell') || readyDocs.current.has(doc)
+  }, [])
+
+  const attachFrameListeners = useCallback(
+    (doc: Document) => {
+      if (attachedDoc.current === doc || !doc.body) return
+      frameListenersCleanup.current?.()
+
+      const onInput = () => {
+        hasPendingEdit.current = true
+        scheduleUndoSnapshot()
+        scheduleSync()
+        refreshToolbar()
+      }
+
+      const onSelectionChange = () => {
+        refreshToolbar()
+      }
+
+      const onClick = (event: MouseEvent) => {
+        const target = event.target as Node | null
+        if (!target || !doc.body) return
+        clearSelectionMarkers(doc)
+
+        const island = findIslandAncestor(target, doc.body)
+        if (island) {
+          event.preventDefault()
+          island.setAttribute('data-booksmith-selected', 'true')
+          setContext({ kind: 'island', tag: island.tagName.toLowerCase(), el: island })
+          setPopover(null)
+          return
+        }
+
+        const targetEl = target.nodeType === 1 ? (target as Element) : target.parentElement
+        if (targetEl && targetEl.tagName.toLowerCase() === 'img') {
+          const img = targetEl as HTMLImageElement
+          img.setAttribute('data-booksmith-selected', 'true')
+          const rawSrc = img.getAttribute('data-booksmith-src') ?? img.getAttribute('src') ?? ''
+          const rawAlt = img.hasAttribute('data-booksmith-no-alt')
+            ? ''
+            : (img.getAttribute('data-booksmith-orig-alt') ?? img.getAttribute('alt') ?? '')
+          setImageAltDraft(rawAlt)
+          setContext({ kind: 'image', src: rawSrc, alt: rawAlt, el: img })
+          setPopover(null)
+          return
+        }
+
+        const anchor = findAncestor(target, doc.body, (el) => el.tagName.toLowerCase() === 'a')
+        if (anchor) {
+          event.preventDefault()
+          anchor.setAttribute('data-booksmith-selected', 'true')
+          setContext({ kind: 'link', href: anchor.getAttribute('href') ?? '', el: anchor })
+          setPopover(null)
+          return
+        }
+
+        setContext(null)
+      }
+
+      const onKeyDown = (event: KeyboardEvent) => {
+        const modifier = event.metaKey || event.ctrlKey
+        if (event.ctrlKey && event.key === 'Tab') {
+          event.preventDefault()
+          emitNow()
+          onShortcutRef.current?.(event.shiftKey ? 'prev-tab' : 'next-tab')
+          return
+        }
+        if (modifier) {
+          const key = event.key.toLowerCase()
+          if (key === 's' && !event.shiftKey) {
+            event.preventDefault()
+            emitNow()
+            onShortcutRef.current?.('save')
+            return
+          }
+          if (key === 'w' && !event.shiftKey) {
+            event.preventDefault()
+            emitNow()
+            onShortcutRef.current?.('close-tab')
+            return
+          }
+          if (key === 'f' && event.shiftKey) {
+            event.preventDefault()
+            onShortcutRef.current?.('search')
+            return
+          }
+          if (key === 'b' && !event.shiftKey) {
+            event.preventDefault()
+            applyInline('strong')
+            return
+          }
+          if (key === 'i' && !event.shiftKey) {
+            event.preventDefault()
+            applyInline('em')
+            return
+          }
+          if (key === 'z') {
+            event.preventDefault()
+            if (event.shiftKey) redo()
+            else undo()
+            return
+          }
+          if (key === 'y' && event.ctrlKey && !event.metaKey) {
+            event.preventDefault()
+            redo()
+            return
+          }
+        }
+
+        if (event.key === 'Enter' && !event.shiftKey) {
+          const sel = doc.defaultView?.getSelection()
+          if (sel && doc.body && splitHeadingOnEnter(doc, sel, doc.body)) {
+            event.preventDefault()
+            commitDomMutation(doc)
+          }
+        }
+      }
+
+      doc.body.addEventListener('input', onInput)
+      doc.body.addEventListener('click', onClick)
+      doc.body.addEventListener('keyup', onSelectionChange)
+      doc.body.addEventListener('mouseup', onSelectionChange)
+      doc.addEventListener('selectionchange', onSelectionChange)
+      doc.addEventListener('keydown', onKeyDown)
+      attachedDoc.current = doc
+
+      frameListenersCleanup.current = () => {
+        doc.body?.removeEventListener('input', onInput)
+        doc.body?.removeEventListener('click', onClick)
+        doc.body?.removeEventListener('keyup', onSelectionChange)
+        doc.body?.removeEventListener('mouseup', onSelectionChange)
+        doc.removeEventListener('selectionchange', onSelectionChange)
+        doc.removeEventListener('keydown', onKeyDown)
+        if (attachedDoc.current === doc) attachedDoc.current = null
+      }
+    },
+    [
+      applyInline,
+      commitDomMutation,
+      emitNow,
+      redo,
+      refreshToolbar,
+      scheduleSync,
+      scheduleUndoSnapshot,
+      undo,
+    ],
+  )
+
+  const syncResourcesInPlace = useCallback(
+    (doc: Document, nextPath: string, nextContent: string, nextArchive: EpubArchive, nextPkg: EpubPackage) => {
+      const built = buildPreviewDocument({
+        xhtml: nextContent,
+        path: nextPath,
+        archive: nextArchive,
+        pkg: nextPkg,
+        editable: { paperTheme: paperThemeRef.current },
+        blobCache: blobCache.current,
+      })
+      patchHead(doc, built.doc)
+
+      if (doc.body) {
+        const base = dirname(nextPath)
+        for (const img of Array.from(doc.body.querySelectorAll('img[data-booksmith-src]'))) {
+          const rawSrc = img.getAttribute('data-booksmith-src')
+          if (!rawSrc) continue
+          const targetPath = resolvePath(base, rawSrc)
+          const bytes = nextArchive.entries.get(targetPath)
+          const mime = mediaTypeOf(targetPath, nextPkg)
+          built.dependencies.set(targetPath, { bytes, mime })
+          if (bytes) {
+            const url = blobCache.current.urlFor(targetPath, bytes, mime)
+            if (img.getAttribute('src') !== url) img.setAttribute('src', url)
+            if (img.hasAttribute('data-missing')) {
+              if (img.hasAttribute('data-booksmith-no-alt')) {
+                img.removeAttribute('alt')
+                img.removeAttribute('data-booksmith-no-alt')
+              } else if (img.hasAttribute('data-booksmith-orig-alt')) {
+                img.setAttribute('alt', img.getAttribute('data-booksmith-orig-alt') ?? '')
+                img.removeAttribute('data-booksmith-orig-alt')
+              }
+              img.removeAttribute('data-missing')
+            }
+          } else if (!img.hasAttribute('data-missing')) {
+            const existingAlt = img.getAttribute('alt')
+            if (existingAlt === null) {
+              img.setAttribute('data-booksmith-no-alt', 'true')
+            } else {
+              img.setAttribute('data-booksmith-orig-alt', existingAlt)
+            }
+            img.setAttribute('alt', `${existingAlt ?? ''}（缺失图片：${rawSrc}）`)
+            img.removeAttribute('src')
+            img.setAttribute('data-missing', 'true')
+          }
+        }
+      }
+
+      loadedDeps.current = built.dependencies
+      blobCache.current.flushObsolete(nextArchive)
+    },
+    [],
+  )
+
+  const loadDocumentIntoFrame = useCallback(
+    (
+      nextPath: string,
+      nextContent: string,
+      nextArchive: EpubArchive,
+      nextPkg: EpubPackage,
+      nextExternalVersion: number,
+    ) => {
+      const iframe = frame.current
+      const doc = iframe?.contentDocument
+      const win = iframe?.contentWindow
+      if (!iframe || !doc?.body || !win || !isDocReady()) return
+
+      const samePath = loadedPath.current === nextPath
+      let preservedScrollRatio = 0
+      if (samePath) {
+        const scrollable = doc.documentElement.scrollHeight - win.innerHeight
+        preservedScrollRatio = scrollable > 0 ? win.scrollY / scrollable : 0
+      }
+
+      const built = buildPreviewDocument({
+        xhtml: nextContent,
+        path: nextPath,
+        archive: nextArchive,
+        pkg: nextPkg,
+        editable: { paperTheme: paperThemeRef.current },
+        blobCache: blobCache.current,
+      })
+
+      readyDocs.current.add(doc)
+      patchDocument(doc, built.doc)
+      blobCache.current.flushObsolete(nextArchive)
+      attachFrameListeners(doc)
+
+      liveSession.current = { path: nextPath, xhtml: nextContent, islands: built.islands }
+      lastSyncedXhtml.current = nextContent
+      loadedPath.current = nextPath
+      loadedExternalVersion.current = nextExternalVersion
+      loadedDeps.current = built.dependencies
+      savedRange.current = null
+      hasPendingEdit.current = false
+
+      if (!samePath) {
+        win.getSelection()?.removeAllRanges()
+        win.scrollTo(0, 0)
+      } else if (preservedScrollRatio > 0) {
+        const nextScrollable = doc.documentElement.scrollHeight - win.innerHeight
+        if (nextScrollable > 0) win.scrollTo(0, preservedScrollRatio * nextScrollable)
+      }
+
+      undoStack.current = [doc.body.innerHTML]
+      undoIndex.current = 0
+      updateUndoFlags()
+      refreshToolbar()
+      setContext(null)
+      setPopover(null)
+    },
+    [attachFrameListeners, isDocReady, refreshToolbar, updateUndoFlags],
+  )
+
+  const handleFrameLoad = useCallback(() => {
+    const doc = frame.current?.contentDocument
+    if (doc) readyDocs.current.add(doc)
+    const cur = latest.current
+    const wellFormed = checkXmlWellFormed(cur.content, browserXmlParser)
+    if (!wellFormed.ok) {
+      setXmlError(wellFormed.message)
+      return
+    }
+    loadDocumentIntoFrame(cur.path, cur.content, cur.archive, cur.pkg, cur.externalVersion)
+  }, [loadDocumentIntoFrame])
+
   useEffect(() => {
-    const isSameFileAndSelfSync =
+    paperThemeRef.current = paperTheme
+    const doc = frame.current?.contentDocument
+    if (!doc?.head || !isDocReady()) return
+    const style = doc.head.querySelector('style[data-booksmith-editor-style="true"]')
+    if (style) style.textContent = buildEditorStyleCss(paperTheme)
+  }, [paperTheme, isDocReady])
+
+  useEffect(() => {
+    latest.current = { path, content, archive, pkg, externalVersion }
+
+    const isSameSession =
+      loadedPath.current === path &&
       liveSession.current.path === path &&
       content === lastSyncedXhtml.current &&
-      loadedKey.current === `${path}::${paperTheme}::${externalVersion}` &&
-      loadedArchive.current === archive &&
-      loadedPkg.current === pkg
+      loadedExternalVersion.current === externalVersion
 
-    if (isSameFileAndSelfSync) return
+    if (isSameSession) {
+      if (!previewResourcesChanged(loadedDeps.current, archive, pkg)) return
+      const doc = frame.current?.contentDocument
+      if (doc && isDocReady()) {
+        syncResourcesInPlace(doc, path, content, archive, pkg)
+      }
+      return
+    }
 
-    // Flush any pending edits before loading a new document or rebuilding the preview frame.
+    // Flush any pending edits before loading a new document or external reset.
     if (hasPendingEdit.current) {
       emitNow()
     }
     hasPendingEdit.current = false
     clearTimers()
 
-    const win = frame.current?.contentWindow
-    if (win && liveSession.current.path === path) {
-      const scrollable = win.document.documentElement.scrollHeight - win.innerHeight
-      scrollRatio.current = scrollable > 0 ? win.scrollY / scrollable : 0
-    } else {
-      scrollRatio.current = 0
-    }
-
     const wellFormed = checkXmlWellFormed(content, browserXmlParser)
     if (!wellFormed.ok) {
+      frameListenersCleanup.current?.()
+      loadedPath.current = null
       setXmlError(wellFormed.message)
-      setSrcDoc('')
       setContext(null)
       setPopover(null)
       return
     }
 
-    const next = buildPreview({
-      xhtml: content,
-      path,
-      archive,
-      pkg,
-      editable: { paperTheme },
-    })
+    if (xmlError !== null) {
+      setXmlError(null)
+      return
+    }
 
-    revokePreview.current?.()
-    revokePreview.current = next.revoke
-    liveSession.current = { path, xhtml: content, islands: next.islands }
-    lastSyncedXhtml.current = content
-    loadedKey.current = `${path}::${paperTheme}::${externalVersion}`
-    loadedArchive.current = archive
-    loadedPkg.current = pkg
-    savedRange.current = null
-    setXmlError(null)
-    setContext(null)
-    setPopover(null)
-    setSrcDoc(next.html)
-  }, [path, content, archive, pkg, paperTheme, externalVersion, clearTimers, emitNow])
+    loadDocumentIntoFrame(path, content, archive, pkg, externalVersion)
+  }, [
+    path,
+    content,
+    archive,
+    pkg,
+    externalVersion,
+    xmlError,
+    clearTimers,
+    emitNow,
+    isDocReady,
+    loadDocumentIntoFrame,
+    syncResourcesInPlace,
+  ])
 
   useEffect(() => {
     return () => {
       if (syncTimer.current !== null) emitNow()
       clearTimers()
-      revokePreview.current?.()
-      for (const url of insertedBlobUrls.current) URL.revokeObjectURL(url)
+      frameListenersCleanup.current?.()
+      loadedPath.current = null
+      blobCache.current.dispose()
     }
   }, [clearTimers, emitNow])
-
-  const frameListenersCleanup = useRef<(() => void) | null>(null)
-
-  const handleFrameLoad = useCallback(() => {
-    frameListenersCleanup.current?.()
-    const doc = frame.current?.contentDocument
-    const win = frame.current?.contentWindow
-    if (!doc?.body || !win) return
-
-    const scrollable = doc.documentElement.scrollHeight - win.innerHeight
-    if (scrollable > 0 && scrollRatio.current > 0) {
-      win.scrollTo(0, scrollRatio.current * scrollable)
-    }
-
-    hasPendingEdit.current = false
-    undoStack.current = [doc.body.innerHTML]
-    undoIndex.current = 0
-    updateUndoFlags()
-    refreshToolbar()
-
-    const onInput = () => {
-      hasPendingEdit.current = true
-      scheduleUndoSnapshot()
-      scheduleSync()
-      refreshToolbar()
-    }
-
-    const onSelectionChange = () => {
-      refreshToolbar()
-    }
-
-    const onClick = (event: MouseEvent) => {
-      const target = event.target as Node | null
-      if (!target || !doc.body) return
-      clearSelectionMarkers(doc)
-
-      const island = findIslandAncestor(target, doc.body)
-      if (island) {
-        event.preventDefault()
-        island.setAttribute('data-booksmith-selected', 'true')
-        setContext({ kind: 'island', tag: island.tagName.toLowerCase(), el: island })
-        setPopover(null)
-        return
-      }
-
-      const targetEl = target.nodeType === 1 ? (target as Element) : target.parentElement
-      if (targetEl && targetEl.tagName.toLowerCase() === 'img') {
-        const img = targetEl as HTMLImageElement
-        img.setAttribute('data-booksmith-selected', 'true')
-        const rawSrc = img.getAttribute('data-booksmith-src') ?? img.getAttribute('src') ?? ''
-        const rawAlt = img.hasAttribute('data-booksmith-no-alt')
-          ? ''
-          : (img.getAttribute('data-booksmith-orig-alt') ?? img.getAttribute('alt') ?? '')
-        setImageAltDraft(rawAlt)
-        setContext({ kind: 'image', src: rawSrc, alt: rawAlt, el: img })
-        setPopover(null)
-        return
-      }
-
-      const anchor = findAncestor(target, doc.body, (el) => el.tagName.toLowerCase() === 'a')
-      if (anchor) {
-        event.preventDefault()
-        anchor.setAttribute('data-booksmith-selected', 'true')
-        setContext({ kind: 'link', href: anchor.getAttribute('href') ?? '', el: anchor })
-        setPopover(null)
-        return
-      }
-
-      setContext(null)
-    }
-
-    const onKeyDown = (event: KeyboardEvent) => {
-      const modifier = event.metaKey || event.ctrlKey
-      if (event.ctrlKey && event.key === 'Tab') {
-        event.preventDefault()
-        emitNow()
-        onShortcutRef.current?.(event.shiftKey ? 'prev-tab' : 'next-tab')
-        return
-      }
-      if (modifier) {
-        const key = event.key.toLowerCase()
-        if (key === 's' && !event.shiftKey) {
-          event.preventDefault()
-          emitNow()
-          onShortcutRef.current?.('save')
-          return
-        }
-        if (key === 'w' && !event.shiftKey) {
-          event.preventDefault()
-          emitNow()
-          onShortcutRef.current?.('close-tab')
-          return
-        }
-        if (key === 'f' && event.shiftKey) {
-          event.preventDefault()
-          onShortcutRef.current?.('search')
-          return
-        }
-        if (key === 'b' && !event.shiftKey) {
-          event.preventDefault()
-          applyInline('strong')
-          return
-        }
-        if (key === 'i' && !event.shiftKey) {
-          event.preventDefault()
-          applyInline('em')
-          return
-        }
-        if (key === 'z') {
-          event.preventDefault()
-          if (event.shiftKey) redo()
-          else undo()
-          return
-        }
-        if (key === 'y' && event.ctrlKey && !event.metaKey) {
-          event.preventDefault()
-          redo()
-          return
-        }
-      }
-
-      if (event.key === 'Enter' && !event.shiftKey) {
-        const sel = doc.defaultView?.getSelection()
-        if (sel && doc.body && splitHeadingOnEnter(doc, sel, doc.body)) {
-          event.preventDefault()
-          commitDomMutation(doc)
-        }
-      }
-    }
-
-    doc.body.addEventListener('input', onInput)
-    doc.body.addEventListener('click', onClick)
-    doc.body.addEventListener('keyup', onSelectionChange)
-    doc.body.addEventListener('mouseup', onSelectionChange)
-    doc.addEventListener('selectionchange', onSelectionChange)
-    doc.addEventListener('keydown', onKeyDown)
-
-    frameListenersCleanup.current = () => {
-      doc.body?.removeEventListener('input', onInput)
-      doc.body?.removeEventListener('click', onClick)
-      doc.body?.removeEventListener('keyup', onSelectionChange)
-      doc.body?.removeEventListener('mouseup', onSelectionChange)
-      doc.removeEventListener('selectionchange', onSelectionChange)
-      doc.removeEventListener('keydown', onKeyDown)
-    }
-  }, [
-    applyInline,
-    commitDomMutation,
-    emitNow,
-    redo,
-    refreshToolbar,
-    scheduleSync,
-    scheduleUndoSnapshot,
-    undo,
-    updateUndoFlags,
-  ])
-
-  useEffect(() => {
-    return () => frameListenersCleanup.current?.()
-  }, [])
 
   const bookImages = useMemo(() => {
     const items: Array<{ path: string; relativeHref: string }> = []
@@ -672,10 +812,9 @@ export function WysiwygPane({
     if (!doc?.body) return
     const bytes = archive.entries.get(targetPath)
     if (!bytes) return
-    const copy = new Uint8Array(bytes.length)
-    copy.set(bytes)
-    const blobUrl = URL.createObjectURL(new Blob([copy.buffer], { type: mediaTypeOf(targetPath, pkg) }))
-    insertedBlobUrls.current.push(blobUrl)
+    const mime = mediaTypeOf(targetPath, pkg)
+    const blobUrl = blobCache.current.urlFor(targetPath, bytes, mime)
+    loadedDeps.current.set(targetPath, { bytes, mime })
 
     const sel = restoreRange(doc)
     if (!sel || sel.rangeCount === 0) return
@@ -1005,18 +1144,14 @@ export function WysiwygPane({
       ) : null}
 
       <div className="wysiwyg-stage">
-        {!srcDoc ? (
-          <div className="preview-skeleton" aria-busy="true" />
-        ) : (
-          <iframe
-            ref={frame}
-            className="wysiwyg-frame"
-            title="可视化编辑器"
-            sandbox="allow-same-origin"
-            srcDoc={srcDoc}
-            onLoad={handleFrameLoad}
-          />
-        )}
+        <iframe
+          ref={frame}
+          className="wysiwyg-frame"
+          title="可视化编辑器"
+          sandbox="allow-same-origin"
+          srcDoc={EMPTY_IFRAME_DOC}
+          onLoad={handleFrameLoad}
+        />
       </div>
     </div>
   )
