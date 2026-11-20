@@ -16,6 +16,7 @@ ADR: <class>/<record>.md
 ADR: <other-class>/<other-record>.md
 Depends on: <class>/<prerequisite-record>.md
 Constrained by: ../implemented/<class>/<constraint-record>.md
+Archives: ../implemented/<class>/<retired-record>.md
 
 ## Scope
 ## Not in scope
@@ -56,6 +57,14 @@ Both `Depends on:` and `Constrained by:` double as execution order gates: while 
 referenced record still sits under `proposed/`, this plan is blocked behind it; once
 `mm-land` promotes that record and rewrites the link to `../implemented/...`, this
 plan becomes ready.
+
+`Archives:` (optional, repeatable) lists existing `implemented/` record(s)
+(`../implemented/<class>/<record>.md`) that this delivery retires or supersedes and
+that satisfy the archiving criteria in `.agents/ADR/AGENTS.md` (no load-bearing
+constraints remain, yet historical value warrants keeping a frozen snapshot). Unlike
+`Depends on:` and `Constrained by:`, `Archives:` is **not** an execution gate: listed
+records stay in `implemented/` while the plan runs and are moved to `archived/` by
+`mm-land` when the delivery ships. Never list a `proposed/` record in `Archives:`.
 
 ## Scope / Not in scope
 
@@ -128,19 +137,19 @@ An irreversible step deserves to be called irreversible.
 
 ## Stop points
 
-Two kinds of stop points, each bound explicitly to a step number:
+Plans are meant to run straight through to completion without mid-plan check-ins.
+If a milestone genuinely requires human sign-off before later work builds on it,
+split it into separate plans linked with `Depends on:` rather than pausing halfway.
 
-- **Hard gate (mandatory pause)**: the executor must stop after the named step and
-  wait for explicit user confirmation before starting the next step.
-- **Conditional gate (trigger pause)**: the two or three things most likely to go
-  wrong, and the exact point at which the executor must stop and ask rather than
-  inventing a workaround.
-
-Format them as scannable, step-anchored items:
+Use `## Stop points` only for concrete, step-anchored trigger conditions — the two
+or three things most likely to go wrong where the executor must stop and ask rather
+than inventing a workaround, plus any irreversible external action (production
+migration, package publish, outbound message) that requires explicit confirmation
+before running:
 
 ```markdown
-- **Hard gate (After Step 2)**: confirm `Session` fields and `focusedSec` semantics before continuing.
-- **Conditional gate (After Step 5)**: if the notification prompt fails in a real browser, stop and ask whether to move it into Settings rather than adding retries.
+- **Step 3**: if the schema migration hits existing rows with null `workspace_id`, stop and ask for the backfill rule rather than defaulting silently.
+- **Step 5**: if the notification prompt fails in a real browser, stop and ask whether to move it into Settings rather than adding retries.
 ```
 
 ## When the plan changes

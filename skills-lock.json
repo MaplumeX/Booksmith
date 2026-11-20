@@ -3,35 +3,35 @@
   "skills": {
     "mm-implement": {
       "source": "MaplumeX/M-METHOD",
-      "commit": "1c4c810104cfce1c8d715d7e7e078db53e92a5ce",
+      "commit": "0b860280f4056edf73480739c801d864475d1bd1",
       "sourceType": "github",
       "skillPath": "skills/mm-implement/SKILL.md",
-      "computedHash": "6bc24ad27cfea19ca0a2ade7447897a534b7241aa935599156c34f70be8dc7e0"
+      "computedHash": "aa1f469f497b41aff841898ca3cc335db99da51d6523320d338341948be05ab7"
     },
     "mm-land": {
       "source": "MaplumeX/M-METHOD",
-      "commit": "1c4c810104cfce1c8d715d7e7e078db53e92a5ce",
+      "commit": "0b860280f4056edf73480739c801d864475d1bd1",
       "sourceType": "github",
       "skillPath": "skills/mm-land/SKILL.md",
-      "computedHash": "e4dd7fafdd38894b9dc4614a9a253d48b9f9b8a4a406b44bdeb53e14c84f8254"
+      "computedHash": "1b7cd5fff7677fa4b7e6d91b1fbace5a9c422fde4448bbe75fe3c46a35e00d0c"
     },
     "mm-plan": {
       "source": "MaplumeX/M-METHOD",
-      "commit": "1c4c810104cfce1c8d715d7e7e078db53e92a5ce",
+      "commit": "0b860280f4056edf73480739c801d864475d1bd1",
       "sourceType": "github",
       "skillPath": "skills/mm-plan/SKILL.md",
-      "computedHash": "7541b788fec99a45603c85abff42f29f3079b6d50821c24b783287ed56122b69"
+      "computedHash": "cdbea57e4e0c1644abdf1b87883832d9ebd1445bf670f21b583874e8911f2880"
     },
     "mm-setup": {
       "source": "MaplumeX/M-METHOD",
-      "commit": "1c4c810104cfce1c8d715d7e7e078db53e92a5ce",
+      "commit": "0b860280f4056edf73480739c801d864475d1bd1",
       "sourceType": "github",
       "skillPath": "skills/mm-setup/SKILL.md",
-      "computedHash": "1980320d6a7eaa2ef3d793afa25760bdae67b3d56039eaa90a69a3a945184b0d"
+      "computedHash": "a7e3fcfbf6a443121b524de63d197f6b710a1e09dd143b39422f93541f95dfb4"
     },
     "mm-ui": {
       "source": "MaplumeX/M-METHOD",
-      "commit": "1c4c810104cfce1c8d715d7e7e078db53e92a5ce",
+      "commit": "0b860280f4056edf73480739c801d864475d1bd1",
       "sourceType": "github",
       "skillPath": "skills/mm-ui/SKILL.md",
       "computedHash": "0e6e22e4a121efc048264a6bbe22843d62278d2280183998492fad5eaf6fdd49"
