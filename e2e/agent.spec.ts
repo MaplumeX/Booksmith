@@ -105,7 +105,16 @@ test.beforeAll(async () => {
             object: 'chat.completion.chunk',
             created: 1,
             model: 'mock',
-            choices: [{ index: 0, delta: { role: 'assistant', content: '已定位并修正未保存草稿中的错字。' }, finish_reason: 'stop' }],
+            choices: [
+              {
+                index: 0,
+                delta: {
+                  role: 'assistant',
+                  content: '已定位并修正 **未保存草稿** 中的错字（`ch001.xhtml`）。',
+                },
+                finish_reason: 'stop',
+              },
+            ],
           },
         ])
         return
@@ -195,14 +204,16 @@ test('multi-profile setup, streaming proofreading diff apply/undo, structural cr
   await page.goto(`/books/${bookId}`)
   await page.waitForSelector('.cm-content')
 
-  // Open 6th sidebar tab: 助手
-  await page.getByRole('tab', { name: '助手' }).click()
+  // Open dedicated Agent sidebar via topbar toggle button (no 6th tab)
+  await expect(page.getByRole('tab', { name: '助手' })).toHaveCount(0)
+  await page.getByRole('button', { name: '助手' }).click()
   await expect(page.getByText('配置模型以启用助手')).toBeVisible()
 
   // Configure first preset + test connection
   await page.getByRole('button', { name: '配置模型预设' }).click()
   const dialog = page.getByRole('dialog', { name: '模型设置' })
   await expect(dialog).toBeVisible()
+  await expect(dialog.getByRole('radio', { name: /OpenAI 兼容/ })).toHaveAttribute('aria-checked', 'true')
 
   await dialog.getByLabel('预设名称').fill('快速校对')
   await dialog.getByLabel('Base URL').fill(`${mockUrl}/v1`)
@@ -238,13 +249,19 @@ test('multi-profile setup, streaming proofreading diff apply/undo, structural cr
   await page.keyboard.insertText(docWithTypo)
   await expect(page.locator('.cm-content')).toContainText('未保存测试错字')
 
-  // Turn 1: pure text proofreading proposal on unsaved edit
+  // Verify context chip can be dismissed and re-attached cleanly
+  await page.getByRole('button', { name: '移除当前文件上下文' }).click()
+  await page.getByRole('button', { name: '重新挂载当前文件上下文' }).click()
+  await expect(page.locator('.agent-context-chip')).toContainText('ch001.xhtml')
+
+  // Turn 1: pure text proofreading proposal on unsaved edit (with Markdown rendering check)
   mode = 'proofread'
   turnStep = 0
   await page.getByLabel('向助手输入指令').fill('帮我修正未保存的错字')
   await page.getByRole('button', { name: '发送' }).click()
 
-  await expect(page.getByText('已定位并修正未保存草稿中的错字。')).toBeVisible()
+  await expect(page.locator('.agent-bubble.is-assistant .agent-md strong')).toContainText('未保存草稿')
+  await expect(page.locator('.agent-bubble.is-assistant .agent-md code')).toContainText('ch001.xhtml')
   await expect(page.getByText('纯文本 · 可勾选')).toBeVisible()
   await expect(page.locator('.diff-inline-added')).toContainText('已校对正确文本')
 
@@ -256,10 +273,11 @@ test('multi-profile setup, streaming proofreading diff apply/undo, structural cr
   await page.getByRole('button', { name: '撤销本次应用' }).click()
   await expect(page.locator('.cm-content')).toContainText('未保存测试错字')
 
-  // Turn 2: switch model dropdown and run structural create_chapter proposal
+  // Turn 2: switch model via Radix menu and run structural create_chapter proposal
   mode = 'chapter'
   turnStep = 0
-  await page.getByLabel('选择模型预设').selectOption({ label: '结构重构（mock-pro）' })
+  await page.getByRole('button', { name: '选择模型预设' }).click()
+  await page.getByRole('menuitemradio', { name: /结构重构/ }).click()
   await page.getByLabel('向助手输入指令').fill('新建后记章节并加入目录')
   await page.getByRole('button', { name: '发送' }).click()
 
@@ -269,10 +287,19 @@ test('multi-profile setup, streaming proofreading diff apply/undo, structural cr
   await page.getByRole('button', { name: '应用全部变更' }).click()
   await expect(page.getByRole('button', { name: 'afterword.xhtml', exact: true })).toBeVisible()
 
-  // Reload page and confirm thread history & applied status persisted in Postgres
+  // Rename thread inside Radix history Popover and verify persistence across reload
+  await page.getByRole('button', { name: '切换历史对话' }).click()
+  await page.locator('.agent-history-row-actions button').first().click()
+  await page.getByLabel('输入新对话标题').fill('第一章校对记录')
+  await page.getByRole('button', { name: '保存标题' }).click()
+  await expect(page.locator('.agent-thread-trigger-title')).toHaveText('第一章校对记录')
+  await page.keyboard.press('Escape')
+
+  // Reload page and confirm thread title, history & applied status persisted in Postgres
   await page.reload()
   await page.waitForSelector('.cm-content')
-  await page.getByRole('tab', { name: '助手' }).click()
+  await page.getByRole('button', { name: '助手' }).click()
+  await expect(page.locator('.agent-thread-trigger-title')).toHaveText('第一章校对记录')
   await expect(page.getByText('已生成「后记」章节并同步加入目录。')).toBeVisible()
   await expect(page.getByText('已应用变更到工作区').first()).toBeVisible()
 
@@ -284,4 +311,8 @@ test('multi-profile setup, streaming proofreading diff apply/undo, structural cr
   await page.waitForTimeout(200)
   const mobileOverflow = await page.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth)
   expect(mobileOverflow).toBe(0)
+
+  // Closing the Agent sidebar at 400px closes the drawer cleanly
+  await page.getByRole('button', { name: '关闭助手栏' }).click()
+  await expect(page.locator('.sidebar')).toBeHidden()
 })

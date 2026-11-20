@@ -3,6 +3,8 @@ import {
   AlertTriangle,
   Check,
   CheckCircle2,
+  Eye,
+  EyeOff,
   Loader2,
   Plus,
   PlugZap,
@@ -119,12 +121,14 @@ export function AgentSettingsDialog({ open, onOpenChange, onChanged }: AgentSett
   const [testResult, setTestResult] = useState<AgentConnectionTestResult | null>(null)
   const [confirmDelete, setConfirmDelete] = useState(false)
   const [deleting, setDeleting] = useState(false)
+  const [showApiKey, setShowApiKey] = useState(false)
 
   const populateForm = useCallback((profile: AgentProfileDto | null, totalCount: number) => {
     setFormError(null)
     setSavedNotice(null)
     setTestResult(null)
     setConfirmDelete(false)
+    setShowApiKey(false)
     if (!profile) {
       setSelectedId(null)
       setForm({ ...EMPTY_FORM, isDefault: totalCount === 0 })
@@ -351,8 +355,13 @@ export function AgentSettingsDialog({ open, onOpenChange, onChanged }: AgentSett
                           </span>
                         ) : null}
                       </span>
-                      <span className="agent-profile-meta" title={`${profile.model} · ${profile.baseUrl}`}>
-                        {profile.model}
+                      <span className="agent-profile-meta-row">
+                        <span className="agent-profile-provider">
+                          {profile.provider === 'anthropic' ? 'Anthropic' : 'OpenAI'}
+                        </span>
+                        <span className="agent-profile-meta" title={`${profile.model} · ${profile.baseUrl}`}>
+                          {profile.model}
+                        </span>
                       </span>
                     </button>
                   </li>
@@ -366,16 +375,19 @@ export function AgentSettingsDialog({ open, onOpenChange, onChanged }: AgentSett
           <div className="agent-template-bar">
             <span className="agent-section-label">快捷模板</span>
             <div className="agent-template-chips">
-              {TEMPLATES.map((tpl) => (
-                <button
-                  key={tpl.id}
-                  type="button"
-                  className="agent-template-chip"
-                  onClick={() => applyTemplate(tpl)}
-                >
-                  {tpl.label}
-                </button>
-              ))}
+              {TEMPLATES.map((tpl) => {
+                const isMatched = form.provider === tpl.provider && form.baseUrl.trim() === tpl.baseUrl
+                return (
+                  <button
+                    key={tpl.id}
+                    type="button"
+                    className={`agent-template-chip${isMatched ? ' on' : ''}`}
+                    onClick={() => applyTemplate(tpl)}
+                  >
+                    {tpl.label}
+                  </button>
+                )
+              })}
             </div>
           </div>
 
@@ -386,65 +398,98 @@ export function AgentSettingsDialog({ open, onOpenChange, onChanged }: AgentSett
               void handleSave()
             }}
           >
+            <label className="panel-field">
+              <span>预设名称</span>
+              <input
+                type="text"
+                value={form.name}
+                placeholder="例如：Claude 校对"
+                onChange={(event) => setForm({ ...form, name: event.target.value })}
+              />
+            </label>
+
+            <div className="panel-field">
+              <span id="agent-provider-label">接口协议</span>
+              <div
+                className="agent-provider-segment"
+                role="radiogroup"
+                aria-labelledby="agent-provider-label"
+              >
+                <button
+                  type="button"
+                  role="radio"
+                  aria-checked={form.provider === 'openai-compatible'}
+                  className={`agent-provider-option${form.provider === 'openai-compatible' ? ' on' : ''}`}
+                  onClick={() => setForm({ ...form, provider: 'openai-compatible' })}
+                >
+                  <span className="agent-provider-option-title">OpenAI 兼容</span>
+                  <span className="agent-provider-option-sub">OpenAI · DeepSeek · Ollama</span>
+                </button>
+                <button
+                  type="button"
+                  role="radio"
+                  aria-checked={form.provider === 'anthropic'}
+                  className={`agent-provider-option${form.provider === 'anthropic' ? ' on' : ''}`}
+                  onClick={() => setForm({ ...form, provider: 'anthropic' })}
+                >
+                  <span className="agent-provider-option-title">Anthropic 原生</span>
+                  <span className="agent-provider-option-sub">Claude Messages API</span>
+                </button>
+              </div>
+            </div>
+
             <div className="agent-form-grid">
               <label className="panel-field">
-                <span>预设名称</span>
+                <span>Base URL</span>
                 <input
-                  type="text"
-                  value={form.name}
-                  placeholder="例如：Claude 校对"
-                  onChange={(event) => setForm({ ...form, name: event.target.value })}
+                  type="url"
+                  value={form.baseUrl}
+                  placeholder="https://api.openai.com/v1"
+                  onChange={(event) => setForm({ ...form, baseUrl: event.target.value })}
                 />
               </label>
 
               <label className="panel-field">
-                <span>接口协议</span>
-                <select
-                  value={form.provider}
-                  onChange={(event) =>
-                    setForm({ ...form, provider: event.target.value as AgentProviderType })
-                  }
-                >
-                  <option value="openai-compatible">OpenAI 兼容（OpenAI / DeepSeek / Ollama 等）</option>
-                  <option value="anthropic">Anthropic 原生（Claude Messages）</option>
-                </select>
+                <span>模型名称</span>
+                <input
+                  type="text"
+                  value={form.model}
+                  placeholder="gpt-4.1 / claude-sonnet-4-20250514"
+                  onChange={(event) => setForm({ ...form, model: event.target.value })}
+                />
               </label>
             </div>
 
             <label className="panel-field">
-              <span>Base URL</span>
-              <input
-                type="url"
-                value={form.baseUrl}
-                placeholder="https://api.openai.com/v1"
-                onChange={(event) => setForm({ ...form, baseUrl: event.target.value })}
-              />
-            </label>
-
-            <label className="panel-field">
-              <span>模型名称</span>
-              <input
-                type="text"
-                value={form.model}
-                placeholder="gpt-4.1 / claude-sonnet-4-20250514"
-                onChange={(event) => setForm({ ...form, model: event.target.value })}
-              />
-            </label>
-
-            <label className="panel-field">
               <span>API Key（本地模型可留空）</span>
-              <input
-                type="password"
-                autoComplete="off"
-                value={form.apiKey}
-                disabled={form.clearApiKey}
-                placeholder={
-                  selectedProfile?.hasApiKey
-                    ? `已保存（末尾 ${selectedProfile.apiKeyLast4 ?? '••••'}），留空则保持不变`
-                    : 'sk-...'
-                }
-                onChange={(event) => setForm({ ...form, apiKey: event.target.value })}
-              />
+              <span className="agent-secret-input-wrap">
+                <input
+                  type={showApiKey ? 'text' : 'password'}
+                  autoComplete="off"
+                  value={form.apiKey}
+                  disabled={form.clearApiKey}
+                  placeholder={
+                    selectedProfile?.hasApiKey
+                      ? `已保存（末尾 ${selectedProfile.apiKeyLast4 ?? '••••'}），留空则保持不变`
+                      : 'sk-...'
+                  }
+                  onChange={(event) => setForm({ ...form, apiKey: event.target.value })}
+                />
+                <button
+                  type="button"
+                  className="agent-secret-toggle"
+                  disabled={form.clearApiKey}
+                  aria-label={showApiKey ? '隐藏 API Key' : '显示 API Key'}
+                  title={showApiKey ? '隐藏 API Key' : '显示 API Key'}
+                  onClick={() => setShowApiKey((v) => !v)}
+                >
+                  {showApiKey ? (
+                    <EyeOff size={14} strokeWidth={1.7} aria-hidden="true" />
+                  ) : (
+                    <Eye size={14} strokeWidth={1.7} aria-hidden="true" />
+                  )}
+                </button>
+              </span>
             </label>
 
             <div className="agent-form-checks">
