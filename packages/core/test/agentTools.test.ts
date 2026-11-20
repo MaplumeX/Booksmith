@@ -259,4 +259,66 @@ describe('AgentWorkspace structural tools (metadata, TOC, create, rename, delete
     expect(proposal.validationIssues).toEqual([])
     expect(proposal.files.find((f) => f.path === target)?.kind).toBe('delete')
   })
+
+  it('supports scan_headings, generate_toc, and incremental edit_toc while keeping MathML intact', () => {
+    const ws = openEmptyWorkspace()
+    const edited = ws.executeTool('edit_file', {
+      path: 'EPUB/text/ch001.xhtml',
+      oldText: '<p>从这里开始写。</p>',
+      newText: '<h2>第一节</h2><p>正文</p><h3>子节</h3>',
+    })
+    expect(edited.ok).toBe(true)
+
+    const scanned = ws.executeTool('scan_headings', { levels: [1, 2] })
+    expect(scanned.ok).toBe(true)
+    expect((scanned.data as { count: number }).count).toBe(2)
+
+    const generated = ws.executeTool('generate_toc', {
+      levels: [1, 2, 3],
+      mode: 'replace',
+      injectMissingIds: true,
+    })
+    expect(generated.ok).toBe(true)
+    const genData = generated.data as { totalCount: number; injectedIdCount: number; brokenAnchors: unknown[] }
+    expect(genData.totalCount).toBe(3)
+    expect(genData.injectedIdCount).toBe(3)
+    expect(genData.brokenAnchors).toEqual([])
+
+    const inserted = ws.executeTool('edit_toc', {
+      action: 'insert',
+      path: [0],
+      position: 'after',
+      label: '补丁章节',
+      href: 'text/ch001.xhtml',
+    })
+    expect(inserted.ok).toBe(true)
+    expect((inserted.data as { totalCount: number }).totalCount).toBe(4)
+
+    const updated = ws.executeTool('edit_toc', {
+      action: 'update',
+      path: [1],
+      label: '补丁章节改名',
+    })
+    expect(updated.ok).toBe(true)
+
+    const removed = ws.executeTool('edit_toc', {
+      action: 'remove',
+      path: [0],
+      keepChildren: true,
+    })
+    expect(removed.ok).toBe(true)
+    expect((removed.data as { totalCount: number }).totalCount).toBe(3)
+
+    // Incremental edit_toc on the real fixture keeps untouched inline MathML intact.
+    const fixtureWs = openFixtureWorkspace()
+    const renameFirst = fixtureWs.executeTool('edit_toc', {
+      action: 'update',
+      path: [0],
+      label: '封面（测试）',
+    })
+    expect(renameFirst.ok).toBe(true)
+    const navAfter = fixtureWs.getText(fixtureWs.getPackage().navPath!)!
+    expect(navAfter).toContain('<math')
+    expect(fixtureWs.buildProposal('p-toc-inc')?.validationIssues).toEqual([])
+  })
 })

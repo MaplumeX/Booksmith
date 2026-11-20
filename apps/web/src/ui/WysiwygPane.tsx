@@ -63,6 +63,7 @@ export interface WysiwygPaneProps {
   archive: EpubArchive
   pkg: EpubPackage
   externalVersion?: number
+  revealFragment?: { path: string; fragment: string; key: number } | null
   flushRef?: React.MutableRefObject<(() => void) | null>
   onChange: (value: string) => void
   onSwitchToCode: () => void
@@ -115,12 +116,31 @@ function clearSelectionMarkers(doc: Document) {
   }
 }
 
+function scrollWysiwygToFragment(doc: Document, win: Window, fragment: string): void {
+  if (!fragment) {
+    win.scrollTo(0, 0)
+    return
+  }
+  let decoded = fragment
+  try {
+    decoded = decodeURIComponent(fragment)
+  } catch {
+    decoded = fragment
+  }
+  const target = doc.getElementById(decoded) ?? doc.getElementsByName(decoded)[0] ?? null
+  if (target && 'scrollIntoView' in target) {
+    const reduced = window.matchMedia?.('(prefers-reduced-motion: reduce)').matches
+    ;(target as Element).scrollIntoView({ behavior: reduced ? 'auto' : 'smooth', block: 'start' })
+  }
+}
+
 export function WysiwygPane({
   path,
   content,
   archive,
   pkg,
   externalVersion = 0,
+  revealFragment,
   flushRef,
   onChange,
   onSwitchToCode,
@@ -147,6 +167,9 @@ export function WysiwygPane({
   const readyDocs = useRef<WeakSet<Document>>(new WeakSet())
   const attachedDoc = useRef<Document | null>(null)
   const savedRange = useRef<Range | null>(null)
+  const revealRef = useRef(revealFragment ?? null)
+  revealRef.current = revealFragment ?? null
+  const appliedRevealKey = useRef<number | null>(null)
 
   const syncTimer = useRef<number | null>(null)
   const undoTimer = useRef<number | null>(null)
@@ -614,7 +637,12 @@ export function WysiwygPane({
       savedRange.current = null
       hasPendingEdit.current = false
 
-      if (!samePath) {
+      const pending = revealRef.current
+      if (pending && pending.path === nextPath && appliedRevealKey.current !== pending.key) {
+        appliedRevealKey.current = pending.key
+        if (!samePath) win.getSelection()?.removeAllRanges()
+        scrollWysiwygToFragment(doc, win, pending.fragment)
+      } else if (!samePath) {
         win.getSelection()?.removeAllRanges()
         win.scrollTo(0, 0)
       } else if (preservedScrollRatio > 0) {
@@ -643,6 +671,16 @@ export function WysiwygPane({
     }
     loadDocumentIntoFrame(cur.path, cur.content, cur.archive, cur.pkg, cur.externalVersion)
   }, [loadDocumentIntoFrame])
+
+  useEffect(() => {
+    if (!revealFragment || revealFragment.path !== path) return
+    if (appliedRevealKey.current === revealFragment.key) return
+    const doc = frame.current?.contentDocument
+    const win = frame.current?.contentWindow
+    if (!doc || !win || !isDocReady() || loadedPath.current !== path) return
+    appliedRevealKey.current = revealFragment.key
+    scrollWysiwygToFragment(doc, win, revealFragment.fragment)
+  }, [revealFragment?.key, revealFragment?.path, revealFragment?.fragment, path, isDocReady])
 
   useEffect(() => {
     paperThemeRef.current = paperTheme
