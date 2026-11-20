@@ -24,6 +24,9 @@ interface CodePaneProps {
   onChange: (value: string) => void
   reveal?: RevealTarget | null
   onNavigate?: (target: NavigateTarget) => void
+  visible?: boolean
+  syncMode?: 'reset' | 'transaction'
+  resetVersion?: number
 }
 
 const LINK_ATTRIBUTE = /(?:href|src|xlink:href)\s*=\s*(?:"([^"]*)"|'([^']*)')/g
@@ -53,7 +56,16 @@ function navigateTarget(view: EditorView, event: MouseEvent, fromPath: string): 
   return null
 }
 
-export function CodePane({ path, content, onChange, reveal, onNavigate }: CodePaneProps) {
+export function CodePane({
+  path,
+  content,
+  onChange,
+  reveal,
+  onNavigate,
+  visible = true,
+  syncMode = 'reset',
+  resetVersion = 0,
+}: CodePaneProps) {
   const host = useRef<HTMLDivElement>(null)
   const view = useRef<EditorView | null>(null)
   /** One state per opened file. The undo stack lives in `EditorState`, so rebuilding on a tab switch
@@ -61,6 +73,7 @@ export function CodePane({ path, content, onChange, reveal, onNavigate }: CodePa
    * See ADR 2026-11-19-editor-state-per-tab. */
   const states = useRef(new Map<string, EditorState>())
   const shownPath = useRef<string | null>(null)
+  const lastResetVersion = useRef(resetVersion)
   const onChangeRef = useRef(onChange)
   const onNavigateRef = useRef(onNavigate)
   const latest = useRef({ path, content })
@@ -132,20 +145,42 @@ export function CodePane({ path, content, onChange, reveal, onNavigate }: CodePa
     // `content` only seeds a file that has never been shown; after that the document owns the text.
   }, [path, makeState])
 
-  // An outside rewrite (book-wide replace, snapshot restore, reference rename) wins over the cached
-  // state. Its undo stack is dropped on purpose: undoing it would write pre-rewrite text back.
+  // An outside rewrite (book-wide replace, snapshot restore, reference rename) resets every cached
+  // state and drops undo history; switching back from WYSIWYG applies a single transaction instead
+  // so one Cmd/Ctrl+Z in code mode reverts the whole visual editing session.
+  // See ADR 2026-11-20-wysiwyg-editing-mode.
   useEffect(() => {
     const instance = view.current
     if (!instance || shownPath.current !== path) return
+
+    if (resetVersion !== lastResetVersion.current) {
+      lastResetVersion.current = resetVersion
+      states.current.clear()
+      const next = makeState(path, content)
+      states.current.set(path, next)
+      instance.setState(next)
+      return
+    }
+
+    if (!visible) return
     if (instance.state.doc.toString() === content) return
+
+    if (syncMode === 'transaction') {
+      instance.dispatch({
+        changes: { from: 0, to: instance.state.doc.length, insert: content },
+      })
+      states.current.set(path, instance.state)
+      return
+    }
+
     const next = makeState(path, content)
     states.current.set(path, next)
     instance.setState(next)
-  }, [content, path, makeState])
+  }, [content, path, visible, syncMode, resetVersion, makeState])
 
   useEffect(() => {
     const instance = view.current
-    if (!instance || !reveal) return
+    if (!instance || !reveal || !visible) return
     const doc = instance.state.doc
     const line = doc.line(Math.min(Math.max(reveal.line, 1), doc.lines))
     const position = Math.min(line.from + Math.max(reveal.column - 1, 0), line.to)
@@ -154,7 +189,7 @@ export function CodePane({ path, content, onChange, reveal, onNavigate }: CodePa
       scrollIntoView: true,
     })
     instance.focus()
-  }, [reveal?.key])
+  }, [reveal?.key, visible])
 
-  return <div className="code-pane" ref={host} data-path={path} />
+  return <div className="code-pane" ref={host} data-path={path} hidden={!visible} />
 }

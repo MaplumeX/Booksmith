@@ -46,8 +46,9 @@
 | `Dialog` | `src/ui/Dialog.tsx` | Radix Dialog；default / wide / 右上角关闭 / 右下角动作 / Escape 与遮罩关闭 |
 | `FileTypeIcon` | `src/ui/FileTypeIcon.tsx` | 文本 / 样式代码 / 图片 / 容器四类统一线宽图标 |
 | `FileTree` | `src/ui/FileTree.tsx` | default / empty（无图片组）/ loading / error / edge（长名截断）/ 接入 `ContextMenu` |
-| `TabBar` | `src/ui/TabBar.tsx` | default / active（胶囊高亮）/ dirty / overflow（隐藏滚动条 + 滚轮与自动滚入可视） |
+| `TabBar` | `src/ui/TabBar.tsx` | default / active（胶囊高亮）/ dirty / overflow（隐藏滚动条 + 滚轮与自动滚入可视）/ 右侧「代码 \| 可视化」模式切换（非页面禁用） |
 | `CodePane` | `src/ui/CodePane.tsx` | default / loading / error（语法错误）/ edge（174KB 单章） |
+| `WysiwygPane` | `src/ui/WysiwygPane.tsx` | default（760px 纸面 + 格式栏）/ empty（空章可聚焦）/ loading（骨架）/ error（非良构 XML 拦截切回代码）/ edge（`<math>` 保护岛、`<a>` 锚点与 `<img>` 浮条、纸面深浅切换） |
 | `PreviewPane` | `src/ui/PreviewPane.tsx` | default / empty / loading（骨架）/ error（带图标警示）/ edge（MathML、缺图） |
 | `MetadataPanel` | `src/ui/MetadataPanel.tsx` | default / dirty / error（字段非法）/ meta 卡片行编辑 / edge（同一 property+refines 重复行） |
 | `TocPanel` | `src/ui/TocPanel.tsx` | default / empty / error（锚点失效）/ 新增表单 / 缩进禁用 / Lucide 行内操作 |
