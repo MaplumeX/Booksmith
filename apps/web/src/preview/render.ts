@@ -20,12 +20,89 @@ const MIME_BY_EXTENSION: Record<string, string> = {
   mp4: 'video/mp4',
 }
 
+/** Sentinel shell loaded once into preview/WYSIWYG iframes so subsequent updates patch in place. */
+export const EMPTY_IFRAME_DOC =
+  '<!DOCTYPE html><html data-booksmith-shell="ready"><head><meta charset="utf-8"></head><body></body></html>'
+
+export interface PreviewResourceSnapshot {
+  bytes: Uint8Array | undefined
+  mime: string
+}
+
 export interface PreviewDocument {
   html: string
   /** Original raw XML substrings for top-level protection islands inside `<body>` (editable mode only). */
   islands: string[]
   /** Releases blob URLs created for images and fonts. */
   revoke: () => void
+}
+
+export interface BuiltPreviewDocument {
+  doc: Document
+  /** Original raw XML substrings for top-level protection islands inside `<body>` (editable mode only). */
+  islands: string[]
+  /** Archive resources consulted while building this document (stylesheets, images, fonts). */
+  dependencies: Map<string, PreviewResourceSnapshot>
+  /** Releases ephemeral blob URLs created when no external `blobCache` was supplied. */
+  revoke: () => void
+}
+
+/**
+ * Caches object URLs keyed by archive path, byte reference, and media type.
+ *
+ * Reusing the same `blob:` URL whenever an asset's `Uint8Array` reference is unchanged
+ * lets the browser keep decoded images and `@font-face` fonts cached across preview updates.
+ */
+export class PreviewBlobCache {
+  private entries = new Map<string, { bytes: Uint8Array; mime: string; url: string }>()
+  private obsolete: string[] = []
+
+  urlFor(path: string, bytes: Uint8Array, mime: string): string {
+    const cached = this.entries.get(path)
+    if (cached && cached.bytes === bytes && cached.mime === mime) {
+      return cached.url
+    }
+    const copy = new Uint8Array(bytes.length)
+    copy.set(bytes)
+    const url = URL.createObjectURL(new Blob([copy.buffer], { type: mime }))
+    if (cached) this.obsolete.push(cached.url)
+    this.entries.set(path, { bytes, mime, url })
+    return url
+  }
+
+  /** Releases replaced URLs (and entries removed from the archive) after the DOM has been patched. */
+  flushObsolete(archive?: EpubArchive): void {
+    if (archive) {
+      for (const [path, entry] of this.entries) {
+        if (!archive.entries.has(path)) {
+          this.obsolete.push(entry.url)
+          this.entries.delete(path)
+        }
+      }
+    }
+    for (const url of this.obsolete) URL.revokeObjectURL(url)
+    this.obsolete = []
+  }
+
+  /** Releases every blob URL owned by this cache. */
+  dispose(): void {
+    for (const entry of this.entries.values()) URL.revokeObjectURL(entry.url)
+    this.entries.clear()
+    this.flushObsolete()
+  }
+}
+
+/** Returns true when any stylesheet, image, or font referenced by a preview changed bytes or MIME type. */
+export function previewResourcesChanged(
+  dependencies: ReadonlyMap<string, PreviewResourceSnapshot>,
+  archive: EpubArchive,
+  pkg: EpubPackage,
+): boolean {
+  for (const [depPath, snapshot] of dependencies) {
+    if (archive.entries.get(depPath) !== snapshot.bytes) return true
+    if (mediaTypeOf(depPath, pkg) !== snapshot.mime) return true
+  }
+  return false
 }
 
 /** Media type implied by the file extension alone, ignoring what the manifest claims. */
@@ -49,7 +126,7 @@ export function mediaTypeOf(path: string, pkg: EpubPackage): string {
  * rather than linked so their own relative `url(...)` references can be rewritten.
  * See ADR 2026-11-19-epub-editor-mvp.
  */
-function buildEditorStyleCss(paperTheme: 'light' | 'dark'): string {
+export function buildEditorStyleCss(paperTheme: 'light' | 'dark'): string {
   const isDark = paperTheme === 'dark'
   const paperBg = isDark ? '#1b222c' : '#ffffff'
   const paperText = isDark ? '#e9edf2' : '#1b222c'
@@ -118,24 +195,34 @@ body p:empty::before {
 `
 }
 
-export function buildPreview(args: {
+export function buildPreviewDocument(args: {
   xhtml: string
   path: string
   archive: EpubArchive
   pkg: EpubPackage
   editable?: { paperTheme?: 'light' | 'dark' }
-}): PreviewDocument {
-  const { xhtml, path, archive, pkg, editable } = args
+  blobCache?: PreviewBlobCache
+}): BuiltPreviewDocument {
+  const { xhtml, path, archive, pkg, editable, blobCache } = args
   const doc = new DOMParser().parseFromString(xhtml, 'text/html')
-  const urls: string[] = []
+  const ephemeralUrls: string[] = []
+  const dependencies = new Map<string, PreviewResourceSnapshot>()
+
+  const recordDependency = (targetPath: string): { bytes: Uint8Array | undefined; mime: string } => {
+    const bytes = archive.entries.get(targetPath)
+    const mime = mediaTypeOf(targetPath, pkg)
+    dependencies.set(targetPath, { bytes, mime })
+    return { bytes, mime }
+  }
 
   const blobFor = (targetPath: string): string | null => {
-    const bytes = archive.entries.get(targetPath)
+    const { bytes, mime } = recordDependency(targetPath)
     if (!bytes) return null
+    if (blobCache) return blobCache.urlFor(targetPath, bytes, mime)
     const copy = new Uint8Array(bytes.length)
     copy.set(bytes)
-    const url = URL.createObjectURL(new Blob([copy.buffer], { type: mediaTypeOf(targetPath, pkg) }))
-    urls.push(url)
+    const url = URL.createObjectURL(new Blob([copy.buffer], { type: mime }))
+    ephemeralUrls.push(url)
     return url
   }
 
@@ -154,7 +241,7 @@ export function buildPreview(args: {
       continue
     }
     const targetPath = resolvePath(dirname(path), href)
-    const bytes = archive.entries.get(targetPath)
+    const { bytes } = recordDependency(targetPath)
     if (!bytes) {
       link.remove()
       continue
@@ -224,13 +311,27 @@ export function buildPreview(args: {
     doc.head?.appendChild(editorStyle)
   }
 
-  const html = `<!DOCTYPE html>${doc.documentElement.outerHTML}`
-
   return {
-    html,
+    doc,
     islands,
+    dependencies,
     revoke: () => {
-      for (const url of urls) URL.revokeObjectURL(url)
+      for (const url of ephemeralUrls) URL.revokeObjectURL(url)
     },
+  }
+}
+
+export function buildPreview(args: {
+  xhtml: string
+  path: string
+  archive: EpubArchive
+  pkg: EpubPackage
+  editable?: { paperTheme?: 'light' | 'dark' }
+}): PreviewDocument {
+  const built = buildPreviewDocument(args)
+  return {
+    html: `<!DOCTYPE html>${built.doc.documentElement.outerHTML}`,
+    islands: built.islands,
+    revoke: built.revoke,
   }
 }
