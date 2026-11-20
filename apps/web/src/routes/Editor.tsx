@@ -85,7 +85,7 @@ import { VersionHistory } from '../ui/VersionHistory'
 import { WysiwygPane, type WysiwygShortcut } from '../ui/WysiwygPane'
 
 type LoadState = { status: 'loading' } | { status: 'error'; message: string } | { status: 'ready' }
-type SidebarTab = 'preview' | 'search' | 'metadata' | 'toc' | 'check' | 'agent'
+type SidebarTab = 'preview' | 'search' | 'metadata' | 'toc' | 'check'
 
 const SIDEBAR_MIN = 400
 const SIDEBAR_MAX = 560
@@ -95,7 +95,6 @@ const SIDEBAR_TABS: Array<[SidebarTab, string]> = [
   ['metadata', '元数据'],
   ['toc', '目录'],
   ['check', '检查'],
-  ['agent', '助手'],
 ]
 
 function messageFor(error: unknown): string {
@@ -206,7 +205,6 @@ const SIDEBAR_TAB_ICONS: Record<SidebarTab, typeof Eye> = {
   metadata: Tags,
   toc: ListTree,
   check: ShieldCheck,
-  agent: Sparkles,
 }
 
 export function Editor({ bookId }: { bookId: string }) {
@@ -217,6 +215,7 @@ export function Editor({ bookId }: { bookId: string }) {
   const [dirty, setDirty] = useState<Set<string>>(new Set())
   const [treeOpen, setTreeOpen] = useState(false)
   const [sideOpen, setSideOpen] = useState(false)
+  const [agentOpen, setAgentOpen] = useState(false)
   const [sidebarTab, setSidebarTab] = useState<SidebarTab>('preview')
   const [sidebarWidth, setSidebarWidth] = useState(440)
   const [reveal, setReveal] = useState<RevealTarget | null>(null)
@@ -997,8 +996,20 @@ export function Editor({ bookId }: { bookId: string }) {
       }
       if (event.key.toLowerCase() === 'f' && event.shiftKey) {
         event.preventDefault()
+        setAgentOpen(false)
         setSidebarTab('search')
         setSideOpen(true)
+      }
+      if (event.key.toLowerCase() === 'l' && event.shiftKey) {
+        event.preventDefault()
+        setAgentOpen((openAgent) => {
+          const next = !openAgent
+          if (next) {
+            setSideOpen(false)
+            setTreeOpen(false)
+          }
+          return next
+        })
       }
     }
     window.addEventListener('keydown', handler)
@@ -1087,6 +1098,7 @@ export function Editor({ bookId }: { bookId: string }) {
       return
     }
     if (action === 'search') {
+      setAgentOpen(false)
       setSidebarTab('search')
       setSideOpen(true)
       return
@@ -1114,7 +1126,7 @@ export function Editor({ bookId }: { bookId: string }) {
   const brokenAnchors = tocPath ? findBrokenAnchors(tocEntries, tocPath, texts.current) : []
   // Not a hook: this sits below the early returns. Linting only runs while the panel is visible.
   const issues =
-    sidebarTab === 'check'
+    !agentOpen && sidebarTab === 'check'
       ? [...serverIssues, ...lintBook(texts.current, book.pkg, book.archive, browserXmlCodec)]
       : []
 
@@ -1184,32 +1196,6 @@ export function Editor({ bookId }: { bookId: string }) {
         />
       )
     }
-    if (sidebarTab === 'agent') {
-      return (
-        <AgentPanel
-          bookId={book.id}
-          bookTitle={book.pkg.metadata.title || '未命名'}
-          bookVersion={book.version}
-          activePath={active}
-          selectionText={selectionText}
-          profiles={agentProfiles}
-          profilesLoading={agentProfilesLoading}
-          undoMessageId={agentUndoMessageId}
-          getOverlay={() => {
-            wysiwygFlushRef.current?.()
-            const current = bookRef.current ?? book
-            return {
-              dirtyTexts: collectDirtyTexts(texts.current, dirtyRef.current, current),
-              deletedPaths: computeDeletedPaths(current),
-            }
-          }}
-          onOpenSettings={() => setAgentSettingsOpen(true)}
-          onReloadBook={() => void reload()}
-          onApplyProposal={handleApplyAgentProposal}
-          onUndoProposal={handleUndoAgentProposal}
-        />
-      )
-    }
     if (!tocPath) {
       return <p className="sidebar-note">这本书没有 nav.xhtml 或 toc.ncx，暂时无法编辑目录。</p>
     }
@@ -1256,8 +1242,21 @@ export function Editor({ bookId }: { bookId: string }) {
     void clearDraft(bookId)
   }
 
+  const toggleAgentSidebar = () => {
+    setAgentOpen((openAgent) => {
+      const next = !openAgent
+      if (next) {
+        setSideOpen(false)
+        setTreeOpen(false)
+      }
+      return next
+    })
+  }
+
   return (
-    <div className={`shell${treeOpen ? ' tree-open' : ''}${sideOpen ? ' side-open' : ''}`}>
+    <div
+      className={`shell${treeOpen ? ' tree-open' : ''}${sideOpen ? ' side-open' : ''}${agentOpen ? ' agent-open' : ''}`}
+    >
       <header className="appbar">
         <Button variant="ghost" aria-label="← 书库" onClick={() => navigate('/')}>
           <ArrowLeft size={14} strokeWidth={1.75} aria-hidden="true" />
@@ -1310,11 +1309,27 @@ export function Editor({ bookId }: { bookId: string }) {
           variant="ghost"
           size="sm"
           className="sidebar-toggle"
-          aria-expanded={sideOpen}
-          onClick={() => setSideOpen((openSide) => !openSide)}
+          aria-expanded={sideOpen && !agentOpen}
+          onClick={() => {
+            setAgentOpen(false)
+            setTreeOpen(false)
+            setSideOpen((openSide) => !openSide)
+          }}
         >
           <PanelRight size={14} strokeWidth={1.65} aria-hidden="true" />
           <span>预览</span>
+        </Button>
+        <Button
+          variant="ghost"
+          size="sm"
+          className={`appbar-agent-toggle${agentOpen ? ' is-active' : ''}`}
+          aria-label="助手"
+          aria-pressed={agentOpen}
+          title="切换 AI 助手（Ctrl/Cmd+Shift+L）"
+          onClick={toggleAgentSidebar}
+        >
+          <Sparkles size={14} strokeWidth={1.7} aria-hidden="true" />
+          <span className="appbar-agent-label">助手</span>
         </Button>
         <span className="appbar-sep appbar-download" aria-hidden="true" />
         <a
@@ -1465,30 +1480,63 @@ export function Editor({ bookId }: { bookId: string }) {
           className="splitter"
           role="separator"
           aria-orientation="vertical"
-          aria-label="调整预览宽度"
+          aria-label={agentOpen ? '调整助手栏宽度' : '调整预览宽度'}
           onPointerDown={startResize}
         />
 
-        <aside className="sidebar" style={{ width: sidebarWidth }} aria-label="预览与结构">
-          <div className="sidebar-tabs" role="tablist">
-            {SIDEBAR_TABS.map(([key, label]) => {
-              const Icon = SIDEBAR_TAB_ICONS[key]
-              return (
-                <button
-                  key={key}
-                  type="button"
-                  role="tab"
-                  aria-selected={sidebarTab === key}
-                  className={`sidebar-tab${sidebarTab === key ? ' on' : ''}`}
-                  onClick={() => setSidebarTab(key)}
-                >
-                  <Icon size={13} strokeWidth={1.7} aria-hidden="true" />
-                  <span>{label}</span>
-                </button>
-              )
-            })}
-          </div>
-          <div className="sidebar-body">{sidebarBody()}</div>
+        {/* Dedicated Agent sidebar is mutually exclusive with the 5-tab utility sidebar across viewports. See ADR 2026-11-20-agent-sidebar-chat-ui. */}
+        <aside
+          className={`sidebar${agentOpen ? ' is-agent' : ''}`}
+          style={{ width: sidebarWidth }}
+          aria-label={agentOpen ? 'EPUB 编辑助手' : '预览与结构'}
+        >
+          {agentOpen ? (
+            <AgentPanel
+              bookId={book.id}
+              bookTitle={book.pkg.metadata.title || '未命名'}
+              bookVersion={book.version}
+              activePath={active}
+              selectionText={selectionText}
+              profiles={agentProfiles}
+              profilesLoading={agentProfilesLoading}
+              undoMessageId={agentUndoMessageId}
+              getOverlay={() => {
+                wysiwygFlushRef.current?.()
+                const current = bookRef.current ?? book
+                return {
+                  dirtyTexts: collectDirtyTexts(texts.current, dirtyRef.current, current),
+                  deletedPaths: computeDeletedPaths(current),
+                }
+              }}
+              onOpenSettings={() => setAgentSettingsOpen(true)}
+              onClose={() => setAgentOpen(false)}
+              onReloadBook={() => void reload()}
+              onApplyProposal={handleApplyAgentProposal}
+              onUndoProposal={handleUndoAgentProposal}
+            />
+          ) : (
+            <>
+              <div className="sidebar-tabs" role="tablist">
+                {SIDEBAR_TABS.map(([key, label]) => {
+                  const Icon = SIDEBAR_TAB_ICONS[key]
+                  return (
+                    <button
+                      key={key}
+                      type="button"
+                      role="tab"
+                      aria-selected={sidebarTab === key}
+                      className={`sidebar-tab${sidebarTab === key ? ' on' : ''}`}
+                      onClick={() => setSidebarTab(key)}
+                    >
+                      <Icon size={13} strokeWidth={1.7} aria-hidden="true" />
+                      <span>{label}</span>
+                    </button>
+                  )
+                })}
+              </div>
+              <div className="sidebar-body">{sidebarBody()}</div>
+            </>
+          )}
         </aside>
       </div>
 

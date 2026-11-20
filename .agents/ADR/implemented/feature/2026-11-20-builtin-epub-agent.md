@@ -42,7 +42,7 @@ Booksmith 的核心使用场景是在浏览器三栏工作台中对整本 EPUB�
 
 ### Workbench placement & thread persistence
 
-- **右侧栏第 6 Tab「助手」**：沿用三栏结构（右侧栏 `400–560px`、`<1024px` 抽屉、编辑区自适应且可视化纸面维持 `max-width: 760px`），新增 `AgentPanel`、`AgentProposalCard` 与 `AgentSettingsDialog`，全部消费 `apps/web/src/styles/tokens.css` 语义变量并登记至 `DESIGN.md`。对话输入框自动附带可移除的当前打开文件与 CodeMirror 选区上下文芯片。
+- **右侧栏停靠与面板形态**：首版作为右侧栏第 6 Tab「助手」交付；后续已由 [the dedicated Agent sidebar chat UI](../design/2026-11-20-agent-sidebar-chat-ui.md) 部分替代，抽离为顶栏一键开关的独立可折叠右侧 Agent 侧边栏（全屏宽与 5-Tab 预览/结构栏互斥，并升级为 IM 左右气泡对话流、Markdown 渲染、Radix Popover 历史会话管理与底部一体化输入卡）。
 - **按书多会话持久化**：Postgres 新增 `agent_threads` 与 `agent_messages` 两张增量表（外键级联删除，`agent_threads.profile_id` 在删预设时 `ON DELETE SET NULL` 保留历史会话），支持每本书新建、切换、删除对话，保留工具步骤摘要与提案状态（`pending` / `applied` / `dismissed`），调用模型时通过 `trimHistory` 对长历史施加 24,000 字符滑窗裁剪。
 
 ## Alternatives considered

@@ -56,7 +56,11 @@ function compactDiff(lines: LineDiff[], showAll: boolean): { rows: RenderRow[]; 
 
   const keep = new Set<number>()
   for (const idx of changedIndices) {
-    for (let cursor = Math.max(0, idx - CONTEXT_RADIUS); cursor <= Math.min(lines.length - 1, idx + CONTEXT_RADIUS); cursor += 1) {
+    for (
+      let cursor = Math.max(0, idx - CONTEXT_RADIUS);
+      cursor <= Math.min(lines.length - 1, idx + CONTEXT_RADIUS);
+      cursor += 1
+    ) {
       keep.add(cursor)
     }
   }
@@ -83,15 +87,23 @@ function compactDiff(lines: LineDiff[], showAll: boolean): { rows: RenderRow[]; 
   return { rows, truncated }
 }
 
-function FileDiffPreview({ file }: { file: AgentProposalFile }) {
-  const [showAll, setShowAll] = useState(false)
+function countDiffStats(lines: LineDiff[]): { added: number; removed: number } {
+  let added = 0
+  let removed = 0
+  for (const line of lines) {
+    if (line.kind === 'added') added += 1
+    else if (line.kind === 'removed') removed += 1
+    else if (line.kind === 'changed') {
+      added += 1
+      removed += 1
+    }
+  }
+  return { added, removed }
+}
 
-  const computed = useMemo(() => {
-    const before = file.beforeText ?? ''
-    const after = file.afterText ?? ''
-    const lines = diffLines(before, after)
-    return compactDiff(lines, showAll)
-  }, [file.beforeText, file.afterText, showAll])
+function FileDiffPreview({ file, lines }: { file: AgentProposalFile; lines: LineDiff[] }) {
+  const [showAll, setShowAll] = useState(false)
+  const computed = useMemo(() => compactDiff(lines, showAll), [lines, showAll])
 
   if (file.kind === 'rename' && file.beforeText === file.afterText) {
     return (
@@ -174,6 +186,27 @@ export function AgentProposalCard({
     proposal.files.length === 1 ? new Set([proposal.files[0]!.path]) : new Set(),
   )
 
+  const fileDiffs = useMemo(
+    () =>
+      proposal.files.map((file) => {
+        const lines = diffLines(file.beforeText ?? '', file.afterText ?? '')
+        return { file, lines, stats: countDiffStats(lines) }
+      }),
+    [proposal.files],
+  )
+
+  const totalStats = useMemo(
+    () =>
+      fileDiffs.reduce(
+        (acc, item) => ({
+          added: acc.added + item.stats.added,
+          removed: acc.removed + item.stats.removed,
+        }),
+        { added: 0, removed: 0 },
+      ),
+    [fileDiffs],
+  )
+
   const hasIssues = proposal.validationIssues.length > 0
   const selectedCount = proposal.isStructural ? proposal.files.length : selected.size
 
@@ -227,8 +260,14 @@ export function AgentProposalCard({
     <section className="agent-proposal-card" aria-label="变更提案">
       <header className="agent-proposal-head">
         <div className="agent-proposal-title">
-          <FileDiff size={14} strokeWidth={1.75} aria-hidden="true" />
+          <FileDiff size={13} strokeWidth={1.75} aria-hidden="true" />
           <span>变更提案 · {proposal.files.length} 个文件</span>
+          {totalStats.added > 0 || totalStats.removed > 0 ? (
+            <span className="agent-diff-stats" aria-label={`新增 ${totalStats.added} 行，删除 ${totalStats.removed} 行`}>
+              {totalStats.added > 0 ? <span className="is-add">+{totalStats.added}</span> : null}
+              {totalStats.removed > 0 ? <span className="is-del">-{totalStats.removed}</span> : null}
+            </span>
+          ) : null}
         </div>
         <span className={`agent-proposal-mode${proposal.isStructural ? ' is-structural' : ''}`}>
           {proposal.isStructural ? '结构变更 · 整批应用' : '纯文本 · 可勾选'}
@@ -250,7 +289,7 @@ export function AgentProposalCard({
       ) : null}
 
       <ul className="agent-proposal-files">
-        {proposal.files.map((file) => {
+        {fileDiffs.map(({ file, lines, stats }) => {
           const isOpen = expanded.has(file.path)
           const isChecked = proposal.isStructural || selected.has(file.path)
           const label =
@@ -283,6 +322,12 @@ export function AgentProposalCard({
                   <span className="agent-proposal-path" title={file.path}>
                     {label}
                   </span>
+                  {stats.added > 0 || stats.removed > 0 ? (
+                    <span className="agent-diff-stats">
+                      {stats.added > 0 ? <span className="is-add">+{stats.added}</span> : null}
+                      {stats.removed > 0 ? <span className="is-del">-{stats.removed}</span> : null}
+                    </span>
+                  ) : null}
                 </button>
               </div>
 
@@ -299,7 +344,7 @@ export function AgentProposalCard({
                 </p>
               ) : null}
 
-              {isOpen ? <FileDiffPreview file={file} /> : null}
+              {isOpen ? <FileDiffPreview file={file} lines={lines} /> : null}
             </li>
           )
         })}
