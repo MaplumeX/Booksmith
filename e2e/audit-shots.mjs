@@ -116,6 +116,18 @@ await page.getByLabel('全书查找').fill('置盐定理')
 await page.waitForTimeout(600)
 await page.screenshot({ path: `${OUT}/editor-search-1440.png` })
 
+await page.getByRole('tab', { name: '助手' }).click()
+await page.waitForTimeout(400)
+await page.screenshot({ path: `${OUT}/editor-agent-1440.png` })
+await overflow('editor-agent-1440')
+
+await page.getByRole('button', { name: '模型预设设置' }).click()
+await page.waitForTimeout(300)
+await page.screenshot({ path: `${OUT}/editor-agent-settings-1440.png` })
+await overflow('editor-agent-settings-1440')
+await page.getByRole('button', { name: '关闭', exact: true }).click()
+await page.getByRole('tab', { name: '预览' }).click()
+
 // Two saves that differ by one word, so the history overlay has a real character-level diff to show.
 const SNAPSHOT_DOC_A = [
   '<?xml version="1.0" encoding="UTF-8"?>',
@@ -170,6 +182,11 @@ await page.emulateMedia({ colorScheme: 'dark' })
 await page.waitForTimeout(500)
 await page.screenshot({ path: `${OUT}/editor-dark-1440.png` })
 await overflow('editor-dark-1440')
+
+await page.getByRole('tab', { name: '助手' }).click()
+await page.waitForTimeout(300)
+await page.screenshot({ path: `${OUT}/editor-agent-dark-1440.png` })
+await overflow('editor-agent-dark-1440')
 
 await page.emulateMedia({ colorScheme: 'light' })
 await page.getByRole('button', { name: '← 书库' }).click()

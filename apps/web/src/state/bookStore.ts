@@ -10,6 +10,9 @@ export interface LoadedBook {
   pkg: EpubPackage
   texts: Map<string, string>
   groups: Array<{ group: FileGroup; label: string; paths: string[] }>
+  /** Paths present in the last saved server archive, so unsaved deletions can be sent to the Agent.
+   * See ADR 2026-11-20-builtin-epub-agent. */
+  serverPaths: Set<string>
 }
 
 export function extensionOf(path: string): string {
@@ -86,7 +89,15 @@ export async function loadBook(id: string): Promise<LoadedBook> {
     if (isTextEntry(path)) texts.set(path, decoder.decode(data))
   }
 
-  return { id, version, archive, pkg, texts, groups: groupFiles(pkg, archive) }
+  return {
+    id,
+    version,
+    archive,
+    pkg,
+    texts,
+    groups: groupFiles(pkg, archive),
+    serverPaths: new Set(archive.entries.keys()),
+  }
 }
 
 /** Rough character count for the status bar; strips markup so XHTML reads as prose. */

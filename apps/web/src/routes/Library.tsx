@@ -1,7 +1,8 @@
 import { createEmptyEpub } from '@booksmith/core'
-import { AlertCircle, BookOpen, LogOut, Plus, Upload } from 'lucide-react'
+import { AlertCircle, BookOpen, LogOut, Plus, SlidersHorizontal, Upload } from 'lucide-react'
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { ApiError, api, type BookDto, type UserDto } from '../api/client'
+import { AgentSettingsDialog } from '../ui/AgentSettingsDialog'
 import { BookCard } from '../ui/BookCard'
 import { Button } from '../ui/Button'
 import { Dialog } from '../ui/Dialog'
@@ -29,6 +30,7 @@ export function Library({ user, onLogout }: { user: UserDto; onLogout: () => voi
   const [newTitle, setNewTitle] = useState('')
   const [newAuthor, setNewAuthor] = useState('')
   const [creatingPending, setCreatingPending] = useState(false)
+  const [settingsOpen, setSettingsOpen] = useState(false)
   const fileInput = useRef<HTMLInputElement>(null)
 
   const load = useCallback(async () => {
@@ -127,6 +129,10 @@ export function Library({ user, onLogout }: { user: UserDto; onLogout: () => voi
               <span className="btn-label-short">导入</span>
             </>
           )}
+        </Button>
+        <Button variant="ghost" onClick={() => setSettingsOpen(true)} title="助手模型设置">
+          <SlidersHorizontal size={14} strokeWidth={1.65} aria-hidden="true" />
+          <span className="btn-label-full">模型设置</span>
         </Button>
         <Button variant="ghost" onClick={onLogout}>
           <LogOut size={14} strokeWidth={1.65} aria-hidden="true" />
@@ -230,6 +236,8 @@ export function Library({ user, onLogout }: { user: UserDto; onLogout: () => voi
           <input type="text" value={newAuthor} onChange={(event) => setNewAuthor(event.target.value)} />
         </label>
       </Dialog>
+
+      <AgentSettingsDialog open={settingsOpen} onOpenChange={setSettingsOpen} />
 
       <footer className="statusbar">
         <span>{needle ? `${filtered.length} / ${books.length} 本` : `${books.length} 本`}</span>

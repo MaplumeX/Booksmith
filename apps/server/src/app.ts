@@ -6,6 +6,7 @@ import { SESSION_COOKIE, SessionStore } from './auth/session'
 import { loadConfig, type Config } from './config'
 import { createDb } from './db/client'
 import type { User } from './db/schema'
+import { registerAgentRoutes } from './routes/agent'
 import { registerAuthRoutes } from './routes/auth'
 import { registerBookRoutes } from './routes/books'
 import { registerPageVersionRoutes } from './routes/pageVersions'
@@ -64,6 +65,7 @@ export async function createApp(options: CreateAppOptions = {}): Promise<Fastify
   registerAuthRoutes(app, { db, config, sessions, loginLimiter })
   registerBookRoutes(app, { db, fileStore })
   registerPageVersionRoutes(app, { db, fileStore })
+  registerAgentRoutes(app, { db, config, fileStore })
 
   return app
 }
