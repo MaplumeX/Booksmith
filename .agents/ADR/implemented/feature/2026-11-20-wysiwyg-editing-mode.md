@@ -25,7 +25,7 @@ Status: implemented
   - 仅在用户实际发生输入或 DOM 格式修改（`hasPendingEdit`）时经 `300ms` 防抖写回 `texts` 映射，避免未编辑章节在关闭或切回代码时因换行符/标签闭合空白规范化而被误标为脏文件；真实修改后正常触发 `dirty`、本地草稿缓冲、自动保存、`StatusBar` 字数统计与全书查找。
   - 可视化内部维护独立细粒度快照撤销/重做栈（上限 50 步），并在 `iframe` 内捕获 `⌘B`/`⌘I`/`⌘Z`/`⌘⇧Z` 及向宿主转发 `⌘S`/`⌘W`/`Ctrl+Tab`/`⌘⇧F`。
   - 按 [the per-tab editor state decision](../bug-fix/2026-11-19-editor-state-per-tab.md) 保持 [CodePane.tsx](../../../../apps/web/src/ui/CodePane.tsx) 常驻隐藏而不卸载；从可视化切回代码时，以单个 CodeMirror Transaction 写回变更，使代码模式按一次 `⌘Z` / `Ctrl+Z` 即可整段撤回该轮可视化修改；全书替换、快照恢复与重命名则通过 `externalResetVersion` 仍按原规则重置状态。
-- **画布质感**：遵循 [the precision workbench UI decision](../design/2026-11-20-precision-workbench-ui.md)，主区以 `--surface-sunken` 托底居中呈现限宽 `760px` 校对纸面，默认浅色纸底保证书稿颜色与插图保真，工具栏提供纸面明暗切换，并在 [DESIGN.md](../../../../DESIGN.md) 完成组件与五态登记。
+- **画布质感**：遵循 [the precision workbench UI decision](../design/2026-11-20-precision-workbench-ui.md)，主区以 `--surface-sunken` 托底居中呈现限宽 `760px` 校对纸面，纸面深浅统一跟随全局应用主题（无独立纸面明暗切换按钮），并在 [DESIGN.md](../../../../DESIGN.md) 完成组件与五态登记。
 
 ## Alternatives considered
 

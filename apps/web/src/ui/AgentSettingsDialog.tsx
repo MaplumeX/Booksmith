@@ -22,6 +22,11 @@ import {
 import { Button } from './Button'
 import { Dialog } from './Dialog'
 
+interface AgentSettingsPanelProps {
+  active: boolean
+  onChanged?: (profiles: AgentProfileDto[]) => void
+}
+
 interface AgentSettingsDialogProps {
   open: boolean
   onOpenChange: (open: boolean) => void
@@ -105,7 +110,7 @@ function errorMessageOf(error: unknown, fallback: string): string {
   return error instanceof Error ? error.message : fallback
 }
 
-export function AgentSettingsDialog({ open, onOpenChange, onChanged }: AgentSettingsDialogProps) {
+export function AgentSettingsPanel({ active, onChanged }: AgentSettingsPanelProps) {
   const [profiles, setProfiles] = useState<AgentProfileDto[]>([])
   const [secretConfigured, setSecretConfigured] = useState(true)
   const [loading, setLoading] = useState(false)
@@ -171,8 +176,8 @@ export function AgentSettingsDialog({ open, onOpenChange, onChanged }: AgentSett
   )
 
   useEffect(() => {
-    if (open) void loadProfiles()
-  }, [open, loadProfiles])
+    if (active) void loadProfiles()
+  }, [active, loadProfiles])
 
   const selectedProfile = selectedId ? profiles.find((p) => p.id === selectedId) ?? null : null
 
@@ -283,14 +288,7 @@ export function AgentSettingsDialog({ open, onOpenChange, onChanged }: AgentSett
   }
 
   return (
-    <Dialog
-      open={open}
-      onOpenChange={onOpenChange}
-      ariaLabel="模型设置"
-      title="助手模型预设"
-      description="按个人账号保存多套模型配置，API Key 由服务端加密存储，仅回显末四位。"
-      className="agent-settings-dialog"
-    >
+    <div className="agent-settings-panel">
       {loadError ? (
         <p className="banner banner-error" role="alert">
           <AlertCircle size={14} strokeWidth={1.75} aria-hidden="true" />
@@ -611,6 +609,21 @@ export function AgentSettingsDialog({ open, onOpenChange, onChanged }: AgentSett
           </form>
         </section>
       </div>
+    </div>
+  )
+}
+
+export function AgentSettingsDialog({ open, onOpenChange, onChanged }: AgentSettingsDialogProps) {
+  return (
+    <Dialog
+      open={open}
+      onOpenChange={onOpenChange}
+      ariaLabel="模型设置"
+      title="助手模型预设"
+      description="按个人账号保存多套模型配置，API Key 由服务端加密存储，仅回显末四位。"
+      className="agent-settings-dialog"
+    >
+      <AgentSettingsPanel active={open} onChanged={onChanged} />
     </Dialog>
   )
 }

@@ -70,7 +70,7 @@ export const editorTheme = [
       height: '100%',
       backgroundColor: 'var(--surface)',
       color: 'var(--text)',
-      fontSize: '13px',
+      fontSize: 'var(--editor-font-size, 13px)',
     },
     '.cm-scroller': {
       fontFamily: 'var(--font-mono)',

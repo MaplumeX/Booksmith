@@ -151,9 +151,12 @@ test('does not mark an untouched chapter dirty when closing or switching back to
   await expect(page.locator('.tab[data-dirty="true"]')).toHaveCount(0)
 })
 
-test('preserves WYSIWYG iframe, undo stack, and paper theme without reloading on save', async ({ page }) => {
+test('preserves WYSIWYG iframe, undo stack, and global theme without reloading on save', async ({ page }) => {
   await openChapter(page, 'ch003.xhtml')
   await page.getByRole('button', { name: '可视化', exact: true }).click()
+
+  // Visual mode must follow global theme and must not expose its own day/night toggle.
+  await expect(page.getByRole('button', { name: /切换(暗色|浅色)纸面/ })).toHaveCount(0)
 
   const frame = page.frameLocator('.wysiwyg-frame')
   const firstPara = frame.locator('p').first()
@@ -175,23 +178,30 @@ test('preserves WYSIWYG iframe, undo stack, and paper theme without reloading on
   await expect(page.locator('.appbar-meta')).toHaveText('v2')
   await expect(page.locator('.statusbar')).toContainText('未修改')
 
-  // Toggling dark paper theme should also update in place without reloading the iframe.
-  await page.getByRole('button', { name: '切换暗色纸面' }).click()
+  // Switching the global theme via Settings should update both iframes in place without reloading.
+  await page.getByRole('button', { name: '设置', exact: true }).click()
+  const dialog = page.getByRole('dialog', { name: '应用设置' })
+  await dialog.getByRole('radio', { name: /深色/ }).click()
+  await dialog.getByRole('button', { name: '完成', exact: true }).click()
 
   const afterSaveAndTheme = await page.evaluate(() => {
     const wysiwyg = document.querySelector<HTMLIFrameElement>('.wysiwyg-frame')!
     const preview = document.querySelector<HTMLIFrameElement>('.preview-frame')!
     return {
+      rootTheme: document.documentElement.dataset.theme,
       wysiwygIntact: (wysiwyg.contentWindow as unknown as Record<string, unknown>).__wysiwygSessionId === 'stable-wysiwyg',
       previewIntact: (preview.contentWindow as unknown as Record<string, unknown>).__previewSessionId === 'stable-preview',
-      darkBg: getComputedStyle(wysiwyg.contentDocument!.body).backgroundColor,
+      wysiwygDarkBg: getComputedStyle(wysiwyg.contentDocument!.body).backgroundColor,
+      previewDarkBg: getComputedStyle(preview.contentDocument!.body).backgroundColor,
     }
   })
+  expect(afterSaveAndTheme.rootTheme).toBe('dark')
   expect(afterSaveAndTheme.wysiwygIntact).toBe(true)
   expect(afterSaveAndTheme.previewIntact).toBe(true)
-  expect(afterSaveAndTheme.darkBg).toBe('rgb(27, 34, 44)')
+  expect(afterSaveAndTheme.wysiwygDarkBg).toBe('rgb(26, 27, 36)')
+  expect(afterSaveAndTheme.previewDarkBg).toBe('rgb(26, 27, 36)')
 
-  // Undo stack must still work after saving and toggling paper theme.
+  // Undo stack must still work after saving and switching global theme.
   const undoBtn = page.getByRole('button', { name: '撤销', exact: true })
   await expect(undoBtn).toBeEnabled()
   await undoBtn.click()

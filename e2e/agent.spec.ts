@@ -211,8 +211,9 @@ test('multi-profile setup, streaming proofreading diff apply/undo, structural cr
 
   // Configure first preset + test connection
   await page.getByRole('button', { name: '配置模型预设' }).click()
-  const dialog = page.getByRole('dialog', { name: '模型设置' })
+  const dialog = page.getByRole('dialog', { name: '应用设置' })
   await expect(dialog).toBeVisible()
+  await expect(dialog.getByRole('tab', { name: 'AI 助手' })).toHaveAttribute('aria-selected', 'true')
   await expect(dialog.getByRole('radio', { name: /OpenAI 兼容/ })).toHaveAttribute('aria-checked', 'true')
 
   await dialog.getByLabel('预设名称').fill('快速校对')

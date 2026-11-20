@@ -1,13 +1,13 @@
 import { createEmptyEpub } from '@booksmith/core'
-import { AlertCircle, BookOpen, LogOut, Plus, SlidersHorizontal, Upload } from 'lucide-react'
+import { AlertCircle, BookOpen, LogOut, Plus, Settings, Upload } from 'lucide-react'
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { ApiError, api, type BookDto, type UserDto } from '../api/client'
-import { AgentSettingsDialog } from '../ui/AgentSettingsDialog'
 import { BookCard } from '../ui/BookCard'
 import { Button } from '../ui/Button'
 import { Dialog } from '../ui/Dialog'
 import { EmptyState } from '../ui/EmptyState'
 import { SearchBar } from '../ui/SearchBar'
+import { SettingsDialog } from '../ui/SettingsDialog'
 import { navigate } from '../router'
 
 function messageFor(error: unknown): string {
@@ -141,9 +141,14 @@ export function Library({ user, onLogout }: { user: UserDto; onLogout: () => voi
                 </>
               )}
             </Button>
-            <Button variant="ghost" onClick={() => setSettingsOpen(true)} title="助手模型设置">
-              <SlidersHorizontal size={14} strokeWidth={1.65} aria-hidden="true" />
-              <span className="btn-label-full">模型设置</span>
+            <Button
+              variant="ghost"
+              aria-label="设置"
+              onClick={() => setSettingsOpen(true)}
+              title="应用设置"
+            >
+              <Settings size={14} strokeWidth={1.65} aria-hidden="true" />
+              <span className="btn-label-full">设置</span>
             </Button>
             <span className="library-user-email" title={user.email}>
               {user.email}
@@ -255,7 +260,7 @@ export function Library({ user, onLogout }: { user: UserDto; onLogout: () => voi
         </label>
       </Dialog>
 
-      <AgentSettingsDialog open={settingsOpen} onOpenChange={setSettingsOpen} />
+      <SettingsDialog open={settingsOpen} onOpenChange={setSettingsOpen} />
     </div>
   )
 }

@@ -4,11 +4,13 @@ import type { EpubArchive, EpubPackage } from '@booksmith/core'
 import { patchDocument } from '../preview/patchDocument'
 import {
   buildPreviewDocument,
+  buildPreviewThemeCss,
   EMPTY_IFRAME_DOC,
   PreviewBlobCache,
   previewResourcesChanged,
   type PreviewResourceSnapshot,
 } from '../preview/render'
+import { useResolvedTheme } from '../state/settingsStore'
 
 interface PreviewPaneProps {
   path: string
@@ -21,6 +23,7 @@ interface PreviewPaneProps {
 const DEBOUNCE_MS = 180
 
 export function PreviewPane({ path, content, archive, pkg, subscribeTextChange }: PreviewPaneProps) {
+  const theme = useResolvedTheme()
   const [failure, setFailure] = useState<string | null>(null)
   const frame = useRef<HTMLIFrameElement>(null)
   const blobCache = useRef<PreviewBlobCache>(new PreviewBlobCache())
@@ -33,6 +36,8 @@ export function PreviewPane({ path, content, archive, pkg, subscribeTextChange }
   } | null>(null)
   const liveContent = useRef(content)
   const latest = useRef({ path, archive, pkg })
+  const themeRef = useRef(theme)
+  themeRef.current = theme
 
   const clearTimer = useCallback(() => {
     if (timer.current !== null) {
@@ -70,6 +75,7 @@ export function PreviewPane({ path, content, archive, pkg, subscribeTextChange }
           path: nextPath,
           archive: nextArchive,
           pkg: nextPkg,
+          theme: themeRef.current,
           blobCache: blobCache.current,
         })
         readyDocs.current.add(doc)
@@ -91,6 +97,18 @@ export function PreviewPane({ path, content, archive, pkg, subscribeTextChange }
     if (doc) readyDocs.current.add(doc)
     renderNow(latest.current.path, liveContent.current, latest.current.archive, latest.current.pkg)
   }, [renderNow])
+
+  useEffect(() => {
+    const doc = frame.current?.contentDocument
+    if (!doc?.head || !isDocReady()) return
+    let style = doc.head.querySelector('style[data-booksmith-preview-theme="true"]')
+    if (!style) {
+      style = doc.createElement('style')
+      style.setAttribute('data-booksmith-preview-theme', 'true')
+      doc.head.appendChild(style)
+    }
+    style.textContent = buildPreviewThemeCss(theme)
+  }, [theme, isDocReady])
 
   useEffect(() => {
     liveContent.current = content

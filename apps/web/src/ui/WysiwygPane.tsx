@@ -16,11 +16,9 @@ import {
   ImagePlus,
   Italic,
   Link2,
-  Moon,
   Redo2,
   RemoveFormatting,
   Subscript,
-  Sun,
   Superscript,
   Trash2,
   Undo2,
@@ -54,6 +52,7 @@ import {
   type PreviewResourceSnapshot,
 } from '../preview/render'
 import { basename } from '../state/bookStore'
+import { useResolvedTheme } from '../state/settingsStore'
 import { Button } from './Button'
 
 export type WysiwygShortcut = 'save' | 'close-tab' | 'next-tab' | 'prev-tab' | 'search'
@@ -132,7 +131,7 @@ export function WysiwygPane({
     const check = checkXmlWellFormed(content, browserXmlParser)
     return check.ok ? null : check.message
   })
-  const [paperTheme, setPaperTheme] = useState<'light' | 'dark'>('light')
+  const paperTheme = useResolvedTheme()
   const [toolbar, setToolbar] = useState<ActiveToolbarState>(DEFAULT_TOOLBAR)
   const [canUndo, setCanUndo] = useState(false)
   const [canRedo, setCanRedo] = useState(false)
@@ -160,6 +159,7 @@ export function WysiwygPane({
   const loadedExternalVersion = useRef<number | null>(null)
   const loadedDeps = useRef<Map<string, PreviewResourceSnapshot>>(new Map())
   const paperThemeRef = useRef<'light' | 'dark'>(paperTheme)
+  paperThemeRef.current = paperTheme
   const latest = useRef({ path, content, archive, pkg, externalVersion })
   const liveSession = useRef<{ path: string; xhtml: string; islands: string[] }>({
     path,
@@ -992,23 +992,6 @@ export function WysiwygPane({
           onClick={redo}
         >
           <Redo2 size={14} strokeWidth={1.75} aria-hidden="true" />
-        </button>
-
-        <span className="wysiwyg-spacer" />
-
-        <button
-          type="button"
-          className={`wysiwyg-tool wysiwyg-paper-toggle${paperTheme === 'dark' ? ' on' : ''}`}
-          aria-pressed={paperTheme === 'dark'}
-          aria-label={paperTheme === 'dark' ? '切换浅色纸面' : '切换暗色纸面'}
-          title={paperTheme === 'dark' ? '切换浅色纸面' : '切换暗色纸面'}
-          onClick={() => setPaperTheme((cur) => (cur === 'light' ? 'dark' : 'light'))}
-        >
-          {paperTheme === 'dark' ? (
-            <Moon size={14} strokeWidth={1.75} aria-hidden="true" />
-          ) : (
-            <Sun size={14} strokeWidth={1.75} aria-hidden="true" />
-          )}
         </button>
       </div>
 

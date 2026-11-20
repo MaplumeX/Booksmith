@@ -43,15 +43,16 @@
 | `TocPanel` | `src/ui/TocPanel.tsx` | 左悬浮结构岛「目录」视图；default / empty / error（锚点失效徽标）/ 新增表单 / 缩进禁用 / Lucide 行内操作 |
 | `TabBar` | `src/ui/TabBar.tsx` | 中央文档白卡顶栏；default / active（胶囊高亮）/ dirty / overflow（滚轮与自动滚入可视）/ 右侧「对照预览」开关 +「代码 \| 可视化」模式切换 |
 | `CodePane` | `src/ui/CodePane.tsx` | default / loading / error（语法错误）/ edge（174KB 单章） |
-| `WysiwygPane` | `src/ui/WysiwygPane.tsx` | default（760px 纸面 + 格式栏）/ empty（空章可聚焦）/ loading（骨架）/ error（非良构 XML 拦截切回代码）/ edge（`<math>` 保护岛、`<a>` 锚点与 `<img>` 浮条、纸面深浅切换） |
-| `PreviewPane` | `src/ui/PreviewPane.tsx` | 代码模式右侧并排实时书页白卡；default / empty / loading（骨架）/ error（带图标警示）/ edge（MathML、缺图） |
+| `WysiwygPane` | `src/ui/WysiwygPane.tsx` | default（760px 纸面 + 格式栏，跟随全局主题）/ empty（空章可聚焦）/ loading（骨架）/ error（非良构 XML 拦截切回代码）/ edge（`<math>` 保护岛、`<a>` 锚点与 `<img>` 浮条） |
+| `PreviewPane` | `src/ui/PreviewPane.tsx` | 代码模式右侧并排实时书页白卡（跟随全局主题）；default / empty / loading（骨架）/ error（带图标警示）/ edge（MathML、缺图） |
 | `MetadataPanel` | `src/ui/MetadataPanel.tsx` | 顶栏「元数据」触发的 `680px` 居中双栏书籍信息弹窗；default / dirty / error / meta 卡片行编辑 / edge（`<640px` 单列退化） |
 | `SearchPanel` | `src/ui/SearchPanel.tsx` | 顶栏「查找」或 `⌘⇧F` 触发的 `640px` 居中 Spotlight 弹窗；default（点击命中项跳行并关闭弹窗）/ empty / loading / 全书替换确认与撤销 |
 | `CheckPanel` | `src/ui/CheckPanel.tsx` | 顶栏「检查」动态健康度胶囊触发的 `380px` Radix Popover 诊断浮卡；empty（通过绿标）/ 错误与提醒分层卡片 / 点击跳行并收起浮卡 |
 | `AgentPanel` | `src/ui/AgentPanel.tsx` | 右侧独立悬浮对话白卡；default（`38px` 单行顶栏 + Radix Popover 历史会话 + IM 左右气泡与 Markdown + 中文工具步骤条 + 悬浮输入卡）/ empty / loading / error / edge（`<1024px` 互斥覆盖抽屉） |
 | `AgentMarkdown` | `src/ui/AgentMarkdown.tsx` | default（零依赖安全 React Markdown）/ empty / loading / error / edge（宽表与长代码独立横向滚动） |
 | `AgentProposalCard` | `src/ui/AgentProposalCard.tsx` | default（气泡外通栏轻量卡 + `+N/-M` 统计 + 折叠字符级 Diff）/ applied / dismissed / error / edge |
-| `AgentSettingsDialog` | `src/ui/AgentSettingsDialog.tsx` | Radix Dialog (`760px` 宽双栏) / 多预设列表 / OpenAI·Anthropic 分段协议控件 / API Key 显隐切换 / 测试连接反馈 |
+| `AgentSettingsDialog` | `src/ui/AgentSettingsDialog.tsx` | 导出嵌入式 `AgentSettingsPanel`（集成于 `SettingsDialog` 的「AI 助手」分页）/ 多预设列表 / OpenAI·Anthropic 分段协议控件 / API Key 显隐切换 / 测试连接反馈 |
+| `SettingsDialog` | `src/ui/SettingsDialog.tsx` | Radix Dialog (`760px`) / 「通用 \| AI 助手」分页 / 外观主题（跟随系统·浅色·深色，全局同步界面、代码与预览）/ 编辑器字号·自动换行·默认模式·默认对照预览 / 恢复默认 / 内嵌 AI 助手模型预设管理 |
 | `MediaPane` | `src/ui/MediaPane.tsx` | default（带外框预览）/ 非图片（图标说明）/ 替换确认（Radix Dialog）/ 删除入口 |
 | `SearchBar` | `src/ui/SearchBar.tsx` | 圆角胶囊搜索框；default / focus-within / Lucide 搜索图标 |
 | `VersionHistory` | `src/ui/VersionHistory.tsx` | Radix Dialog (`wide`) / 时间轴 + diff / empty / loading / error / 置顶（Pin 图标）/ 恢复确认 |
