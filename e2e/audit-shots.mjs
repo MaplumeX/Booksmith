@@ -2,7 +2,7 @@ import { chromium, expect } from '@playwright/test'
 import { fileURLToPath } from 'node:url'
 import { mkdirSync } from 'node:fs'
 
-const BASE = 'http://127.0.0.1:5173'
+const BASE = process.env.E2E_BASE_URL ?? 'http://127.0.0.1:5173'
 const OUT = new URL('../shots/', import.meta.url).pathname
 const EMAIL = 'e2e@booksmith.local'
 const PASSWORD = 'e2e-password-2026'
@@ -10,7 +10,7 @@ const FIXTURE = fileURLToPath(new URL('../fixtures/马克思经济学与数理�
 
 mkdirSync(OUT, { recursive: true })
 
-const API = 'http://127.0.0.1:8787'
+const API = process.env.E2E_API ?? 'http://127.0.0.1:8787'
 
 async function clearLibrary() {
   const login = await fetch(`${API}/api/auth/login`, {

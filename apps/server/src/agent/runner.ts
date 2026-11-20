@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto'
 import {
   AgentWorkspace,
+  isReadOnlyAgentTool,
   type AgentProposal,
   type AgentToolName,
   type AgentWorkspaceOverlay,
@@ -15,11 +16,26 @@ import { buildSystemPrompt, type AgentTurnContext } from './systemPrompt'
 /**
  * Server-side multi-step Agent turn executor bridging Vercel AI SDK `streamText`
  * to `@booksmith/core`'s framework-agnostic `AgentWorkspace`.
- * See ADR 2026-11-20-builtin-epub-agent.
+ * See ADR 2026-11-20-builtin-epub-agent, ADR 2026-11-20-agent-modes-and-multimodel.
  */
 
 export const MAX_TOOL_STEPS = 15
 const HISTORY_CHAR_BUDGET = 24_000
+
+export type AgentApprovalMode = 'ask' | 'review' | 'auto'
+export const AGENT_APPROVAL_MODES: readonly AgentApprovalMode[] = ['ask', 'review', 'auto'] as const
+
+export function isAgentApprovalMode(value: unknown): value is AgentApprovalMode {
+  return value === 'ask' || value === 'review' || value === 'auto'
+}
+
+/** 0 means unlimited tool steps (runs until the model stops naturally or the user aborts); any positive integer sets a cap.
+ * See ADR 2026-11-20-agent-modes-and-multimodel. */
+export function normalizeMaxToolSteps(value: number | null | undefined): number {
+  if (typeof value !== 'number' || !Number.isFinite(value)) return MAX_TOOL_STEPS
+  const rounded = Math.round(value)
+  return rounded <= 0 ? 0 : rounded
+}
 
 export interface HistoryTurn {
   role: 'user' | 'assistant'
@@ -35,6 +51,7 @@ export interface ToolCallSummary {
 }
 
 export type AgentStreamEvent =
+  | { type: 'reasoning_delta'; text: string }
   | { type: 'text_delta'; text: string }
   | { type: 'tool_start'; id: string; name: AgentToolName; argsSummary: string }
   | { type: 'tool_end'; id: string; name: AgentToolName; ok: boolean; summary: string }
@@ -49,6 +66,8 @@ export interface RunAgentTurnOptions {
   history: HistoryTurn[]
   userMessage: string
   context?: AgentTurnContext
+  approvalMode?: AgentApprovalMode
+  customInstructions?: string
   abortSignal?: AbortSignal
   maxSteps?: number
   onEvent?: (event: AgentStreamEvent) => void
@@ -56,6 +75,7 @@ export interface RunAgentTurnOptions {
 
 export interface RunAgentTurnResult {
   content: string
+  reasoning: string
   toolCalls: ToolCallSummary[]
   proposal: AgentProposal | null
   stopped: boolean
@@ -179,6 +199,7 @@ function buildSdkTools(
   workspace: AgentWorkspace,
   records: ToolCallSummary[],
   emit: (event: AgentStreamEvent) => void,
+  approvalMode: AgentApprovalMode,
 ) {
   function run(name: AgentToolName, args: Record<string, unknown>) {
     const id = randomUUID()
@@ -191,7 +212,7 @@ function buildSdkTools(
     return result
   }
 
-  return {
+  const allTools = {
     list_files: tool({
       description: '列出当前 EPUB 的元数据概要、spine 阅读顺序和全部文件路径、类型与行数。',
       inputSchema: z.object({}),
@@ -372,10 +393,25 @@ function buildSdkTools(
       execute: async (input) => run('delete_file', input),
     }),
   }
+
+  // Filter out write tools in `ask` mode at registration time so the model can never mutate the workspace.
+  // See ADR 2026-11-20-agent-modes-and-multimodel.
+  if (approvalMode === 'ask') {
+    const readOnly: Partial<typeof allTools> = {}
+    for (const key of Object.keys(allTools) as AgentToolName[]) {
+      if (isReadOnlyAgentTool(key)) {
+        ;(readOnly as Record<string, unknown>)[key] = allTools[key]
+      }
+    }
+    return readOnly
+  }
+
+  return allTools
 }
 
 export async function runAgentTurn(options: RunAgentTurnOptions): Promise<RunAgentTurnResult> {
   const emit = options.onEvent ?? (() => {})
+  const approvalMode: AgentApprovalMode = options.approvalMode ?? 'review'
   const workspace = AgentWorkspace.fromArchive(options.archive, {
     codec: nodeXmlCodec,
     checkXml: nodeCheckXml,
@@ -384,6 +420,7 @@ export async function runAgentTurn(options: RunAgentTurnOptions): Promise<RunAge
 
   const toolCalls: ToolCallSummary[] = []
   let content = ''
+  let reasoning = ''
 
   try {
     const model = createLanguageModel(options.provider)
@@ -392,17 +429,25 @@ export async function runAgentTurn(options: RunAgentTurnOptions): Promise<RunAge
       { role: 'user', content: options.userMessage },
     ]
 
+    const maxSteps = normalizeMaxToolSteps(options.maxSteps)
     const result = streamText({
       model,
-      system: buildSystemPrompt(workspace.getPackage(), options.context),
+      system: buildSystemPrompt(workspace.getPackage(), {
+        context: options.context,
+        approvalMode,
+        customInstructions: options.customInstructions,
+      }),
       messages,
-      tools: buildSdkTools(workspace, toolCalls, emit),
-      stopWhen: stepCountIs(options.maxSteps ?? MAX_TOOL_STEPS),
+      tools: buildSdkTools(workspace, toolCalls, emit, approvalMode),
+      stopWhen: maxSteps > 0 ? stepCountIs(maxSteps) : () => false,
       abortSignal: options.abortSignal,
     })
 
     for await (const part of result.fullStream) {
-      if (part.type === 'text-delta') {
+      if (part.type === 'reasoning-delta') {
+        reasoning += part.text
+        emit({ type: 'reasoning_delta', text: part.text })
+      } else if (part.type === 'text-delta') {
         content += part.text
         emit({ type: 'text_delta', text: part.text })
       } else if (part.type === 'error') {
@@ -412,22 +457,22 @@ export async function runAgentTurn(options: RunAgentTurnOptions): Promise<RunAge
 
     if (options.abortSignal?.aborted) {
       emit({ type: 'done', stopped: true })
-      return { content, toolCalls, proposal: null, stopped: true, error: null }
+      return { content, reasoning, toolCalls, proposal: null, stopped: true, error: null }
     }
 
-    const proposal = workspace.buildProposal(randomUUID())
+    const proposal = approvalMode === 'ask' ? null : workspace.buildProposal(randomUUID())
     if (proposal) {
       emit({ type: 'proposal', proposal })
     }
     emit({ type: 'done', stopped: false })
-    return { content, toolCalls, proposal, stopped: false, error: null }
+    return { content, reasoning, toolCalls, proposal, stopped: false, error: null }
   } catch (error) {
     if (options.abortSignal?.aborted) {
       emit({ type: 'done', stopped: true })
-      return { content, toolCalls, proposal: null, stopped: true, error: null }
+      return { content, reasoning, toolCalls, proposal: null, stopped: true, error: null }
     }
     const classified = classifyProviderError(error)
     emit({ type: 'error', code: classified.code, message: classified.message })
-    return { content, toolCalls, proposal: null, stopped: false, error: classified }
+    return { content, reasoning, toolCalls, proposal: null, stopped: false, error: classified }
   }
 }

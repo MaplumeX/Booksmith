@@ -81,4 +81,4 @@ Booksmith 的核心使用场景是在浏览器三栏工作台中对整本 EPUB�
 - **自定义 Base URL 的内网访问面**：为支持用户自建 Ollama / vLLM，服务端放行 `http:`/`https:` 本机与内网地址。该前提严格依赖 Booksmith「受信任内部白名单用户（`ALLOWED_EMAILS`）、不对外提供公共 SaaS」的部署模型；若未来对外公开注册，必须增加私有网段 SSRF 拦截与显式白名单。
 - **服务端新增依赖**：`apps/server` 引入了 `ai`、`@ai-sdk/openai-compatible`、`@ai-sdk/anthropic`、`zod` 四个依赖；核心 EPUB 工具原语仍保留在 `packages/core` 中与 SDK 解耦。
 - **主密钥运维要求**：使用云端 API Key 的部署必须持久保存环境变量 `AGENT_SECRET_KEY`，变更该密钥会导致既有加密 API Key 无法解密，需用户重新录入；表结构为纯增量三表（`agent_profiles`、`agent_threads`、`agent_messages`），不影响既有书籍与快照数据。
-- **长对话与大章节预算控制**：当前采用固定上限（`read_file` 400 行 / 24KB、`search_book` 100 条、`trimHistory` 24,000 字符、单轮最多 15 步工具调用），极端超长对话不会保留更早期的原文细节。
+- **长对话与大章节预算控制**：当前采用固定上限（`read_file` 400 行 / 24KB、`search_book` 100 条、`trimHistory` 24,000 字符）；单轮最大工具步数默认 15，现已由 [Agent approval modes, multi-model providers, preferences, reasoning & retry](2026-11-20-agent-modes-and-multimodel.md) 扩展为可按账号云端自定义（支持任意正整数或留空不限），并增量扩展了三档审批模式、同供应商多模型列表、流式思考过程与末条助手原地重试。

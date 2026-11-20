@@ -30,6 +30,7 @@ export interface BookDto {
 }
 
 export type AgentProviderType = 'openai-compatible' | 'anthropic'
+export type AgentApprovalMode = 'ask' | 'review' | 'auto'
 
 export interface AgentProfileDto {
   id: string
@@ -37,6 +38,7 @@ export interface AgentProfileDto {
   provider: AgentProviderType
   baseUrl: string
   model: string
+  models: string[]
   hasApiKey: boolean
   apiKeyLast4: string | null
   isDefault: boolean
@@ -48,6 +50,7 @@ export interface AgentProfileCreateInput {
   provider: AgentProviderType
   baseUrl: string
   model: string
+  models?: string[]
   apiKey?: string
   isDefault?: boolean
 }
@@ -57,9 +60,17 @@ export interface AgentProfileUpdateInput {
   provider?: AgentProviderType
   baseUrl?: string
   model?: string
+  models?: string[]
   apiKey?: string
   clearApiKey?: boolean
   isDefault?: boolean
+}
+
+export interface AgentUserSettingsDto {
+  defaultApprovalMode: AgentApprovalMode
+  maxSteps: number
+  customInstructions: string
+  updatedAt: string | null
 }
 
 export interface AgentConnectionTestResult {
@@ -70,11 +81,20 @@ export interface AgentConnectionTestResult {
   error?: string
 }
 
+export interface AgentProviderModelsResult {
+  ok: boolean
+  models: string[]
+  errorCode?: string
+  error?: string
+}
+
 export interface AgentThreadDto {
   id: string
   bookId: string
   title: string
   profileId: string | null
+  model: string | null
+  approvalMode: AgentApprovalMode
   createdAt: string
   updatedAt: string
 }
@@ -92,6 +112,7 @@ export interface AgentMessageDto {
   threadId: string
   role: 'user' | 'assistant'
   content: string
+  reasoning: string | null
   context: { activePath?: string | null; selection?: string | null } | null
   toolCalls: AgentToolCallDto[]
   proposal: AgentProposal | null
@@ -101,11 +122,20 @@ export interface AgentMessageDto {
 }
 
 export type AgentSseEvent =
+  | { type: 'reasoning_delta'; text: string }
   | { type: 'text_delta'; text: string }
   | { type: 'tool_start'; id: string; name: AgentToolName; argsSummary: string }
   | { type: 'tool_end'; id: string; name: AgentToolName; ok: boolean; summary: string }
   | { type: 'proposal'; proposal: AgentProposal }
-  | { type: 'done'; messageId?: string; threadTitle?: string; stopped: boolean }
+  | {
+      type: 'done'
+      messageId?: string
+      threadTitle?: string
+      stopped: boolean
+      approvalMode?: AgentApprovalMode
+      model?: string
+      profileId?: string
+    }
   | { type: 'error'; code: string; message: string }
 
 export class ApiError extends Error {
@@ -128,6 +158,50 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   }
   if (response.status === 204) return undefined as T
   return (await response.json()) as T
+}
+
+async function consumeAgentSse(
+  response: Response,
+  onEvent: (event: AgentSseEvent) => void,
+): Promise<void> {
+  if (!response.ok) {
+    const payload = await response.json().catch(() => ({}))
+    const code = (payload as { error?: string }).error ?? `http_${response.status}`
+    throw new ApiError(response.status, code, payload)
+  }
+
+  if (!response.body) throw new ApiError(500, 'empty_stream', {})
+
+  const reader = response.body.getReader()
+  const decoder = new TextDecoder('utf-8')
+  let buffer = ''
+
+  while (true) {
+    const { value, done } = await reader.read()
+    if (done) break
+    buffer += decoder.decode(value, { stream: true })
+    const chunks = buffer.split('\n\n')
+    buffer = chunks.pop() ?? ''
+    for (const chunk of chunks) {
+      const line = chunk.split('\n').find((entry) => entry.startsWith('data: '))
+      if (!line) continue
+      try {
+        const parsed = JSON.parse(line.slice(6)) as AgentSseEvent
+        onEvent(parsed)
+      } catch {
+        // Ignore malformed keepalive frames.
+      }
+    }
+  }
+
+  const tail = buffer.trim()
+  if (tail.startsWith('data: ')) {
+    try {
+      onEvent(JSON.parse(tail.slice(6)) as AgentSseEvent)
+    } catch {
+      // Ignore incomplete tail on abrupt disconnect.
+    }
+  }
 }
 
 export const api = {
@@ -205,6 +279,19 @@ export const api = {
     }
   },
 
+  agentSettings: () => request<{ settings: AgentUserSettingsDto }>('/agent/settings'),
+
+  updateAgentSettings: (input: {
+    defaultApprovalMode?: AgentApprovalMode
+    maxSteps?: number
+    customInstructions?: string
+  }) =>
+    request<{ settings: AgentUserSettingsDto }>('/agent/settings', {
+      method: 'PATCH',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(input),
+    }),
+
   agentProfiles: () => request<{ secretConfigured: boolean; profiles: AgentProfileDto[] }>('/agent/profiles'),
 
   createAgentProfile: (input: AgentProfileCreateInput) =>
@@ -237,9 +324,24 @@ export const api = {
       body: JSON.stringify(input),
     }),
 
+  fetchAgentProfileModels: (input: {
+    profileId?: string
+    provider: AgentProviderType
+    baseUrl: string
+    apiKey?: string
+  }) =>
+    request<AgentProviderModelsResult>('/agent/profiles/models', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(input),
+    }),
+
   agentThreads: (bookId: string) => request<{ threads: AgentThreadDto[] }>(`/books/${bookId}/agent/threads`),
 
-  createAgentThread: (bookId: string, input: { title?: string; profileId?: string } = {}) =>
+  createAgentThread: (
+    bookId: string,
+    input: { title?: string; profileId?: string; model?: string; approvalMode?: AgentApprovalMode } = {},
+  ) =>
     request<{ thread: AgentThreadDto }>(`/books/${bookId}/agent/threads`, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
@@ -251,7 +353,16 @@ export const api = {
       `/books/${bookId}/agent/threads/${threadId}`,
     ),
 
-  updateAgentThread: (bookId: string, threadId: string, input: { title?: string; profileId?: string | null }) =>
+  updateAgentThread: (
+    bookId: string,
+    threadId: string,
+    input: {
+      title?: string
+      profileId?: string | null
+      model?: string | null
+      approvalMode?: AgentApprovalMode
+    },
+  ) =>
     request<{ thread: AgentThreadDto }>(`/books/${bookId}/agent/threads/${threadId}`, {
       method: 'PATCH',
       headers: { 'content-type': 'application/json' },
@@ -274,6 +385,8 @@ export const api = {
     body: {
       content: string
       profileId?: string
+      model?: string
+      approvalMode?: AgentApprovalMode
       baseVersion: number
       dirtyTexts?: Record<string, string>
       deletedPaths?: string[]
@@ -288,47 +401,31 @@ export const api = {
       body: JSON.stringify(body),
       signal: options.signal,
     })
+    await consumeAgentSse(response, options.onEvent)
+  },
 
-    if (!response.ok) {
-      const payload = await response.json().catch(() => ({}))
-      const code = (payload as { error?: string }).error ?? `http_${response.status}`
-      throw new ApiError(response.status, code, payload)
-    }
-
-    if (!response.body) throw new ApiError(500, 'empty_stream', {})
-
-    const reader = response.body.getReader()
-    const decoder = new TextDecoder('utf-8')
-    let buffer = ''
-
-    while (true) {
-      const { value, done } = await reader.read()
-      if (done) break
-      buffer += decoder.decode(value, { stream: true })
-      const chunks = buffer.split('\n\n')
-      buffer = chunks.pop() ?? ''
-      for (const chunk of chunks) {
-        const line = chunk
-          .split('\n')
-          .find((entry) => entry.startsWith('data: '))
-        if (!line) continue
-        try {
-          const parsed = JSON.parse(line.slice(6)) as AgentSseEvent
-          options.onEvent(parsed)
-        } catch {
-          // Ignore malformed keepalive frames.
-        }
-      }
-    }
-
-    const tail = buffer.trim()
-    if (tail.startsWith('data: ')) {
-      try {
-        options.onEvent(JSON.parse(tail.slice(6)) as AgentSseEvent)
-      } catch {
-        // Ignore incomplete tail on abrupt disconnect.
-      }
-    }
+  retryAgentMessage: async (
+    bookId: string,
+    threadId: string,
+    messageId: string,
+    body: {
+      profileId?: string
+      model?: string
+      approvalMode?: AgentApprovalMode
+      baseVersion: number
+      dirtyTexts?: Record<string, string>
+      deletedPaths?: string[]
+    },
+    options: { onEvent: (event: AgentSseEvent) => void; signal?: AbortSignal },
+  ): Promise<void> => {
+    const response = await fetch(`/api/books/${bookId}/agent/threads/${threadId}/messages/${messageId}/retry`, {
+      method: 'POST',
+      credentials: 'include',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(body),
+      signal: options.signal,
+    })
+    await consumeAgentSse(response, options.onEvent)
   },
 }
 

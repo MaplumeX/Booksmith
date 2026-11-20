@@ -54,6 +54,9 @@ describe('agent REST & SSE routes', () => {
   let mockServer: ReturnType<typeof createServer>
   let mockUrl = ''
   let mockStep = 0
+  let lastSeenModel: string | null = null
+  let lastSeenSystem: string | null = null
+  let lastSeenToolCount = 0
   let store: ReturnType<typeof createDb>
 
   beforeAll(async () => {
@@ -62,7 +65,23 @@ describe('agent REST & SSE routes', () => {
       const bodyText = await readBody(req)
       const body = bodyText ? (JSON.parse(bodyText) as Record<string, unknown>) : {}
 
+      if (url.pathname === '/v1/models' && req.method === 'GET') {
+        res.writeHead(200, { 'content-type': 'application/json' })
+        res.end(
+          JSON.stringify({
+            object: 'list',
+            data: [{ id: 'mock-fast' }, { id: 'mock-pro' }, { id: 'mock-reasoner' }],
+          }),
+        )
+        return
+      }
+
       if (url.pathname === '/v1/chat/completions') {
+        lastSeenModel = typeof body.model === 'string' ? body.model : null
+        const msgs = Array.isArray(body.messages) ? (body.messages as Array<{ role?: string; content?: string }>) : []
+        lastSeenSystem = msgs.find((m) => m.role === 'system')?.content ?? null
+        lastSeenToolCount = Array.isArray(body.tools) ? body.tools.length : 0
+
         if (body.stream !== true) {
           res.writeHead(200, { 'content-type': 'application/json' })
           res.end(
@@ -74,6 +93,57 @@ describe('agent REST & SSE routes', () => {
               choices: [{ index: 0, message: { role: 'assistant', content: 'OK' }, finish_reason: 'stop' }],
             }),
           )
+          return
+        }
+
+        if (body.model === 'mock-reasoner') {
+          writeOpenAiSse(res, [
+            {
+              id: 'rs1',
+              object: 'chat.completion.chunk',
+              created: 1,
+              model: 'mock-reasoner',
+              choices: [
+                {
+                  index: 0,
+                  delta: { role: 'assistant', reasoning_content: '逐步核查全文术语。' },
+                  finish_reason: null,
+                },
+              ],
+            },
+            {
+              id: 'rs1',
+              object: 'chat.completion.chunk',
+              created: 1,
+              model: 'mock-reasoner',
+              choices: [
+                {
+                  index: 0,
+                  delta: { content: '已用推理模型给出建议。' },
+                  finish_reason: 'stop',
+                },
+              ],
+            },
+          ])
+          return
+        }
+
+        if (body.model === 'mock-retry-ok') {
+          writeOpenAiSse(res, [
+            {
+              id: 'rt1',
+              object: 'chat.completion.chunk',
+              created: 1,
+              model: 'mock-retry-ok',
+              choices: [
+                {
+                  index: 0,
+                  delta: { role: 'assistant', content: '换模型重试成功。' },
+                  finish_reason: 'stop',
+                },
+              ],
+            },
+          ])
           return
         }
 
@@ -373,5 +443,200 @@ describe('agent REST & SSE routes', () => {
     expect(applyRes.status).toBe(200)
     const appliedJson = (await applyRes.json()) as { message: { proposalStatus: string } }
     expect(appliedJson.message.proposalStatus).toBe('applied')
+
+    // Retrying an applied proposal message is blocked with 409
+    const blockedRetry = await fetch(
+      `${appUrl}/api/books/${book.id}/agent/threads/${thread.id}/messages/${doneEvent.messageId}/retry`,
+      {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', cookie: cookieA },
+        body: JSON.stringify({ baseVersion: book.currentVersion }),
+      },
+    )
+    expect(blockedRetry.status).toBe(409)
+    expect(((await blockedRetry.json()) as { error: string }).error).toBe('proposal_already_applied')
+  })
+
+  it('supports multi-model providers, model fetch proxy, cloud user settings, approval modes, reasoning & last-turn retry', async () => {
+    const loginA = await fetch(`${appUrl}/api/auth/login`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ email: emailA, password: 'strong-password-123' }),
+    })
+    const cookieA = (loginA.headers.getSetCookie?.()[0] ?? '').split(';')[0]!
+    const loginB = await fetch(`${appUrl}/api/auth/login`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ email: emailB, password: 'strong-password-123' }),
+    })
+    const cookieB = (loginB.headers.getSetCookie?.()[0] ?? '').split(';')[0]!
+
+    // Default user settings
+    const defaultSettingsRes = await fetch(`${appUrl}/api/agent/settings`, { headers: { cookie: cookieA } })
+    expect(defaultSettingsRes.status).toBe(200)
+    const defaultSettings = (await defaultSettingsRes.json()) as {
+      settings: { defaultApprovalMode: string; maxSteps: number; customInstructions: string }
+    }
+    expect(defaultSettings.settings).toMatchObject({
+      defaultApprovalMode: 'review',
+      maxSteps: 15,
+      customInstructions: '',
+    })
+
+    // Validation rejects negative / non-integer maxSteps, while allowing any positive integer or 0 (unlimited)
+    const badSteps = await fetch(`${appUrl}/api/agent/settings`, {
+      method: 'PATCH',
+      headers: { 'content-type': 'application/json', cookie: cookieA },
+      body: JSON.stringify({ maxSteps: -1 }),
+    })
+    expect(badSteps.status).toBe(400)
+
+    // Save cloud settings for user A (with arbitrary large maxSteps, isolated from user B)
+    const saveSettings = await fetch(`${appUrl}/api/agent/settings`, {
+      method: 'PATCH',
+      headers: { 'content-type': 'application/json', cookie: cookieA },
+      body: JSON.stringify({
+        defaultApprovalMode: 'ask',
+        maxSteps: 120,
+        customInstructions: '始终保留原文公式与学术引文。',
+      }),
+    })
+    expect(saveSettings.status).toBe(200)
+    expect(((await saveSettings.json()) as { settings: { maxSteps: number } }).settings.maxSteps).toBe(120)
+
+    const bSettingsRes = await fetch(`${appUrl}/api/agent/settings`, { headers: { cookie: cookieB } })
+    const bSettings = (await bSettingsRes.json()) as { settings: { defaultApprovalMode: string; maxSteps: number } }
+    expect(bSettings.settings.defaultApprovalMode).toBe('review')
+    expect(bSettings.settings.maxSteps).toBe(15)
+
+    // Create a single provider with multiple models
+    const profileRes = await fetch(`${appUrl}/api/agent/profiles`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', cookie: cookieA },
+      body: JSON.stringify({
+        name: '统一中转站',
+        provider: 'openai-compatible',
+        baseUrl: `${mockUrl}/v1`,
+        model: 'mock-fast',
+        models: ['mock-fast', 'mock-reasoner', 'mock-retry-ok'],
+        apiKey: 'sk-multi-key-8888',
+      }),
+    })
+    expect(profileRes.status).toBe(201)
+    const { profile } = (await profileRes.json()) as {
+      profile: { id: string; model: string; models: string[] }
+    }
+    expect(profile.model).toBe('mock-fast')
+    expect(profile.models).toEqual(['mock-fast', 'mock-reasoner', 'mock-retry-ok'])
+
+    // Proxy model listing using stored encrypted key via profileId
+    const fetchedRes = await fetch(`${appUrl}/api/agent/profiles/models`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', cookie: cookieA },
+      body: JSON.stringify({
+        profileId: profile.id,
+        provider: 'openai-compatible',
+        baseUrl: `${mockUrl}/v1`,
+      }),
+    })
+    expect(fetchedRes.status).toBe(200)
+    const fetched = (await fetchedRes.json()) as { ok: boolean; models: string[] }
+    expect(fetched.ok).toBe(true)
+    expect(fetched.models).toEqual(['mock-fast', 'mock-pro', 'mock-reasoner'])
+
+    // Upload book & create thread -> inherits user defaultApprovalMode ('ask')
+    const uploadRes = await fetch(`${appUrl}/api/books`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/epub+zip', cookie: cookieA },
+      body: Buffer.from(createEmptyEpub({ title: '多模型测试书' })),
+    })
+    const { book } = (await uploadRes.json()) as { book: { id: string; currentVersion: number } }
+
+    const createThreadRes = await fetch(`${appUrl}/api/books/${book.id}/agent/threads`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', cookie: cookieA },
+      body: JSON.stringify({ profileId: profile.id, model: 'mock-reasoner' }),
+    })
+    expect(createThreadRes.status).toBe(201)
+    const { thread } = (await createThreadRes.json()) as {
+      thread: { id: string; approvalMode: string; model: string | null }
+    }
+    expect(thread.approvalMode).toBe('ask')
+    expect(thread.model).toBe('mock-reasoner')
+
+    // Send turn using same provider's second model ('mock-reasoner') in ask mode -> reasoning_delta + 7 read-only tools + custom prompt
+    const sse1 = await fetch(`${appUrl}/api/books/${book.id}/agent/threads/${thread.id}/messages`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', cookie: cookieA },
+      body: JSON.stringify({
+        content: '帮我分析术语',
+        baseVersion: book.currentVersion,
+        profileId: profile.id,
+        model: 'mock-reasoner',
+        approvalMode: 'ask',
+      }),
+    })
+    expect(sse1.status).toBe(200)
+    const events1 = (await sse1.text())
+      .split('\n\n')
+      .filter((b) => b.startsWith('data: '))
+      .map((b) => JSON.parse(b.slice(6)) as Record<string, unknown>)
+
+    expect(lastSeenModel).toBe('mock-reasoner')
+    expect(lastSeenToolCount).toBe(7)
+    expect(lastSeenSystem).toContain('始终保留原文公式与学术引文。')
+    expect(events1.some((e) => e.type === 'reasoning_delta')).toBe(true)
+    const done1 = events1.find((e) => e.type === 'done') as { messageId: string }
+    expect(done1.messageId).toBeTruthy()
+
+    // Confirm reasoning persisted on assistant message
+    const afterTurn1 = (await (
+      await fetch(`${appUrl}/api/books/${book.id}/agent/threads/${thread.id}`, { headers: { cookie: cookieA } })
+    ).json()) as {
+      thread: { model: string | null; approvalMode: string }
+      messages: Array<{ id: string; role: string; content: string; reasoning: string | null }>
+    }
+    expect(afterTurn1.messages).toHaveLength(2)
+    expect(afterTurn1.messages[1]!.reasoning).toBe('逐步核查全文术语。')
+
+    // Retry last assistant message in-place with a different model on the same provider & auto approval mode
+    const retryRes = await fetch(
+      `${appUrl}/api/books/${book.id}/agent/threads/${thread.id}/messages/${done1.messageId}/retry`,
+      {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', cookie: cookieA },
+        body: JSON.stringify({
+          baseVersion: book.currentVersion,
+          profileId: profile.id,
+          model: 'mock-retry-ok',
+          approvalMode: 'auto',
+        }),
+      },
+    )
+    expect(retryRes.status).toBe(200)
+    const retryEvents = (await retryRes.text())
+      .split('\n\n')
+      .filter((b) => b.startsWith('data: '))
+      .map((b) => JSON.parse(b.slice(6)) as Record<string, unknown>)
+    const retryDone = retryEvents.find((e) => e.type === 'done') as { messageId: string; model: string; approvalMode: string }
+    expect(retryDone.messageId).toBe(done1.messageId)
+    expect(retryDone.model).toBe('mock-retry-ok')
+    expect(retryDone.approvalMode).toBe('auto')
+    expect(lastSeenModel).toBe('mock-retry-ok')
+    expect(lastSeenToolCount).toBe(16)
+
+    // Still only 2 messages (no duplicate user bubble) and thread remembers new model + approvalMode
+    const afterRetry = (await (
+      await fetch(`${appUrl}/api/books/${book.id}/agent/threads/${thread.id}`, { headers: { cookie: cookieA } })
+    ).json()) as {
+      thread: { model: string | null; approvalMode: string }
+      messages: Array<{ id: string; role: string; content: string; reasoning: string | null }>
+    }
+    expect(afterRetry.messages).toHaveLength(2)
+    expect(afterRetry.messages[1]!.id).toBe(done1.messageId)
+    expect(afterRetry.messages[1]!.content).toBe('换模型重试成功。')
+    expect(afterRetry.messages[1]!.reasoning).toBeNull()
+    expect(afterRetry.thread.model).toBe('mock-retry-ok')
+    expect(afterRetry.thread.approvalMode).toBe('auto')
   })
 })

@@ -19,6 +19,8 @@ interface AgentProposalCardProps {
   status: 'pending' | 'applied' | 'dismissed'
   canUndo: boolean
   busy?: boolean
+  autoApplied?: boolean
+  autoDowngradeReason?: string | null
   onApply: (selectedPaths?: Set<string>) => void
   onDismiss: () => void
   onUndo: () => void
@@ -177,6 +179,8 @@ export function AgentProposalCard({
   status,
   canUndo,
   busy = false,
+  autoApplied = false,
+  autoDowngradeReason = null,
   onApply,
   onDismiss,
   onUndo,
@@ -244,7 +248,11 @@ export function AgentProposalCard({
       <div className="agent-proposal-card is-applied">
         <div className="agent-proposal-compact">
           <CheckCircle2 size={14} strokeWidth={1.75} className="agent-icon-ok" aria-hidden="true" />
-          <span>已应用变更到工作区（{proposal.files.length} 个文件）</span>
+          <span>
+            {autoApplied
+              ? `已自动应用到工作区（${proposal.files.length} 个文件）`
+              : `已应用变更到工作区（${proposal.files.length} 个文件）`}
+          </span>
           {canUndo ? (
             <Button variant="secondary" size="sm" type="button" onClick={onUndo}>
               <RotateCcw size={12} strokeWidth={1.75} aria-hidden="true" />
@@ -273,6 +281,13 @@ export function AgentProposalCard({
           {proposal.isStructural ? '结构变更 · 整批应用' : '纯文本 · 可勾选'}
         </span>
       </header>
+
+      {autoDowngradeReason ? (
+        <div className="banner banner-warn agent-proposal-downgrade" role="status">
+          <AlertTriangle size={14} strokeWidth={1.75} aria-hidden="true" />
+          <span>{autoDowngradeReason}</span>
+        </div>
+      ) : null}
 
       {hasIssues ? (
         <div className="banner banner-error agent-proposal-issues" role="alert">

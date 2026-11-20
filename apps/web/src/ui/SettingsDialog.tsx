@@ -11,7 +11,7 @@ import {
   Sun,
 } from 'lucide-react'
 import { useEffect, useState } from 'react'
-import type { AgentProfileDto } from '../api/client'
+import type { AgentProfileDto, AgentUserSettingsDto } from '../api/client'
 import {
   isDefaultSettings,
   MAX_CODE_FONT_SIZE,
@@ -31,6 +31,7 @@ interface SettingsDialogProps {
   onOpenChange: (open: boolean) => void
   initialTab?: SettingsTab
   onAgentProfilesChanged?: (profiles: AgentProfileDto[]) => void
+  onAgentSettingsChanged?: (settings: AgentUserSettingsDto) => void
 }
 
 const THEME_OPTIONS: Array<{
@@ -58,6 +59,7 @@ export function SettingsDialog({
   onOpenChange,
   initialTab = 'general',
   onAgentProfilesChanged,
+  onAgentSettingsChanged,
 }: SettingsDialogProps) {
   const { settings, resolvedTheme, updateSettings, resetSettings } = useSettings()
   const [tab, setTab] = useState<SettingsTab>(initialTab)
@@ -276,7 +278,11 @@ export function SettingsDialog({
         </div>
       ) : (
         <div role="tabpanel" aria-label="AI 助手">
-          <AgentSettingsPanel active={open && tab === 'agent'} onChanged={onAgentProfilesChanged} />
+          <AgentSettingsPanel
+            active={open && tab === 'agent'}
+            onChanged={onAgentProfilesChanged}
+            onSettingsChanged={onAgentSettingsChanged}
+          />
         </div>
       )}
     </Dialog>

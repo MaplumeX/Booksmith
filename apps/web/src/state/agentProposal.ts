@@ -36,6 +36,35 @@ export interface ApplyProposalResult extends WorkspaceSnapshot {
   appliedCount: number
 }
 
+export interface AutoApplyEvaluation {
+  eligible: boolean
+  reason?: string
+}
+
+/**
+ * Safety gate for `auto` approval mode: auto-applies only when structure preflight passed
+ * and no file deletion leaves dangling external references; otherwise falls back to manual review.
+ * See ADR 2026-11-20-agent-modes-and-multimodel.
+ */
+export function evaluateAutoApply(proposal: AgentProposal): AutoApplyEvaluation {
+  if (proposal.validationIssues.length > 0) {
+    return {
+      eligible: false,
+      reason: `结构预检存在 ${proposal.validationIssues.length} 项问题，已自动降级为人工审阅`,
+    }
+  }
+  const brokenDelete = proposal.files.find(
+    (file) => file.kind === 'delete' && file.referencesAffected && file.referencesAffected.length > 0,
+  )
+  if (brokenDelete) {
+    return {
+      eligible: false,
+      reason: `删除 ${brokenDelete.path} 会导致 ${brokenDelete.referencesAffected!.length} 处外部引用失效，已自动降级为人工审阅`,
+    }
+  }
+  return { eligible: true }
+}
+
 export function createUndoSnapshot(state: WorkspaceSnapshot): WorkspaceSnapshot {
   const entries = new Map(state.book.archive.entries)
   const archive: EpubArchive = { order: [...state.book.archive.order], entries }

@@ -2,10 +2,12 @@ import type { AgentProposal, AgentToolName } from '@booksmith/core'
 import {
   AlertCircle,
   ArrowUp,
+  Brain,
   Check,
   ChevronDown,
   ChevronRight,
   Copy,
+  Eye,
   FileText,
   History,
   ListTree,
@@ -13,6 +15,8 @@ import {
   Pencil,
   Plus,
   Quote,
+  RotateCw,
+  Search,
   ShieldCheck,
   SlidersHorizontal,
   Sparkles,
@@ -20,17 +24,20 @@ import {
   Trash2,
   Wrench,
   X,
+  Zap,
 } from 'lucide-react'
 import { DropdownMenu, Popover } from 'radix-ui'
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
   ApiError,
   api,
+  type AgentApprovalMode,
   type AgentMessageDto,
   type AgentProfileDto,
   type AgentThreadDto,
   type AgentToolCallDto,
 } from '../api/client'
+import { evaluateAutoApply } from '../state/agentProposal'
 import { basename } from '../state/bookStore'
 import { AgentMarkdown } from './AgentMarkdown'
 import { AgentProposalCard } from './AgentProposalCard'
@@ -45,6 +52,7 @@ interface AgentPanelProps {
   selectionText: string
   profiles: AgentProfileDto[]
   profilesLoading: boolean
+  defaultApprovalMode?: AgentApprovalMode
   undoMessageId: string | null
   getOverlay: () => { dirtyTexts: Record<string, string>; deletedPaths: string[] }
   onOpenSettings: () => void
@@ -56,10 +64,35 @@ interface AgentPanelProps {
 
 interface StreamingState {
   content: string
+  reasoning: string
   toolCalls: AgentToolCallDto[]
   runningTool: { id: string; name: AgentToolName; argsSummary: string } | null
   proposal: AgentProposal | null
+  replacingMessageId?: string
 }
+
+const APPROVAL_META: Record<
+  AgentApprovalMode,
+  { label: string; desc: string; icon: typeof ShieldCheck }
+> = {
+  ask: {
+    label: '只读',
+    desc: '仅开放查询工具，禁止任何写入修改',
+    icon: Eye,
+  },
+  review: {
+    label: '审阅',
+    desc: '写操作生成 Diff 提案，确认后再应用',
+    icon: ShieldCheck,
+  },
+  auto: {
+    label: '自动',
+    desc: '预检通过自动应用到工作区（可随时撤销）',
+    icon: Zap,
+  },
+}
+
+const APPROVAL_ORDER: AgentApprovalMode[] = ['ask', 'review', 'auto']
 
 const TOOL_LABELS: Record<AgentToolName, string> = {
   list_files: '列出书籍文件',
@@ -98,6 +131,23 @@ const STARTER_PROMPTS: Array<{ icon: typeof ShieldCheck; title: string; prompt: 
   },
 ]
 
+function encodeModelChoice(profileId: string, model: string): string {
+  return `${profileId}::${model}`
+}
+
+function decodeModelChoice(encoded: string): { profileId: string; model: string } | null {
+  const sep = encoded.indexOf('::')
+  if (sep <= 0) return null
+  return { profileId: encoded.slice(0, sep), model: encoded.slice(sep + 2) }
+}
+
+function profileModelsOf(profile: AgentProfileDto): string[] {
+  if (Array.isArray(profile.models) && profile.models.length > 0) {
+    return profile.models.includes(profile.model) ? profile.models : [profile.model, ...profile.models]
+  }
+  return [profile.model]
+}
+
 function formatClock(iso: string): string {
   const date = new Date(iso)
   if (Number.isNaN(date.getTime())) return ''
@@ -128,6 +178,49 @@ function summarizeCalls(calls: AgentToolCallDto[]): string {
   const preview = uniqueLabels.slice(0, 2).join('、')
   const suffix = uniqueLabels.length > 2 ? ' 等' : ''
   return `已执行 ${calls.length} 步 · ${preview}${suffix}`
+}
+
+function ReasoningBlock({
+  text,
+  streaming = false,
+  hasAnswer = false,
+}: {
+  text: string
+  streaming?: boolean
+  hasAnswer?: boolean
+}) {
+  const [userToggled, setUserToggled] = useState<boolean | null>(null)
+  const trimmed = text.trim()
+  if (!trimmed) return null
+
+  const autoOpen = streaming && !hasAnswer
+  const open = userToggled ?? autoOpen
+
+  return (
+    <div className={`agent-reasoning-box${open ? ' is-open' : ''}`}>
+      <button
+        type="button"
+        className="agent-reasoning-toggle"
+        aria-expanded={open}
+        onClick={() => setUserToggled((cur) => !(cur ?? autoOpen))}
+      >
+        {streaming && !hasAnswer ? (
+          <Loader2 size={12} strokeWidth={1.8} className="spin agent-icon-accent" aria-hidden="true" />
+        ) : (
+          <Brain size={12} strokeWidth={1.75} className="agent-icon-muted" aria-hidden="true" />
+        )}
+        <span className="agent-reasoning-summary">
+          {streaming && !hasAnswer ? '正在深度思考…' : `思考过程 · ${trimmed.length} 字`}
+        </span>
+        {open ? (
+          <ChevronDown size={12} strokeWidth={1.75} aria-hidden="true" />
+        ) : (
+          <ChevronRight size={12} strokeWidth={1.75} aria-hidden="true" />
+        )}
+      </button>
+      {open ? <div className="agent-reasoning-content">{trimmed}</div> : null}
+    </div>
+  )
 }
 
 function ToolSteps({
@@ -245,6 +338,7 @@ export function AgentPanel({
   selectionText,
   profiles,
   profilesLoading,
+  defaultApprovalMode = 'review',
   undoMessageId,
   getOverlay,
   onOpenSettings,
@@ -266,28 +360,49 @@ export function AgentPanel({
   const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null)
 
   const [selectedProfileId, setSelectedProfileId] = useState<string>('')
+  const [selectedModel, setSelectedModel] = useState<string>('')
+  const [approvalMode, setApprovalMode] = useState<AgentApprovalMode>(defaultApprovalMode)
+  const [modelMenuOpen, setModelMenuOpen] = useState(false)
+  const [modelSearch, setModelSearch] = useState('')
+
   const [input, setInput] = useState('')
   const [attachFile, setAttachFile] = useState(true)
   const [attachSelection, setAttachSelection] = useState(true)
   const [streaming, setStreaming] = useState<StreamingState | null>(null)
   const [busyProposalId, setBusyProposalId] = useState<string | null>(null)
+  const [autoAppliedIds, setAutoAppliedIds] = useState<Set<string>>(() => new Set())
+  const [downgradeReasons, setDowngradeReasons] = useState<Record<string, string>>({})
 
   const abortRef = useRef<AbortController | null>(null)
   const scrollRef = useRef<HTMLDivElement>(null)
   const textareaRef = useRef<HTMLTextAreaElement>(null)
 
-  // Keep selectedProfileId synced with available profiles & thread preference.
+  // Keep selectedProfileId & selectedModel synced with available profiles & multi-model lists.
   useEffect(() => {
     if (profiles.length === 0) {
       setSelectedProfileId('')
+      setSelectedModel('')
       return
     }
-    setSelectedProfileId((current) => {
-      if (current && profiles.some((p) => p.id === current)) return current
-      const def = profiles.find((p) => p.isDefault) ?? profiles[0]!
-      return def.id
-    })
-  }, [profiles])
+    const existing = profiles.find((p) => p.id === selectedProfileId)
+    if (existing) {
+      const models = profileModelsOf(existing)
+      if (!selectedModel || !models.includes(selectedModel)) {
+        setSelectedModel(existing.model)
+      }
+      return
+    }
+    const def = profiles.find((p) => p.isDefault) ?? profiles[0]!
+    setSelectedProfileId(def.id)
+    setSelectedModel(def.model)
+  }, [profiles, selectedProfileId, selectedModel])
+
+  // When no active thread exists yet, follow updated cloud default approval mode.
+  useEffect(() => {
+    if (!activeThreadId) {
+      setApprovalMode(defaultApprovalMode)
+    }
+  }, [activeThreadId, defaultApprovalMode])
 
   // Re-enable selection chip whenever the user makes a fresh selection.
   useEffect(() => {
@@ -309,8 +424,13 @@ export function AgentPanel({
       try {
         const res = await api.agentThread(bookId, threadId)
         setMessages(res.messages)
-        if (res.thread.profileId && profiles.some((p) => p.id === res.thread.profileId)) {
-          setSelectedProfileId(res.thread.profileId)
+        setApprovalMode(res.thread.approvalMode ?? defaultApprovalMode)
+        if (res.thread.profileId) {
+          const matchedProfile = profiles.find((p) => p.id === res.thread.profileId)
+          if (matchedProfile) {
+            setSelectedProfileId(matchedProfile.id)
+            setSelectedModel(res.thread.model || matchedProfile.model)
+          }
         }
       } catch (cause) {
         setPanelError({
@@ -321,7 +441,7 @@ export function AgentPanel({
         setMessagesLoading(false)
       }
     },
-    [bookId, profiles],
+    [bookId, profiles, defaultApprovalMode],
   )
 
   const loadThreads = useCallback(async () => {
@@ -336,6 +456,7 @@ export function AgentPanel({
         await loadMessages(first.id)
       } else {
         setMessages([])
+        setApprovalMode(defaultApprovalMode)
       }
     } catch (cause) {
       setPanelError({
@@ -345,7 +466,7 @@ export function AgentPanel({
     } finally {
       setThreadsLoading(false)
     }
-  }, [bookId, loadMessages])
+  }, [bookId, loadMessages, defaultApprovalMode])
 
   useEffect(() => {
     void loadThreads()
@@ -358,7 +479,13 @@ export function AgentPanel({
     const el = scrollRef.current
     if (!el) return
     el.scrollTop = el.scrollHeight
-  }, [messages.length, streaming?.content, streaming?.toolCalls.length, streaming?.runningTool?.id])
+  }, [
+    messages.length,
+    streaming?.content,
+    streaming?.reasoning,
+    streaming?.toolCalls.length,
+    streaming?.runningTool?.id,
+  ])
 
   const handleSelectThread = (threadId: string) => {
     if (streaming) return
@@ -379,9 +506,12 @@ export function AgentPanel({
     try {
       const res = await api.createAgentThread(bookId, {
         ...(selectedProfileId ? { profileId: selectedProfileId } : {}),
+        ...(selectedModel ? { model: selectedModel } : {}),
+        approvalMode: defaultApprovalMode,
       })
       setThreads((current) => [res.thread, ...current])
       setActiveThreadId(res.thread.id)
+      setApprovalMode(res.thread.approvalMode)
       setMessages([])
       return res.thread
     } catch {
@@ -417,11 +547,93 @@ export function AgentPanel({
         const next = remaining[0] ?? null
         setActiveThreadId(next?.id ?? null)
         if (next) await loadMessages(next.id)
-        else setMessages([])
+        else {
+          setMessages([])
+          setApprovalMode(defaultApprovalMode)
+        }
       }
     } catch {
       setPanelError({ code: 'delete_failed', message: '删除对话失败，请重试。' })
     }
+  }
+
+  const handleChangeApprovalMode = (nextMode: AgentApprovalMode) => {
+    if (streaming || nextMode === approvalMode) return
+    setApprovalMode(nextMode)
+    if (activeThreadId) {
+      void api
+        .updateAgentThread(bookId, activeThreadId, { approvalMode: nextMode })
+        .then((res) => {
+          setThreads((list) => list.map((t) => (t.id === res.thread.id ? res.thread : t)))
+        })
+        .catch(() => {})
+    }
+  }
+
+  const handleSelectModelChoice = (encoded: string) => {
+    const decoded = decodeModelChoice(encoded)
+    if (!decoded) return
+    setSelectedProfileId(decoded.profileId)
+    setSelectedModel(decoded.model)
+    setModelMenuOpen(false)
+    setModelSearch('')
+    if (activeThreadId) {
+      void api
+        .updateAgentThread(bookId, activeThreadId, {
+          profileId: decoded.profileId,
+          model: decoded.model,
+        })
+        .then((res) => {
+          setThreads((list) => list.map((t) => (t.id === res.thread.id ? res.thread : t)))
+        })
+        .catch(() => {})
+    }
+  }
+
+  const finalizeAssistantTurn = async (options: {
+    threadId: string
+    messageId: string
+    draft: StreamingState
+    streamError: { code: string; message: string } | null
+    effectiveMode: AgentApprovalMode
+    replacingMessageId?: string
+  }) => {
+    const { threadId, messageId, draft, streamError, effectiveMode, replacingMessageId } = options
+    let proposalStatus: 'pending' | 'applied' | 'dismissed' | null = draft.proposal ? 'pending' : null
+
+    if (draft.proposal && !streamError && effectiveMode === 'auto') {
+      const check = evaluateAutoApply(draft.proposal)
+      if (check.eligible) {
+        const appliedOk = await onApplyProposal(messageId, draft.proposal)
+        if (appliedOk) {
+          proposalStatus = 'applied'
+          setAutoAppliedIds((prev) => new Set(prev).add(messageId))
+        }
+      } else if (check.reason) {
+        setDowngradeReasons((prev) => ({ ...prev, [messageId]: check.reason! }))
+      }
+    }
+
+    const finalized: AgentMessageDto = {
+      id: messageId,
+      threadId,
+      role: 'assistant',
+      content: draft.content,
+      reasoning: draft.reasoning.trim() ? draft.reasoning : null,
+      context: null,
+      toolCalls: draft.toolCalls,
+      proposal: draft.proposal,
+      proposalStatus,
+      error: streamError ? streamError.message : null,
+      createdAt: new Date().toISOString(),
+    }
+
+    setMessages((current) => {
+      if (replacingMessageId) {
+        return current.map((m) => (m.id === replacingMessageId ? finalized : m))
+      }
+      return [...current, finalized]
+    })
   }
 
   const sendPrompt = async (promptText: string) => {
@@ -430,10 +642,14 @@ export function AgentPanel({
 
     setPanelError(null)
     let threadId = activeThreadId
+    const effectiveMode = approvalMode
     if (!threadId) {
       const created = await handleCreateThread()
       if (!created) return
       threadId = created.id
+      if (created.approvalMode !== effectiveMode) {
+        void api.updateAgentThread(bookId, threadId, { approvalMode: effectiveMode }).catch(() => {})
+      }
     }
 
     const context = {
@@ -446,6 +662,7 @@ export function AgentPanel({
       threadId,
       role: 'user',
       content: text,
+      reasoning: null,
       context,
       toolCalls: [],
       proposal: null,
@@ -462,6 +679,7 @@ export function AgentPanel({
 
     const draft: StreamingState = {
       content: '',
+      reasoning: '',
       toolCalls: [],
       runningTool: null,
       proposal: null,
@@ -480,6 +698,8 @@ export function AgentPanel({
         {
           content: text,
           ...(selectedProfileId ? { profileId: selectedProfileId } : {}),
+          ...(selectedModel ? { model: selectedModel } : {}),
+          approvalMode: effectiveMode,
           baseVersion: bookVersion,
           dirtyTexts,
           deletedPaths,
@@ -488,7 +708,10 @@ export function AgentPanel({
         {
           signal: controller.signal,
           onEvent: (event) => {
-            if (event.type === 'text_delta') {
+            if (event.type === 'reasoning_delta') {
+              draft.reasoning += event.text
+              setStreaming({ ...draft })
+            } else if (event.type === 'text_delta') {
               draft.content += event.text
               setStreaming({ ...draft })
             } else if (event.type === 'tool_start') {
@@ -514,7 +737,14 @@ export function AgentPanel({
                 setThreads((list) =>
                   list.map((t) =>
                     t.id === threadId
-                      ? { ...t, title: event.threadTitle!, updatedAt: new Date().toISOString() }
+                      ? {
+                          ...t,
+                          title: event.threadTitle!,
+                          approvalMode: event.approvalMode ?? t.approvalMode,
+                          model: event.model ?? t.model,
+                          profileId: event.profileId ?? t.profileId,
+                          updatedAt: new Date().toISOString(),
+                        }
                       : t,
                   ),
                 )
@@ -524,22 +754,16 @@ export function AgentPanel({
         },
       )
 
-      const finalized: AgentMessageDto = {
-        id: finalMessageId ?? `assistant-${Date.now()}`,
+      await finalizeAssistantTurn({
         threadId,
-        role: 'assistant',
-        content: draft.content,
-        context: null,
-        toolCalls: draft.toolCalls,
-        proposal: draft.proposal,
-        proposalStatus: draft.proposal ? 'pending' : null,
-        error: streamError ? (streamError as { message: string }).message : null,
-        createdAt: new Date().toISOString(),
-      }
-      setMessages((current) => [...current, finalized])
+        messageId: finalMessageId ?? `assistant-${Date.now()}`,
+        draft,
+        streamError,
+        effectiveMode,
+      })
     } catch (cause) {
       if (controller.signal.aborted) {
-        if (draft.content || draft.toolCalls.length > 0) {
+        if (draft.content || draft.reasoning || draft.toolCalls.length > 0) {
           setMessages((current) => [
             ...current,
             {
@@ -547,6 +771,7 @@ export function AgentPanel({
               threadId: threadId!,
               role: 'assistant',
               content: draft.content || '已停止生成。',
+              reasoning: draft.reasoning.trim() ? draft.reasoning : null,
               context: null,
               toolCalls: draft.toolCalls,
               proposal: null,
@@ -573,6 +798,135 @@ export function AgentPanel({
     }
   }
 
+  const handleRetryLastMessage = async (messageId: string) => {
+    if (streaming || !activeThreadId || profiles.length === 0) return
+    setPanelError(null)
+    setDowngradeReasons((prev) => {
+      if (!(messageId in prev)) return prev
+      const next = { ...prev }
+      delete next[messageId]
+      return next
+    })
+
+    const effectiveMode = approvalMode
+    const controller = new AbortController()
+    abortRef.current = controller
+
+    const draft: StreamingState = {
+      content: '',
+      reasoning: '',
+      toolCalls: [],
+      runningTool: null,
+      proposal: null,
+      replacingMessageId: messageId,
+    }
+    setStreaming({ ...draft })
+
+    const { dirtyTexts, deletedPaths } = getOverlay()
+    let finalMessageId: string | undefined
+    let streamError: { code: string; message: string } | null = null
+
+    try {
+      await api.retryAgentMessage(
+        bookId,
+        activeThreadId,
+        messageId,
+        {
+          ...(selectedProfileId ? { profileId: selectedProfileId } : {}),
+          ...(selectedModel ? { model: selectedModel } : {}),
+          approvalMode: effectiveMode,
+          baseVersion: bookVersion,
+          dirtyTexts,
+          deletedPaths,
+        },
+        {
+          signal: controller.signal,
+          onEvent: (event) => {
+            if (event.type === 'reasoning_delta') {
+              draft.reasoning += event.text
+              setStreaming({ ...draft })
+            } else if (event.type === 'text_delta') {
+              draft.content += event.text
+              setStreaming({ ...draft })
+            } else if (event.type === 'tool_start') {
+              draft.runningTool = { id: event.id, name: event.name, argsSummary: event.argsSummary }
+              setStreaming({ ...draft })
+            } else if (event.type === 'tool_end') {
+              const argsSummary =
+                draft.runningTool?.id === event.id ? draft.runningTool.argsSummary : event.name
+              draft.runningTool = null
+              draft.toolCalls = [
+                ...draft.toolCalls,
+                { id: event.id, name: event.name, argsSummary, ok: event.ok, summary: event.summary },
+              ]
+              setStreaming({ ...draft })
+            } else if (event.type === 'proposal') {
+              draft.proposal = event.proposal
+              setStreaming({ ...draft })
+            } else if (event.type === 'error') {
+              streamError = { code: event.code, message: event.message }
+            } else if (event.type === 'done') {
+              finalMessageId = event.messageId
+              setThreads((list) =>
+                list.map((t) =>
+                  t.id === activeThreadId
+                    ? {
+                        ...t,
+                        approvalMode: event.approvalMode ?? t.approvalMode,
+                        model: event.model ?? t.model,
+                        profileId: event.profileId ?? t.profileId,
+                        updatedAt: new Date().toISOString(),
+                      }
+                    : t,
+                ),
+              )
+            }
+          },
+        },
+      )
+
+      await finalizeAssistantTurn({
+        threadId: activeThreadId,
+        messageId: finalMessageId ?? messageId,
+        draft,
+        streamError,
+        effectiveMode,
+        replacingMessageId: messageId,
+      })
+    } catch (cause) {
+      if (controller.signal.aborted) {
+        if (draft.content || draft.reasoning || draft.toolCalls.length > 0) {
+          setMessages((current) =>
+            current.map((m) =>
+              m.id === messageId
+                ? {
+                    ...m,
+                    content: draft.content || '已停止生成。',
+                    reasoning: draft.reasoning.trim() ? draft.reasoning : null,
+                    toolCalls: draft.toolCalls,
+                    proposal: null,
+                    proposalStatus: null,
+                    error: null,
+                  }
+                : m,
+            ),
+          )
+        }
+      } else if (cause instanceof ApiError) {
+        const payload = cause.payload as { message?: string } | undefined
+        setPanelError({
+          code: cause.code,
+          message: payload?.message ?? `重试失败（${cause.code}）`,
+        })
+      } else {
+        setPanelError({ code: 'network_error', message: '重试连接中断，请稍后重试。' })
+      }
+    } finally {
+      abortRef.current = null
+      setStreaming(null)
+    }
+  }
+
   const handleProposalApply = async (
     messageId: string,
     proposal: AgentProposal,
@@ -585,6 +939,12 @@ export function AgentPanel({
         setMessages((list) =>
           list.map((msg) => (msg.id === messageId ? { ...msg, proposalStatus: 'applied' } : msg)),
         )
+        setDowngradeReasons((prev) => {
+          if (!(messageId in prev)) return prev
+          const next = { ...prev }
+          delete next[messageId]
+          return next
+        })
       }
     } finally {
       setBusyProposalId(null)
@@ -605,9 +965,33 @@ export function AgentPanel({
     }
   }
 
+  const totalModelCount = useMemo(
+    () => profiles.reduce((acc, p) => acc + profileModelsOf(p).length, 0),
+    [profiles],
+  )
+
+  const filteredProfileGroups = useMemo(() => {
+    const q = modelSearch.trim().toLowerCase()
+    return profiles
+      .map((profile) => {
+        const models = profileModelsOf(profile)
+        const matchingModels = !q
+          ? models
+          : profile.name.toLowerCase().includes(q)
+            ? models
+            : models.filter((m) => m.toLowerCase().includes(q))
+        return { profile, models: matchingModels }
+      })
+      .filter((group) => group.models.length > 0)
+  }, [profiles, modelSearch])
+
   const isLoadingInit = profilesLoading || threadsLoading
   const activeThread = threads.find((t) => t.id === activeThreadId) ?? null
   const selectedProfile = profiles.find((p) => p.id === selectedProfileId) ?? profiles[0] ?? null
+  const activeModelName = selectedModel || selectedProfile?.model || ''
+  const selectedEncoded = selectedProfile ? encodeModelChoice(selectedProfile.id, activeModelName) : ''
+  const approvalMeta = APPROVAL_META[approvalMode]
+  const ApprovalIcon = approvalMeta.icon
   const hasSelection = Boolean(selectionText.trim())
   const showContextStrip = Boolean(activePath || hasSelection)
 
@@ -867,7 +1251,7 @@ export function AgentPanel({
                   当前书籍 · {bookTitle}
                 </p>
                 <p className="agent-welcome-desc">
-                  可直接读取章节、排查结构报错、整理目录与重命名；所有写操作都会生成 Diff 提案由你审阅后应用。
+                  可直接读取章节、排查结构报错、整理目录与重命名；可在底栏切换只读、审阅与自动应用模式。
                 </p>
                 <div className="agent-starters">
                   {STARTER_PROMPTS.map(({ icon: Icon, title, prompt }) => (
@@ -891,8 +1275,21 @@ export function AgentPanel({
               </div>
             ) : (
               <div className="agent-messages">
-                {messages.map((msg) => {
+                {messages.map((msg, index) => {
+                  // Hide the message currently being replaced in-place by a live retry stream.
+                  if (streaming?.replacingMessageId === msg.id) return null
+
                   const clock = formatClock(msg.createdAt)
+                  const isLastMessage = index === messages.length - 1
+                  const canShowRetry =
+                    isLastMessage &&
+                    msg.role === 'assistant' &&
+                    !streaming &&
+                    !msg.id.startsWith('local-') &&
+                    !msg.id.startsWith('stopped-') &&
+                    !msg.id.startsWith('assistant-')
+                  const retryBlockedApplied = msg.proposalStatus === 'applied'
+
                   if (msg.role === 'user') {
                     return (
                       <article key={msg.id} className="agent-turn is-user">
@@ -923,6 +1320,7 @@ export function AgentPanel({
                   return (
                     <article key={msg.id} className="agent-turn is-assistant">
                       <ToolSteps calls={msg.toolCalls} />
+                      {msg.reasoning ? <ReasoningBlock text={msg.reasoning} /> : null}
 
                       {msg.content || msg.error ? (
                         <div className="agent-assistant-row">
@@ -942,6 +1340,23 @@ export function AgentPanel({
                             <div className="agent-assistant-meta">
                               {clock ? <time className="agent-msg-time">{clock}</time> : null}
                               {msg.content ? <CopyReplyButton text={msg.content} /> : null}
+                              {canShowRetry ? (
+                                <button
+                                  type="button"
+                                  className="agent-msg-action-btn"
+                                  disabled={retryBlockedApplied}
+                                  aria-label="重试此回复"
+                                  title={
+                                    retryBlockedApplied
+                                      ? '该回复的提案已应用到工作区，请先撤销或继续追问'
+                                      : '使用当前模型和模式重新生成此回复'
+                                  }
+                                  onClick={() => void handleRetryLastMessage(msg.id)}
+                                >
+                                  <RotateCw size={11} strokeWidth={1.8} aria-hidden="true" />
+                                  <span>重试</span>
+                                </button>
+                              ) : null}
                             </div>
                           </div>
                         </div>
@@ -954,6 +1369,8 @@ export function AgentPanel({
                           status={msg.proposalStatus}
                           canUndo={undoMessageId === msg.id}
                           busy={busyProposalId === msg.id}
+                          autoApplied={autoAppliedIds.has(msg.id)}
+                          autoDowngradeReason={downgradeReasons[msg.id] ?? null}
                           onApply={(paths) => void handleProposalApply(msg.id, msg.proposal!, paths)}
                           onDismiss={() => void handleProposalDismiss(msg.id)}
                           onUndo={() => onUndoProposal(msg.id)}
@@ -966,6 +1383,13 @@ export function AgentPanel({
                 {streaming ? (
                   <article className="agent-turn is-assistant is-streaming" aria-live="polite">
                     <ToolSteps calls={streaming.toolCalls} running={streaming.runningTool} />
+                    {streaming.reasoning ? (
+                      <ReasoningBlock
+                        text={streaming.reasoning}
+                        streaming
+                        hasAnswer={Boolean(streaming.content)}
+                      />
+                    ) : null}
                     <div className="agent-assistant-row">
                       <div className="agent-avatar is-pulsing" aria-hidden="true">
                         <Sparkles size={13} strokeWidth={1.8} />
@@ -977,7 +1401,13 @@ export function AgentPanel({
                           ) : (
                             <div className="agent-thinking">
                               <Loader2 size={12} strokeWidth={1.8} className="spin" aria-hidden="true" />
-                              <span>{streaming.runningTool ? '正在处理工具返回…' : '正在思考…'}</span>
+                              <span>
+                                {streaming.runningTool
+                                  ? '正在处理工具返回…'
+                                  : streaming.reasoning
+                                    ? '正在整理回复…'
+                                    : '正在思考…'}
+                              </span>
                             </div>
                           )}
                         </div>
@@ -1070,7 +1500,13 @@ export function AgentPanel({
                 className="agent-textarea"
                 rows={2}
                 aria-label="向助手输入指令"
-                placeholder="输入校对、样式、目录或结构修改指令（Enter 发送，Shift+Enter 换行）"
+                placeholder={
+                  approvalMode === 'ask'
+                    ? '当前为只读模式：输入咨询、排查或校对建议问题（Enter 发送）'
+                    : approvalMode === 'auto'
+                      ? '当前为自动模式：预检通过将自动应用到工作区（Enter 发送）'
+                      : '输入校对、样式、目录或结构修改指令（Enter 发送，Shift+Enter 换行）'
+                }
                 value={input}
                 disabled={Boolean(streaming)}
                 onChange={(event) => setInput(event.target.value)}
@@ -1082,63 +1518,169 @@ export function AgentPanel({
                 }}
               />
 
+              {/* Compact dual-pill footer keeps approval mode and provider-grouped model picker adjacent to send. See ADR 2026-11-20-agent-modes-and-multimodel. */}
               <div className="agent-composer-footer">
-                <DropdownMenu.Root>
-                  <DropdownMenu.Trigger asChild>
-                    <button
-                      type="button"
-                      className="agent-model-trigger"
-                      aria-label="选择模型预设"
-                      disabled={Boolean(streaming)}
-                      title={selectedProfile ? `${selectedProfile.name}（${selectedProfile.model}）` : '选择模型预设'}
-                    >
-                      <span className="agent-model-trigger-name">
-                        {selectedProfile ? selectedProfile.name : '选择模型'}
-                      </span>
-                      {selectedProfile ? (
-                        <span className="agent-model-trigger-sub">{selectedProfile.model}</span>
-                      ) : null}
-                      <ChevronDown size={12} strokeWidth={1.8} aria-hidden="true" />
-                    </button>
-                  </DropdownMenu.Trigger>
-                  <DropdownMenu.Portal>
-                    <DropdownMenu.Content
-                      className="agent-model-menu"
-                      align="start"
-                      side="top"
-                      sideOffset={6}
-                      collisionPadding={8}
-                    >
-                      <DropdownMenu.RadioGroup
-                        value={selectedProfileId}
-                        onValueChange={(value) => setSelectedProfileId(value)}
+                <div className="agent-composer-controls">
+                  <DropdownMenu.Root>
+                    <DropdownMenu.Trigger asChild>
+                      <button
+                        type="button"
+                        className={`agent-mode-trigger${approvalMode === 'auto' ? ' is-auto' : ''}`}
+                        aria-label="切换审批模式"
+                        disabled={Boolean(streaming)}
+                        title={`审批模式：${approvalMeta.label} — ${approvalMeta.desc}`}
                       >
-                        {profiles.map((profile) => (
-                          <DropdownMenu.RadioItem
-                            key={profile.id}
-                            value={profile.id}
-                            className="agent-model-item"
+                        <ApprovalIcon size={12} strokeWidth={1.85} aria-hidden="true" />
+                        <span>{approvalMeta.label}</span>
+                        <ChevronDown size={11} strokeWidth={1.8} aria-hidden="true" />
+                      </button>
+                    </DropdownMenu.Trigger>
+                    <DropdownMenu.Portal>
+                      <DropdownMenu.Content
+                        className="agent-mode-menu"
+                        align="start"
+                        side="top"
+                        sideOffset={6}
+                        collisionPadding={8}
+                      >
+                        <DropdownMenu.RadioGroup
+                          value={approvalMode}
+                          onValueChange={(value) => handleChangeApprovalMode(value as AgentApprovalMode)}
+                        >
+                          {APPROVAL_ORDER.map((modeKey) => {
+                            const meta = APPROVAL_META[modeKey]
+                            const ModeIcon = meta.icon
+                            return (
+                              <DropdownMenu.RadioItem
+                                key={modeKey}
+                                value={modeKey}
+                                className="agent-model-item"
+                              >
+                                <span className="agent-model-item-check" aria-hidden="true">
+                                  <DropdownMenu.ItemIndicator>
+                                    <Check size={12} strokeWidth={2} />
+                                  </DropdownMenu.ItemIndicator>
+                                </span>
+                                <span className="agent-model-item-text">
+                                  <span className="agent-mode-item-head">
+                                    <ModeIcon size={12} strokeWidth={1.8} aria-hidden="true" />
+                                    <span className="agent-model-item-name">{meta.label}</span>
+                                  </span>
+                                  <span className="agent-mode-item-desc">{meta.desc}</span>
+                                </span>
+                              </DropdownMenu.RadioItem>
+                            )
+                          })}
+                        </DropdownMenu.RadioGroup>
+                      </DropdownMenu.Content>
+                    </DropdownMenu.Portal>
+                  </DropdownMenu.Root>
+
+                  <DropdownMenu.Root
+                    open={modelMenuOpen}
+                    onOpenChange={(next) => {
+                      setModelMenuOpen(next)
+                      if (!next) setModelSearch('')
+                    }}
+                  >
+                    <DropdownMenu.Trigger asChild>
+                      <button
+                        type="button"
+                        className="agent-model-trigger"
+                        aria-label="选择模型预设"
+                        disabled={Boolean(streaming)}
+                        title={
+                          selectedProfile
+                            ? `${selectedProfile.name} · ${activeModelName}`
+                            : '选择模型预设'
+                        }
+                      >
+                        <span className="agent-model-trigger-name">
+                          {activeModelName || selectedProfile?.name || '选择模型'}
+                        </span>
+                        <ChevronDown size={12} strokeWidth={1.8} aria-hidden="true" />
+                      </button>
+                    </DropdownMenu.Trigger>
+                    <DropdownMenu.Portal>
+                      <DropdownMenu.Content
+                        className="agent-model-menu"
+                        align="start"
+                        side="top"
+                        sideOffset={6}
+                        collisionPadding={8}
+                      >
+                        {totalModelCount > 8 ? (
+                          <div
+                            className="agent-model-search"
+                            onKeyDown={(event) => event.stopPropagation()}
                           >
-                            <span className="agent-model-item-check" aria-hidden="true">
-                              <DropdownMenu.ItemIndicator>
-                                <Check size={12} strokeWidth={2} />
-                              </DropdownMenu.ItemIndicator>
-                            </span>
-                            <span className="agent-model-item-text">
-                              <span className="agent-model-item-name">{profile.name}</span>
-                              <span className="agent-model-item-meta">{profile.model}</span>
-                            </span>
-                          </DropdownMenu.RadioItem>
-                        ))}
-                      </DropdownMenu.RadioGroup>
-                      <DropdownMenu.Separator className="agent-menu-sep" />
-                      <DropdownMenu.Item className="agent-model-manage" onSelect={onOpenSettings}>
-                        <SlidersHorizontal size={12} strokeWidth={1.75} aria-hidden="true" />
-                        <span>管理模型预设…</span>
-                      </DropdownMenu.Item>
-                    </DropdownMenu.Content>
-                  </DropdownMenu.Portal>
-                </DropdownMenu.Root>
+                            <Search size={12} strokeWidth={1.75} aria-hidden="true" />
+                            <input
+                              type="text"
+                              aria-label="搜索可用模型"
+                              placeholder="搜索供应商或模型…"
+                              value={modelSearch}
+                              onChange={(event) => setModelSearch(event.target.value)}
+                            />
+                          </div>
+                        ) : null}
+
+                        <div className="agent-model-groups">
+                          {filteredProfileGroups.length === 0 ? (
+                            <p className="agent-model-empty">无匹配模型</p>
+                          ) : (
+                            <DropdownMenu.RadioGroup
+                              value={selectedEncoded}
+                              onValueChange={handleSelectModelChoice}
+                            >
+                              {filteredProfileGroups.map(({ profile, models }, groupIdx) => (
+                                <DropdownMenu.Group key={profile.id}>
+                                  {groupIdx > 0 ? <DropdownMenu.Separator className="agent-menu-sep" /> : null}
+                                  <DropdownMenu.Label className="agent-model-group-label">
+                                    <span>{profile.name}</span>
+                                    <span className="agent-model-group-provider">
+                                      {profile.provider === 'anthropic' ? 'Anthropic' : 'OpenAI'}
+                                    </span>
+                                  </DropdownMenu.Label>
+                                  {models.map((modelId) => {
+                                    const encoded = encodeModelChoice(profile.id, modelId)
+                                    return (
+                                      <DropdownMenu.RadioItem
+                                        key={encoded}
+                                        value={encoded}
+                                        className="agent-model-item"
+                                      >
+                                        <span className="agent-model-item-check" aria-hidden="true">
+                                          <DropdownMenu.ItemIndicator>
+                                            <Check size={12} strokeWidth={2} />
+                                          </DropdownMenu.ItemIndicator>
+                                        </span>
+                                        <span className="agent-model-item-text">
+                                          <span className="agent-model-item-name" title={`${profile.name} · ${modelId}`}>
+                                            {modelId}
+                                          </span>
+                                          {models.length === 1 ? (
+                                            <span className="agent-model-item-meta">{profile.name}</span>
+                                          ) : null}
+                                        </span>
+                                      </DropdownMenu.RadioItem>
+                                    )
+                                  })}
+                                </DropdownMenu.Group>
+                              ))}
+                            </DropdownMenu.RadioGroup>
+                          )}
+                        </div>
+
+                        <DropdownMenu.Separator className="agent-menu-sep" />
+                        <DropdownMenu.Item className="agent-model-manage" onSelect={onOpenSettings}>
+                          <SlidersHorizontal size={12} strokeWidth={1.75} aria-hidden="true" />
+                          <span>管理供应商与模型…</span>
+                        </DropdownMenu.Item>
+                      </DropdownMenu.Content>
+                    </DropdownMenu.Portal>
+                  </DropdownMenu.Root>
+                </div>
 
                 {streaming ? (
                   <button

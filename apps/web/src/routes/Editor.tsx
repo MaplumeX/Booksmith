@@ -54,7 +54,7 @@ import {
 } from 'lucide-react'
 import { Popover } from 'radix-ui'
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { ApiError, api, downloadUrl, type AgentProfileDto } from '../api/client'
+import { ApiError, api, downloadUrl, type AgentProfileDto, type AgentUserSettingsDto } from '../api/client'
 import { mediaTypeFromExtension, mediaTypeOf } from '../preview/render'
 import { spinePaths } from '../diff/document'
 import { navigate } from '../router'
@@ -271,6 +271,7 @@ export function Editor({ bookId }: { bookId: string }) {
   const wysiwygFlushRef = useRef<(() => void) | null>(null)
   const [agentProfiles, setAgentProfiles] = useState<AgentProfileDto[]>([])
   const [agentProfilesLoading, setAgentProfilesLoading] = useState(true)
+  const [agentUserSettings, setAgentUserSettings] = useState<AgentUserSettingsDto | null>(null)
   const [selectionText, setSelectionText] = useState('')
   const agentUndoRef = useRef<{ messageId: string; snapshot: WorkspaceSnapshot } | null>(null)
   const [agentUndoMessageId, setAgentUndoMessageId] = useState<string | null>(null)
@@ -337,13 +338,14 @@ export function Editor({ bookId }: { bookId: string }) {
   useEffect(() => {
     let cancelled = false
     setAgentProfilesLoading(true)
-    api
-      .agentProfiles()
-      .then((res) => {
-        if (!cancelled) setAgentProfiles(res.profiles)
-      })
-      .catch(() => {
-        if (!cancelled) setAgentProfiles([])
+    Promise.all([
+      api.agentProfiles().catch(() => ({ secretConfigured: true, profiles: [] as AgentProfileDto[] })),
+      api.agentSettings().catch(() => null),
+    ])
+      .then(([profileRes, settingsRes]) => {
+        if (cancelled) return
+        setAgentProfiles(profileRes.profiles)
+        if (settingsRes) setAgentUserSettings(settingsRes.settings)
       })
       .finally(() => {
         if (!cancelled) setAgentProfilesLoading(false)
@@ -1717,6 +1719,7 @@ export function Editor({ bookId }: { bookId: string }) {
                 selectionText={selectionText}
                 profiles={agentProfiles}
                 profilesLoading={agentProfilesLoading}
+                defaultApprovalMode={agentUserSettings?.defaultApprovalMode ?? 'review'}
                 undoMessageId={agentUndoMessageId}
                 getOverlay={() => {
                   wysiwygFlushRef.current?.()
@@ -1899,6 +1902,7 @@ export function Editor({ bookId }: { bookId: string }) {
         }}
         initialTab={settingsTab ?? 'general'}
         onAgentProfilesChanged={setAgentProfiles}
+        onAgentSettingsChanged={setAgentUserSettings}
       />
     </div>
   )
