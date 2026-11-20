@@ -16,6 +16,7 @@ services:
       retries: 20
 
   app:
+    image: ${BOOKSMITH_IMAGE:-ghcr.io/maplumex/booksmith:latest}
     build: .
     restart: unless-stopped
     depends_on:

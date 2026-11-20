@@ -5,9 +5,9 @@ const port = Number(process.env.PORT ?? 8787)
 const app = await createApp()
 
 try {
-  await app.listen({ port, host: '127.0.0.1' })
+  await app.listen({ port, host: process.env.HOST ?? '0.0.0.0' })
   const config = loadConfig()
-  console.log(`booksmith server on http://127.0.0.1:${port}`)
+  console.log(`booksmith server on http://${process.env.HOST ?? '0.0.0.0'}:${port}`)
   console.log(`allowed signup emails: ${config.allowedEmails.join(', ') || '(none)'}`)
 } catch (error) {
   console.error(error)

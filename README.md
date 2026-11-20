@@ -72,10 +72,33 @@ node e2e/audit-shots.mjs               # 1440 / 400 截图与溢出、断图、c
 
 ```bash
 POSTGRES_PASSWORD='…' ALLOWED_EMAILS='you@example.com' docker compose up -d
-docker compose exec app pnpm --filter @booksmith/server db:migrate
 ```
 
+迁移在容器启动时自动执行（`CMD` 里先跑 `db:migrate`），首次启动后看 `docker compose logs -f app`。
 对外暴露时把 `COOKIE_SECURE=true` 并放在 HTTPS 反向代理后面。
+
+## 发版
+
+推一个 `v*` tag，`.github/workflows/release.yml` 构建镜像并推到 GHCR：
+
+```bash
+git tag v0.1.0
+git push origin v0.1.0            # → ghcr.io/maplumex/booksmith:0.1.0 / 0.1 / latest
+```
+
+`workflow_dispatch` 手动跑一次则只打 `edge`（用于上线前验证流水线）。`linux/amd64` 单架构，
+要 arm64 就在 workflow 里加 `platforms` 的一行；镜像仍以 tar 形式包含 devDependencies 与 `tsx`，
+要减体积得改成多阶段构建。
+
+服务器上不构建、直接拉镜像部署：
+
+```bash
+POSTGRES_PASSWORD='…' ALLOWED_EMAILS='you@example.com' \
+  BOOKSMITH_IMAGE=ghcr.io/maplumex/booksmith:0.1.0 docker compose pull app
+docker compose up -d --no-build
+```
+
+GHCR 包默认随仓库可见（public 仓库即 public），拉取无需登录；回滚就是把 `BOOKSMITH_IMAGE` 指向旧版本。
 
 ## 环境变量
 
@@ -84,6 +107,7 @@ docker compose exec app pnpm --filter @booksmith/server db:migrate
 | `DATABASE_URL` | `postgres://booksmith:booksmith@127.0.0.1:55432/booksmith` | Postgres 连接串 |
 | `ALLOWED_EMAILS` | 空（不允许注册） | 逗号分隔的注册白名单 |
 | `PORT` | `8787` | API 端口 |
+| `HOST` | `0.0.0.0` | 监听地址（容器内必须保持 `0.0.0.0`，否则端口映射连不上） |
 | `COOKIE_SECURE` | `false` | 仅 HTTPS 下发送会话 cookie |
 | `SESSION_TTL_DAYS` | `30` | 会话有效期 |
 | `AGENT_SECRET_KEY` | 空（禁用加密保存 API Key） | 32 字节密钥（`openssl rand -hex 32`），AES-256-GCM 加密用户模型 API Key |
