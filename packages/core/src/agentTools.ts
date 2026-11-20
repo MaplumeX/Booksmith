@@ -66,7 +66,7 @@ export type AgentToolName =
   | 'rename_file'
   | 'delete_file'
 
-export const AGENT_TOOL_NAMES: readonly AgentToolName[] = [
+export const AGENT_READ_ONLY_TOOL_NAMES: readonly AgentToolName[] = [
   'list_files',
   'read_file',
   'search_book',
@@ -74,6 +74,18 @@ export const AGENT_TOOL_NAMES: readonly AgentToolName[] = [
   'get_metadata',
   'get_toc',
   'scan_headings',
+] as const
+
+const READ_ONLY_TOOL_SET = new Set<string>(AGENT_READ_ONLY_TOOL_NAMES)
+
+/** Single source of truth for `ask` (read-only) mode tool filtering.
+ * See ADR 2026-11-20-agent-modes-and-multimodel. */
+export function isReadOnlyAgentTool(name: AgentToolName): boolean {
+  return READ_ONLY_TOOL_SET.has(name)
+}
+
+export const AGENT_TOOL_NAMES: readonly AgentToolName[] = [
+  ...AGENT_READ_ONLY_TOOL_NAMES,
   'edit_file',
   'write_file',
   'update_metadata',

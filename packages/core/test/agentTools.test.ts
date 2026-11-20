@@ -1,6 +1,6 @@
 import { DOMParser, XMLSerializer } from '@xmldom/xmldom'
 import { describe, expect, it } from 'vitest'
-import { AgentWorkspace, createEmptyEpub, openEpub } from '../src'
+import { AGENT_READ_ONLY_TOOL_NAMES, AGENT_TOOL_NAMES, AgentWorkspace, createEmptyEpub, isReadOnlyAgentTool, openEpub } from '../src'
 import type { XmlCodec } from '../src/xml'
 import { readFixture } from './helpers'
 
@@ -85,6 +85,34 @@ describe('AgentWorkspace read tools on real EPUB fixture', () => {
     const tocData = toc.data as { source: string; entries: unknown[] }
     expect(tocData.source).toBe('nav')
     expect(tocData.entries.length).toBeGreaterThan(0)
+  })
+  it('partitions read-only tools cleanly from write tools for ask approval mode', () => {
+    expect(AGENT_READ_ONLY_TOOL_NAMES).toEqual([
+      'list_files',
+      'read_file',
+      'search_book',
+      'lint_book',
+      'get_metadata',
+      'get_toc',
+      'scan_headings',
+    ])
+    expect(AGENT_TOOL_NAMES).toHaveLength(16)
+    for (const name of AGENT_READ_ONLY_TOOL_NAMES) {
+      expect(AGENT_TOOL_NAMES).toContain(name)
+      expect(isReadOnlyAgentTool(name)).toBe(true)
+    }
+    const writeTools = AGENT_TOOL_NAMES.filter((name) => !isReadOnlyAgentTool(name))
+    expect(writeTools).toEqual([
+      'edit_file',
+      'write_file',
+      'update_metadata',
+      'update_toc',
+      'generate_toc',
+      'edit_toc',
+      'create_chapter',
+      'rename_file',
+      'delete_file',
+    ])
   })
 })
 

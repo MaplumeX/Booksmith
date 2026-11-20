@@ -18,7 +18,7 @@ function writeOpenAiSse(res: ServerResponse, chunks: unknown[]) {
   res.end()
 }
 
-async function clearAgentProfiles(): Promise<void> {
+async function resetAgentState(): Promise<void> {
   const ctx = await playwrightRequest.newContext({ baseURL: API })
   await ctx.post('/api/auth/login', { data: { email: E2E_EMAIL, password: E2E_PASSWORD } })
   const res = await ctx.get('/api/agent/profiles')
@@ -26,13 +26,19 @@ async function clearAgentProfiles(): Promise<void> {
     const body = (await res.json()) as { profiles: Array<{ id: string }> }
     for (const p of body.profiles) await ctx.delete(`/api/agent/profiles/${p.id}`)
   }
+  await ctx.patch('/api/agent/settings', {
+    data: { defaultApprovalMode: 'review', maxSteps: 15, customInstructions: '' },
+  })
   await ctx.dispose()
 }
 
 let mockServer: ReturnType<typeof createServer>
 let mockUrl = ''
-let mode: 'proofread' | 'chapter' = 'proofread'
+let mode: 'proofread' | 'chapter' | 'ask-reasoning' | 'auto-edit' | 'retry-fail' | 'retry-ok' = 'proofread'
 let turnStep = 0
+let lastModelSeen = ''
+let lastToolCountSeen = 0
+let lastSystemPromptSeen = ''
 
 test.beforeAll(async () => {
   mockServer = createServer(async (req, res) => {
@@ -40,7 +46,23 @@ test.beforeAll(async () => {
     const bodyText = await readBody(req)
     const body = bodyText ? (JSON.parse(bodyText) as Record<string, unknown>) : {}
 
+    if (url.pathname === '/v1/models' && req.method === 'GET') {
+      res.writeHead(200, { 'content-type': 'application/json' })
+      res.end(
+        JSON.stringify({
+          object: 'list',
+          data: [{ id: 'mock-fast' }, { id: 'mock-pro' }, { id: 'mock-reasoner' }],
+        }),
+      )
+      return
+    }
+
     if (url.pathname === '/v1/chat/completions') {
+      lastModelSeen = typeof body.model === 'string' ? body.model : ''
+      lastToolCountSeen = Array.isArray(body.tools) ? body.tools.length : 0
+      const msgs = Array.isArray(body.messages) ? (body.messages as Array<{ role?: string; content?: string }>) : []
+      lastSystemPromptSeen = msgs.find((m) => m.role === 'system')?.content ?? ''
+
       if (body.stream !== true) {
         res.writeHead(200, { 'content-type': 'application/json' })
         res.end(
@@ -55,7 +77,125 @@ test.beforeAll(async () => {
         return
       }
 
+      if (mode === 'retry-fail') {
+        res.writeHead(401, { 'content-type': 'application/json' })
+        res.end(JSON.stringify({ error: { message: 'invalid key' } }))
+        return
+      }
+
+      if (mode === 'retry-ok') {
+        writeOpenAiSse(res, [
+          {
+            id: 'rt-ok',
+            object: 'chat.completion.chunk',
+            created: 1,
+            model: lastModelSeen || 'mock-pro',
+            choices: [
+              {
+                index: 0,
+                delta: { role: 'assistant', content: `已通过 ${lastModelSeen} 重试成功。` },
+                finish_reason: 'stop',
+              },
+            ],
+          },
+        ])
+        return
+      }
+
+      if (mode === 'ask-reasoning') {
+        writeOpenAiSse(res, [
+          {
+            id: 'ask-r1',
+            object: 'chat.completion.chunk',
+            created: 1,
+            model: lastModelSeen || 'mock-reasoner',
+            choices: [
+              {
+                index: 0,
+                delta: { role: 'assistant', reasoning_content: '核对只读权限边界与自定义学术校对指令。' },
+                finish_reason: null,
+              },
+            ],
+          },
+          {
+            id: 'ask-r1',
+            object: 'chat.completion.chunk',
+            created: 1,
+            model: lastModelSeen || 'mock-reasoner',
+            choices: [
+              {
+                index: 0,
+                delta: { content: '只读顾问回复：建议统一全角引号。' },
+                finish_reason: 'stop',
+              },
+            ],
+          },
+        ])
+        return
+      }
+
       turnStep += 1
+      if (mode === 'auto-edit') {
+        if (turnStep === 1) {
+          writeOpenAiSse(res, [
+            {
+              id: 'a1',
+              object: 'chat.completion.chunk',
+              created: 1,
+              model: 'mock-pro',
+              choices: [
+                {
+                  index: 0,
+                  delta: {
+                    role: 'assistant',
+                    tool_calls: [
+                      {
+                        index: 0,
+                        id: 'call_auto_1',
+                        type: 'function',
+                        function: {
+                          name: 'edit_file',
+                          arguments: JSON.stringify({
+                            path: 'EPUB/text/ch001.xhtml',
+                            oldText: '未保存测试错字',
+                            newText: '自动模式修正文本',
+                          }),
+                        },
+                      },
+                    ],
+                  },
+                  finish_reason: null,
+                },
+              ],
+            },
+            {
+              id: 'a1',
+              object: 'chat.completion.chunk',
+              created: 1,
+              model: 'mock-pro',
+              choices: [{ index: 0, delta: {}, finish_reason: 'tool_calls' }],
+            },
+          ])
+          return
+        }
+        writeOpenAiSse(res, [
+          {
+            id: 'a2',
+            object: 'chat.completion.chunk',
+            created: 1,
+            model: 'mock-pro',
+            choices: [
+              {
+                index: 0,
+                delta: { role: 'assistant', content: '已按自动模式完成章节错字修正。' },
+                finish_reason: 'stop',
+              },
+            ],
+          },
+        ])
+        return
+      }
+
       if (mode === 'proofread') {
         if (turnStep === 1) {
           writeOpenAiSse(res, [
@@ -169,7 +309,13 @@ test.beforeAll(async () => {
           object: 'chat.completion.chunk',
           created: 1,
           model: 'mock',
-          choices: [{ index: 0, delta: { role: 'assistant', content: '已生成「后记」章节并同步加入目录。' }, finish_reason: 'stop' }],
+          choices: [
+            {
+              index: 0,
+              delta: { role: 'assistant', content: '已生成「后记」章节并同步加入目录。' },
+              finish_reason: 'stop',
+            },
+          ],
         },
       ])
       return
@@ -189,15 +335,15 @@ test.beforeAll(async () => {
 })
 
 test.afterAll(async () => {
-  await clearAgentProfiles()
+  await resetAgentState()
   await new Promise<void>((resolve) => mockServer.close(() => resolve()))
 })
 
-test('multi-profile setup, streaming proofreading diff apply/undo, structural create, and history persistence', async ({
+test('multi-model provider fetch, approval modes (ask/review/auto), reasoning, cloud prefs, and last-turn retry', async ({
   page,
 }) => {
   const bookId = await seedBook()
-  await clearAgentProfiles()
+  await resetAgentState()
 
   await login(page)
   await expectLoggedIn(page)
@@ -209,31 +355,36 @@ test('multi-profile setup, streaming proofreading diff apply/undo, structural cr
   await page.getByRole('button', { name: '助手' }).click()
   await expect(page.getByText('配置模型以启用助手')).toBeVisible()
 
-  // Configure first preset + test connection
+  // Configure cloud runtime preferences + single provider with multiple models fetched from /v1/models
   await page.getByRole('button', { name: '配置模型预设' }).click()
   const dialog = page.getByRole('dialog', { name: '应用设置' })
   await expect(dialog).toBeVisible()
   await expect(dialog.getByRole('tab', { name: 'AI 助手' })).toHaveAttribute('aria-selected', 'true')
-  await expect(dialog.getByRole('radio', { name: /OpenAI 兼容/ })).toHaveAttribute('aria-checked', 'true')
 
-  await dialog.getByLabel('预设名称').fill('快速校对')
+  // Adjust cloud preferences (free-input max steps > 30 + custom instructions)
+  await dialog.getByTestId('agent-max-steps-input').fill('80')
+  await expect(dialog.getByTestId('agent-max-steps-input')).toHaveValue('80')
+  await dialog.getByLabel(/自定义附加指令/).fill('校对时保留原文学术术语。')
+  await dialog.getByRole('button', { name: '保存偏好' }).click()
+  await expect(dialog.getByText('运行偏好已同步保存')).toBeVisible()
+
+  // Configure provider once and fetch multiple models under the same API key
+  await dialog.getByLabel('预设名称').fill('统一中转')
   await dialog.getByLabel('Base URL').fill(`${mockUrl}/v1`)
   await dialog.getByLabel('模型名称').fill('mock-fast')
   await dialog.getByLabel('API Key（本地模型可留空）').fill('sk-e2e-secret-9999')
+
+  await dialog.getByRole('button', { name: '拉取模型列表' }).click()
+  await expect(dialog.getByRole('button', { name: 'mock-pro' })).toBeVisible()
+  await dialog.getByRole('button', { name: 'mock-pro' }).click()
+  await dialog.getByRole('button', { name: 'mock-reasoner' }).click()
 
   await dialog.getByRole('button', { name: '测试连接' }).click()
   await expect(dialog.getByText(/连接成功/)).toBeVisible()
 
   await dialog.getByRole('button', { name: '添加预设' }).click()
   await expect(dialog.getByText('预设已保存')).toBeVisible()
-
-  // Add second preset for switching in chat composer
-  await dialog.getByRole('button', { name: '新增' }).click()
-  await dialog.getByLabel('预设名称').fill('结构重构')
-  await dialog.getByLabel('Base URL').fill(`${mockUrl}/v1`)
-  await dialog.getByLabel('模型名称').fill('mock-pro')
-  await dialog.getByRole('button', { name: '添加预设' }).click()
-  await expect(dialog.getByText('预设已保存')).toBeVisible()
+  await expect(dialog.locator('.agent-profile-model-count')).toHaveText('+2')
 
   await dialog.getByRole('button', { name: '关闭', exact: true }).click()
   await expect(dialog).toBeHidden()
@@ -255,38 +406,78 @@ test('multi-profile setup, streaming proofreading diff apply/undo, structural cr
   await page.getByRole('button', { name: '重新挂载当前文件上下文' }).click()
   await expect(page.locator('.agent-context-chip')).toContainText('ch001.xhtml')
 
-  // Turn 1: pure text proofreading proposal on unsaved edit (with Markdown rendering check)
-  mode = 'proofread'
-  turnStep = 0
-  await page.getByLabel('向助手输入指令').fill('帮我修正未保存的错字')
+  // Turn 1: switch to same-provider `mock-reasoner` + `ask` (read-only) mode -> reasoning block & 7 tools & custom prompt
+  await page.getByRole('button', { name: '切换审批模式' }).click()
+  await page.getByRole('menuitemradio', { name: /只读/ }).click()
+  await page.getByRole('button', { name: '选择模型预设' }).click()
+  await page.getByRole('menuitemradio', { name: 'mock-reasoner' }).click()
+
+  mode = 'ask-reasoning'
+  await page.getByLabel('向助手输入指令').fill('只读检查一下引号')
   await page.getByRole('button', { name: '发送' }).click()
 
-  await expect(page.locator('.agent-bubble.is-assistant .agent-md strong')).toContainText('未保存草稿')
-  await expect(page.locator('.agent-bubble.is-assistant .agent-md code')).toContainText('ch001.xhtml')
-  await expect(page.getByText('纯文本 · 可勾选')).toBeVisible()
-  await expect(page.locator('.diff-inline-added')).toContainText('已校对正确文本')
+  await expect(page.getByText('只读顾问回复：建议统一全角引号。')).toBeVisible()
+  expect(lastModelSeen).toBe('mock-reasoner')
+  expect(lastToolCountSeen).toBe(7)
+  expect(lastSystemPromptSeen).toContain('校对时保留原文学术术语。')
 
-  // Apply proposal -> editor updates immediately, then undo restores original text
-  await page.getByRole('button', { name: '应用变更' }).click()
-  await expect(page.getByText('已应用变更到工作区')).toBeVisible()
-  await expect(page.locator('.cm-content')).toContainText('已校对正确文本')
+  // Expand collapsed reasoning trace block
+  await page.getByRole('button', { name: /思考过程/ }).click()
+  await expect(page.getByText('核对只读权限边界与自定义学术校对指令。')).toBeVisible()
 
+  // Turn 2: switch to `auto` mode + same-provider `mock-pro` -> auto-applies to workspace with undo button
+  await page.getByRole('button', { name: '切换审批模式' }).click()
+  await page.getByRole('menuitemradio', { name: /自动/ }).click()
+  await expect(page.locator('.agent-mode-trigger.is-auto')).toBeVisible()
+
+  await page.getByRole('button', { name: '选择模型预设' }).click()
+  await page.getByRole('menuitemradio', { name: 'mock-pro' }).click()
+
+  mode = 'auto-edit'
+  turnStep = 0
+  await page.getByLabel('向助手输入指令').fill('自动修正未保存的错字')
+  await page.getByRole('button', { name: '发送' }).click()
+
+  await expect(page.getByText('已自动应用到工作区（1 个文件）')).toBeVisible()
+  await expect(page.locator('.cm-content')).toContainText('自动模式修正文本')
+  expect(lastModelSeen).toBe('mock-pro')
+  expect(lastToolCountSeen).toBe(16)
+
+  // Retry button is disabled on applied proposal turn
+  await expect(page.getByRole('button', { name: '重试此回复' })).toBeDisabled()
+
+  // Undo restores original unsaved text
   await page.getByRole('button', { name: '撤销本次应用' }).click()
   await expect(page.locator('.cm-content')).toContainText('未保存测试错字')
 
-  // Turn 2: switch model via Radix menu and run structural create_chapter proposal
-  mode = 'chapter'
+  // Turn 3: review mode proofreading diff apply + structural create_chapter
+  await page.getByRole('button', { name: '切换审批模式' }).click()
+  await page.getByRole('menuitemradio', { name: /审阅/ }).click()
+
+  mode = 'proofread'
   turnStep = 0
-  await page.getByRole('button', { name: '选择模型预设' }).click()
-  await page.getByRole('menuitemradio', { name: /结构重构/ }).click()
-  await page.getByLabel('向助手输入指令').fill('新建后记章节并加入目录')
+  await page.getByLabel('向助手输入指令').fill('审阅修正错字')
   await page.getByRole('button', { name: '发送' }).click()
 
-  await expect(page.getByText('已生成「后记」章节并同步加入目录。')).toBeVisible()
-  await expect(page.getByText('结构变更 · 整批应用')).toBeVisible()
+  await expect(page.locator('.agent-bubble.is-assistant .agent-md strong')).toContainText('未保存草稿')
+  await expect(page.getByText('纯文本 · 可勾选')).toBeVisible()
+  await expect(page.locator('.diff-inline-added')).toContainText('已校对正确文本')
+  await page.getByRole('button', { name: '应用变更' }).click()
+  await expect(page.locator('.cm-content')).toContainText('已校对正确文本')
 
-  await page.getByRole('button', { name: '应用全部变更' }).click()
-  await expect(page.getByRole('button', { name: 'afterword.xhtml', exact: true })).toBeVisible()
+  // Turn 4: failed turn -> switch model and retry in place without duplicating user bubbles
+  mode = 'retry-fail'
+  await page.getByLabel('向助手输入指令').fill('测试失败重试')
+  await page.getByRole('button', { name: '发送' }).click()
+  await expect(page.getByText(/模型鉴权失败/)).toBeVisible()
+
+  const userTurnsBefore = await page.locator('.agent-turn.is-user').count()
+  await page.getByRole('button', { name: '选择模型预设' }).click()
+  await page.getByRole('menuitemradio', { name: 'mock-fast' }).click()
+  mode = 'retry-ok'
+  await page.getByRole('button', { name: '重试此回复' }).click()
+  await expect(page.getByText('已通过 mock-fast 重试成功。')).toBeVisible()
+  expect(await page.locator('.agent-turn.is-user').count()).toBe(userTurnsBefore)
 
   // Rename thread inside Radix history Popover and verify persistence across reload
   await page.getByRole('button', { name: '切换历史对话' }).click()
@@ -296,13 +487,13 @@ test('multi-profile setup, streaming proofreading diff apply/undo, structural cr
   await expect(page.locator('.agent-thread-trigger-title')).toHaveText('第一章校对记录')
   await page.keyboard.press('Escape')
 
-  // Reload page and confirm thread title, history & applied status persisted in Postgres
+  // Reload page and confirm thread title, model, approvalMode, reasoning & retried reply persisted
   await page.reload()
   await page.waitForSelector('.cm-content')
   await page.getByRole('button', { name: '助手' }).click()
   await expect(page.locator('.agent-thread-trigger-title')).toHaveText('第一章校对记录')
-  await expect(page.getByText('已生成「后记」章节并同步加入目录。')).toBeVisible()
-  await expect(page.getByText('已应用变更到工作区').first()).toBeVisible()
+  await expect(page.locator('.agent-model-trigger-name')).toHaveText('mock-fast')
+  await expect(page.getByText('已通过 mock-fast 重试成功。')).toBeVisible()
 
   // Check zero horizontal overflow at 1440px and 400px mobile viewport
   const desktopOverflow = await page.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth)
