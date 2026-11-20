@@ -134,6 +134,10 @@ describe.each(THEMES)('%s theme', (themeName, selector) => {
   })
 })
 
-it('never uses pure black', () => {
+it('never uses pure black and defines the Soft Craft Studio radii scale', () => {
   expect(css.toLowerCase()).not.toMatch(/#000(?![0-9a-f])/)
+  const rootVars = blockAllVars(':root')
+  expect(rootVars['--radius-sm']).toBe('6px')
+  expect(rootVars['--radius-md']).toBe('10px')
+  expect(rootVars['--radius-lg']).toBe('16px')
 })

@@ -101,25 +101,29 @@ export function MetadataPanel({ metadata, opfXml, version, onApply, onApplyMeta 
 
   return (
     <div className="panel-form">
-      <p className="panel-note">修改直接写入 OPF 并标脏，⌘S 保存后生效。</p>
-      {FIELDS.map((field) => (
-        <label key={field.key} className="panel-field">
-          <span>{field.label}</span>
-          {field.multiline ? (
-            <textarea
-              rows={4}
-              value={draft[field.key]}
-              onChange={(event) => apply({ ...draft, [field.key]: event.target.value })}
-            />
-          ) : (
-            <input
-              type="text"
-              value={draft[field.key]}
-              onChange={(event) => apply({ ...draft, [field.key]: event.target.value })}
-            />
-          )}
-        </label>
-      ))}
+      <div className="metadata-grid">
+        {FIELDS.map((field) => (
+          <label
+            key={field.key}
+            className={`panel-field${field.multiline || field.key === 'rights' || field.key === 'subjects' ? ' is-full' : ''}`}
+          >
+            <span>{field.label}</span>
+            {field.multiline ? (
+              <textarea
+                rows={3}
+                value={draft[field.key]}
+                onChange={(event) => apply({ ...draft, [field.key]: event.target.value })}
+              />
+            ) : (
+              <input
+                type="text"
+                value={draft[field.key]}
+                onChange={(event) => apply({ ...draft, [field.key]: event.target.value })}
+              />
+            )}
+          </label>
+        ))}
+      </div>
       <Button variant="ghost" size="sm" onClick={() => setDraft(toDraft(metadata))}>
         <RotateCcw size={13} strokeWidth={1.7} aria-hidden="true" />
         <span>还原未修改的值</span>
@@ -136,36 +140,26 @@ export function MetadataPanel({ metadata, opfXml, version, onApply, onApplyMeta 
         <ul className="meta-rows">
           {rows.map((row, index) => (
             <li className="meta-row" key={index}>
-              <div className="meta-row-head">
-                <input
-                  aria-label={`meta ${index + 1} property`}
-                  value={row.property}
-                  placeholder="property"
-                  onChange={(event) => {
-                    const next = [...rows]
-                    next[index] = { ...row, property: event.target.value }
-                    applyRows(next)
-                  }}
-                />
-                <input
-                  aria-label={`meta ${index + 1} refines`}
-                  value={row.refines}
-                  placeholder="#creator"
-                  onChange={(event) => {
-                    const next = [...rows]
-                    next[index] = { ...row, refines: event.target.value }
-                    applyRows(next)
-                  }}
-                />
-                <button
-                  type="button"
-                  className="meta-remove"
-                  aria-label={`删除 meta ${index + 1}`}
-                  onClick={() => applyRows(rows.filter((_, at) => at !== index))}
-                >
-                  <X size={13} strokeWidth={1.75} aria-hidden="true" />
-                </button>
-              </div>
+              <input
+                aria-label={`meta ${index + 1} property`}
+                value={row.property}
+                placeholder="property"
+                onChange={(event) => {
+                  const next = [...rows]
+                  next[index] = { ...row, property: event.target.value }
+                  applyRows(next)
+                }}
+              />
+              <input
+                aria-label={`meta ${index + 1} refines`}
+                value={row.refines}
+                placeholder="#creator"
+                onChange={(event) => {
+                  const next = [...rows]
+                  next[index] = { ...row, refines: event.target.value }
+                  applyRows(next)
+                }}
+              />
               <input
                 aria-label={`meta ${index + 1} 值`}
                 value={row.value}
@@ -176,6 +170,14 @@ export function MetadataPanel({ metadata, opfXml, version, onApply, onApplyMeta 
                   applyRows(next)
                 }}
               />
+              <button
+                type="button"
+                className="meta-remove"
+                aria-label={`删除 meta ${index + 1}`}
+                onClick={() => applyRows(rows.filter((_, at) => at !== index))}
+              >
+                <X size={13} strokeWidth={1.75} aria-hidden="true" />
+              </button>
             </li>
           ))}
         </ul>

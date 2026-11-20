@@ -18,6 +18,7 @@ interface DialogProps {
   headerExtra?: ReactNode
   footer?: ReactNode
   onSubmit?: FormEventHandler<HTMLFormElement>
+  onCloseAutoFocus?: (event: Event) => void
   children: ReactNode
 }
 
@@ -38,6 +39,7 @@ export function Dialog({
   headerExtra,
   footer,
   onSubmit,
+  onCloseAutoFocus,
   children,
 }: DialogProps) {
   const contentClass = `${size === 'wide' ? 'dialog dialog-wide' : 'dialog'} ${className}`.trim()
@@ -56,6 +58,7 @@ export function Dialog({
         <RadixDialog.Content
           className={contentClass}
           aria-label={ariaLabel}
+          onCloseAutoFocus={onCloseAutoFocus}
           {...(ariaLabel ? { 'aria-labelledby': undefined } : {})}
           {...(description ? {} : { 'aria-describedby': undefined })}
         >
