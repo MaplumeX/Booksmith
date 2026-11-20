@@ -103,3 +103,85 @@ test('selection background covers whole line boxes, including wrapped lines', as
   expect(Math.abs(gaps.top)).toBeLessThan(0.5)
   expect(Math.abs(gaps.bottom)).toBeLessThan(0.5)
 })
+
+test('word-wrapped partial selection only highlights the selected visual row, not the entire wrapped line', async ({
+  page,
+}) => {
+  await openWorkbench(page)
+  await page.getByRole('button', { name: 'ch003.xhtml', exact: true }).click()
+  await expect(page.locator('.cm-content')).toContainText('序言')
+
+  // Find a wrapped `.cm-line` (height >= 2x single line height) and drag-select a short slice inside its second visual row.
+  const wrappedInfo = await page.evaluate(() => {
+    const lines = [...document.querySelectorAll<HTMLElement>('.cm-line')]
+    const singleHeight = lines[0]!.getBoundingClientRect().height
+    const wrapped = lines.find((el) => el.getBoundingClientRect().height >= singleHeight * 2.5)
+    if (!wrapped) return null
+    const rect = wrapped.getBoundingClientRect()
+    return {
+      singleHeight,
+      lineTop: rect.top,
+      lineBottom: rect.bottom,
+      lineHeight: rect.height,
+      lineLeft: rect.left,
+      lineWidth: rect.width,
+    }
+  })
+  expect(wrappedInfo).not.toBeNull()
+  const info = wrappedInfo!
+
+  // Drag horizontally across ~90px in the middle of the second visual row.
+  const y = info.lineTop + info.singleHeight * 1.5
+  const startX = info.lineLeft + 60
+  const endX = info.lineLeft + 150
+  await page.mouse.move(startX, y)
+  await page.mouse.down()
+  await page.mouse.move(endX, y, { steps: 6 })
+  await page.mouse.up()
+
+  await expect(page.locator('.cm-selectionBackground')).toHaveCount(1)
+
+  const singleRowResult = await page.evaluate(() => {
+    const marker = document.querySelector<HTMLElement>('.cm-selectionBackground')!
+    const m = marker.getBoundingClientRect()
+    return { top: m.top, bottom: m.bottom, height: m.height, left: m.left, width: m.width }
+  })
+
+  // Must match one visual row (not the entire multi-row `.cm-line`), and stay within the dragged horizontal span.
+  expect(Math.abs(singleRowResult.height - info.singleHeight)).toBeLessThan(1.5)
+  expect(singleRowResult.height).toBeLessThan(info.lineHeight * 0.6)
+  expect(singleRowResult.top).toBeGreaterThan(info.lineTop + info.singleHeight * 0.5)
+  expect(singleRowResult.bottom).toBeLessThan(info.lineBottom - info.singleHeight * 0.5)
+  expect(singleRowResult.width).toBeGreaterThan(40)
+  expect(singleRowResult.width).toBeLessThan(info.lineWidth * 0.5)
+
+  // Now drag across 3 visual rows within the same wrapped line: middle `between` rectangle must not expand onto row 1 or row 3.
+  const startY3 = info.lineTop + info.singleHeight * 0.5
+  const endY3 = info.lineTop + info.singleHeight * 2.5
+  await page.mouse.move(info.lineLeft + 180, startY3)
+  await page.mouse.down()
+  await page.mouse.move(info.lineLeft + 100, endY3, { steps: 8 })
+  await page.mouse.up()
+
+  await expect(page.locator('.cm-selectionBackground')).toHaveCount(3)
+
+  const multiRowRects = await page.evaluate(() =>
+    [...document.querySelectorAll<HTMLElement>('.cm-selectionBackground')]
+      .map((el) => {
+        const r = el.getBoundingClientRect()
+        return { top: r.top, bottom: r.bottom, height: r.height, left: r.left, width: r.width }
+      })
+      .sort((a, b) => a.top - b.top),
+  )
+
+  expect(multiRowRects).toHaveLength(3)
+  // Row 0, Row 1 (between), Row 2 should each be ~1 visual row tall and meet seamlessly with zero overlap or gap.
+  for (const r of multiRowRects) {
+    expect(Math.abs(r.height - info.singleHeight)).toBeLessThan(1.5)
+  }
+  expect(Math.abs(multiRowRects[0]!.bottom - multiRowRects[1]!.top)).toBeLessThan(0.5)
+  expect(Math.abs(multiRowRects[1]!.bottom - multiRowRects[2]!.top)).toBeLessThan(0.5)
+  // Top piece starts to the right of the line's left edge; bottom piece ends before the line's right edge.
+  expect(multiRowRects[0]!.left).toBeGreaterThan(info.lineLeft + 100)
+  expect(multiRowRects[2]!.width).toBeLessThan(info.lineWidth * 0.5)
+})
