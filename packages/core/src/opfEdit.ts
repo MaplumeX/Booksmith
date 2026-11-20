@@ -116,3 +116,10 @@ export function reorderSpine(
   for (const ref of ordered) spine.appendChild(ref)
   return codec.serialize(doc)
 }
+
+/** Sets `<spine toc="...">` so EPUB 2 readers locate the registered NCX document. */
+export function setSpineToc(xml: string, ncxId: string, codec: XmlCodec): string {
+  const doc = codec.parse(xml)
+  spineElement(doc).setAttribute('toc', ncxId)
+  return codec.serialize(doc)
+}

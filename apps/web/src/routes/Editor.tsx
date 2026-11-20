@@ -7,10 +7,12 @@ import {
   collectReferences,
   dirname,
   findBrokenAnchors,
+  initializeBookToc,
   lintBook,
   parsePackage,
   readNavToc,
   readNcxToc,
+  rebaseTocHrefs,
   relativePath,
   removeManifestEntry,
   renameManifestEntry,
@@ -18,6 +20,7 @@ import {
   setManifestMediaType,
   resolvePath,
   rewriteReferences,
+  splitFragment,
   touchOpfModified,
   writeNavToc,
   writeNcxToc,
@@ -211,6 +214,25 @@ export function Editor({ bookId }: { bookId: string }) {
   const [settingsTab, setSettingsTab] = useState<SettingsTab | null>(null)
   const [sidebarWidth, setSidebarWidth] = useState(440)
   const [reveal, setReveal] = useState<RevealTarget | null>(null)
+  const [revealFragment, setRevealFragment] = useState<{ path: string; fragment: string; key: number } | null>(null)
+  const [activeTocHref, setActiveTocHref] = useState<string | null>(null)
+  const tocUndoStack = useRef<
+    Array<{
+      beforeTexts: Map<string, string | undefined>
+      beforeDirty: Set<string>
+      afterTexts: Map<string, string | undefined>
+      afterDirty: Set<string>
+    }>
+  >([])
+  const tocRedoStack = useRef<
+    Array<{
+      beforeTexts: Map<string, string | undefined>
+      beforeDirty: Set<string>
+      afterTexts: Map<string, string | undefined>
+      afterDirty: Set<string>
+    }>
+  >([])
+  const [tocHistoryState, setTocHistoryState] = useState({ canUndo: false, canRedo: false })
   const assetInput = useRef<HTMLInputElement>(null)
   const [saving, setSaving] = useState(false)
   const [showSaving, setShowSaving] = useState(false)
@@ -745,8 +767,10 @@ export function Editor({ bookId }: { bookId: string }) {
       const text = texts.current.get(target.path)
       if (text === undefined) return
       open(target.path)
+      const key = Date.now()
+      setRevealFragment({ path: target.path, fragment: target.fragment, key })
       if (!target.fragment) {
-        setReveal({ line: 1, column: 1, key: Date.now() })
+        setReveal({ line: 1, column: 1, key })
         return
       }
       const index = fragmentIndex(text, target.fragment)
@@ -754,10 +778,164 @@ export function Editor({ bookId }: { bookId: string }) {
       setReveal({
         line: lineOf(text, index),
         column: index - text.lastIndexOf('\n', index - 1),
-        key: Date.now(),
+        key,
       })
     },
     [open],
+  )
+
+  const syncTocHistoryFlags = useCallback(() => {
+    setTocHistoryState({
+      canUndo: tocUndoStack.current.length > 0,
+      canRedo: tocRedoStack.current.length > 0,
+    })
+  }, [])
+
+  const applyTocMutation = useCallback(
+    (nextEntries: TocEntry[], extraChapters?: Map<string, string>) => {
+      const current = bookRef.current
+      if (!current) return
+      const { navPath, ncxPath } = current.pkg
+      const primaryTocPath = navPath ?? ncxPath
+      if (!primaryTocPath) return
+
+      const updates = new Map<string, string>()
+      if (extraChapters) {
+        for (const [chapterPath, chapterXml] of extraChapters) {
+          updates.set(chapterPath, chapterXml)
+        }
+      }
+      if (navPath) {
+        const navXml = texts.current.get(navPath)
+        if (navXml) updates.set(navPath, writeNavToc(navXml, nextEntries, browserXmlCodec))
+      }
+      if (ncxPath) {
+        const ncxXml = texts.current.get(ncxPath)
+        if (ncxXml) {
+          const rebased = rebaseTocHrefs(nextEntries, primaryTocPath, ncxPath)
+          updates.set(ncxPath, writeNcxToc(ncxXml, rebased, browserXmlCodec))
+        }
+      }
+      if (updates.size === 0) return
+
+      // Record per-path before/after snapshots (up to 50 steps) so TOC edits and auto-injected
+      // heading ids undo atomically without resetting unrelated chapter dirty flags.
+      // See ADR 2026-11-20-toc-workbench-enhancements.
+      const beforeTexts = new Map<string, string | undefined>()
+      const afterTexts = new Map<string, string | undefined>()
+      const beforeDirty = new Set<string>(dirtyRef.current)
+      const afterDirty = new Set<string>(dirtyRef.current)
+      let activeModified = false
+
+      for (const [filePath, nextXml] of updates) {
+        beforeTexts.set(filePath, texts.current.get(filePath))
+        afterTexts.set(filePath, nextXml)
+        texts.current.set(filePath, nextXml)
+        afterDirty.add(filePath)
+        if (filePath === activeRef.current) activeModified = true
+        for (const listener of textListeners.current) listener(filePath, nextXml)
+      }
+
+      tocUndoStack.current.push({ beforeTexts, beforeDirty, afterTexts, afterDirty })
+      if (tocUndoStack.current.length > 50) tocUndoStack.current.shift()
+      tocRedoStack.current = []
+      syncTocHistoryFlags()
+
+      dirtyRef.current = afterDirty
+      setDirty(afterDirty)
+      setRevision((rev) => rev + 1)
+      if (activeModified || (extraChapters && extraChapters.size > 0)) {
+        setExternalResetVersion((v) => v + 1)
+      }
+      scheduleDraft()
+      autosave.current?.touch()
+    },
+    [scheduleDraft, syncTocHistoryFlags],
+  )
+
+  const restoreTocSnapshot = useCallback(
+    (snapshotTexts: Map<string, string | undefined>, snapshotDirty: Set<string>) => {
+      let touchedOpen = false
+      for (const [filePath, value] of snapshotTexts) {
+        if (value === undefined) texts.current.delete(filePath)
+        else texts.current.set(filePath, value)
+        if (filePath === activeRef.current || tabsRef.current.includes(filePath)) touchedOpen = true
+        if (value !== undefined) {
+          for (const listener of textListeners.current) listener(filePath, value)
+        }
+      }
+      const nextDirty = new Set<string>(dirtyRef.current)
+      for (const filePath of snapshotTexts.keys()) {
+        if (snapshotDirty.has(filePath)) nextDirty.add(filePath)
+        else nextDirty.delete(filePath)
+      }
+      dirtyRef.current = nextDirty
+      setDirty(nextDirty)
+      setRevision((rev) => rev + 1)
+      if (touchedOpen) setExternalResetVersion((v) => v + 1)
+      scheduleDraft()
+      autosave.current?.touch()
+    },
+    [scheduleDraft],
+  )
+
+  const undoToc = useCallback(() => {
+    const entry = tocUndoStack.current.pop()
+    if (!entry) return
+    tocRedoStack.current.push(entry)
+    restoreTocSnapshot(entry.beforeTexts, entry.beforeDirty)
+    syncTocHistoryFlags()
+  }, [restoreTocSnapshot, syncTocHistoryFlags])
+
+  const redoToc = useCallback(() => {
+    const entry = tocRedoStack.current.pop()
+    if (!entry) return
+    tocUndoStack.current.push(entry)
+    restoreTocSnapshot(entry.afterTexts, entry.afterDirty)
+    syncTocHistoryFlags()
+  }, [restoreTocSnapshot, syncTocHistoryFlags])
+
+  const initializeToc = useCallback(() => {
+    const current = bookRef.current
+    if (!current) return
+    try {
+      const init = initializeBookToc(current.pkg, texts.current, browserXmlCodec)
+      if (!init.created) return
+      const nextTexts = new Map(texts.current)
+      nextTexts.set(current.pkg.opfPath, init.opfXml)
+      nextTexts.set(init.tocPath, init.tocContent)
+      const entries = new Map(current.archive.entries)
+      entries.set(init.tocPath, encoder.encode(init.tocContent))
+      entries.set(current.pkg.opfPath, encoder.encode(init.opfXml))
+      const next = refreshPackage(current, nextTexts, entries)
+      texts.current = nextTexts
+      bookRef.current = next
+      setBook(next)
+      const nextDirty = new Set(dirtyRef.current).add(current.pkg.opfPath).add(init.tocPath)
+      dirtyRef.current = nextDirty
+      setDirty(nextDirty)
+      tocUndoStack.current = []
+      tocRedoStack.current = []
+      syncTocHistoryFlags()
+      scheduleDraft()
+      autosave.current?.touch()
+    } catch (error) {
+      setSaveError(error instanceof Error ? error.message : '无法初始化目录文件')
+    }
+  }, [scheduleDraft, syncTocHistoryFlags])
+
+  const navigateTocHref = useCallback(
+    (href: string) => {
+      const current = bookRef.current
+      const currentTocPath = current?.pkg.navPath ?? current?.pkg.ncxPath ?? null
+      if (!currentTocPath || !href) return
+      const { path, fragment } = splitFragment(href)
+      if (!path) return
+      const resolved = resolvePath(dirname(currentTocPath), path)
+      setActiveTocHref(href)
+      navigateTo({ path: resolved, fragment })
+    },
+    [navigateTo],
   )
 
   const reload = useCallback(async () => {
@@ -770,6 +948,10 @@ export function Editor({ bookId }: { bookId: string }) {
       setBook(loaded)
       setDirty(new Set())
       dirtyRef.current = new Set()
+      tocUndoStack.current = []
+      tocRedoStack.current = []
+      setTocHistoryState({ canUndo: false, canRedo: false })
+      setActiveTocHref(null)
       setExternalResetVersion((v) => v + 1)
       setConflict(false)
       setSaveError(null)
@@ -1101,7 +1283,7 @@ export function Editor({ bookId }: { bookId: string }) {
     const xml = texts.current.get(tocPath)
     if (!xml) return []
     try {
-      return readNavToc(xml, browserXmlCodec)
+      return book.pkg.navPath ? readNavToc(xml, browserXmlCodec) : readNcxToc(xml, browserXmlCodec)
     } catch {
       return []
     }
@@ -1397,33 +1579,34 @@ export function Editor({ bookId }: { bookId: string }) {
                 }}
                 onMove={moveSpine}
               />
-            ) : !tocPath ? (
-              <p className="sidebar-note">这本书没有 nav.xhtml 或 toc.ncx，暂时无法编辑目录。</p>
             ) : (
               <TocPanel
+                pkg={book.pkg}
                 entries={tocEntries}
                 broken={brokenAnchors}
                 tocPath={tocPath}
                 files={spinePaths(book.pkg)}
-                suggestTitle={(path) => {
-                  const text = texts.current.get(path) ?? ''
-                  const match = /<h[1-3][^>]*>([\s\S]*?)<\/h[1-3]>/i.exec(text)
+                texts={texts.current}
+                activePath={active}
+                activeTocHref={activeTocHref}
+                canUndo={tocHistoryState.canUndo}
+                canRedo={tocHistoryState.canRedo}
+                suggestTitle={(hrefOrPath) => {
+                  const resolved = tocPath ? resolvePath(dirname(tocPath), hrefOrPath) : hrefOrPath
+                  const text = texts.current.get(resolved) ?? texts.current.get(hrefOrPath) ?? ''
+                  const match = /<h[1-6][^>]*>([\s\S]*?)<\/h[1-6]>/i.exec(text)
                   return match?.[1]
-                    ? match[1].replace(/<[^>]+>/g, '').trim()
-                    : basename(path).replace(/\.[^.]+$/, '')
+                    ? match[1].replace(/<[^>]+>/g, '').replace(/\s+/g, ' ').trim()
+                    : basename(resolved).replace(/\.[^.]+$/, '')
                 }}
-                onChange={(next) => {
-                  if (book.pkg.navPath) {
-                    const navXml = texts.current.get(book.pkg.navPath)
-                    if (navXml)
-                      handleChange(book.pkg.navPath, writeNavToc(navXml, next, browserXmlCodec), { rerender: true })
-                  }
-                  if (book.pkg.ncxPath) {
-                    const ncxXml = texts.current.get(book.pkg.ncxPath)
-                    if (ncxXml)
-                      handleChange(book.pkg.ncxPath, writeNcxToc(ncxXml, next, browserXmlCodec), { rerender: true })
-                  }
+                onNavigate={(href) => {
+                  navigateTocHref(href)
+                  setTreeOpen(false)
                 }}
+                onChange={(next, extraChapters) => applyTocMutation(next, extraChapters)}
+                onUndo={undoToc}
+                onRedo={redoToc}
+                onInitializeToc={initializeToc}
               />
             )}
           </div>
@@ -1465,6 +1648,7 @@ export function Editor({ bookId }: { bookId: string }) {
                       archive={book.archive}
                       pkg={book.pkg}
                       externalVersion={externalResetVersion}
+                      revealFragment={revealFragment}
                       flushRef={wysiwygFlushRef}
                       onChange={(value) => handleChange(active, value, { rerender: true })}
                       onSwitchToCode={() => switchMode('code')}
@@ -1495,6 +1679,7 @@ export function Editor({ bookId }: { bookId: string }) {
                 content={content}
                 archive={book.archive}
                 pkg={book.pkg}
+                revealFragment={revealFragment}
                 subscribeTextChange={subscribeTextChange}
               />
             </section>

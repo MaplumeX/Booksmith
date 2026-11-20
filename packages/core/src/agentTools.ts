@@ -14,7 +14,29 @@ import { dirname, relativePath, resolvePath, splitFragment } from './path'
 import { collectReferences, rewriteReferences } from './references'
 import { searchBook, type SearchFile } from './search'
 import { isTextEntry } from './text'
-import { findBrokenAnchors, type TocEntry } from './toc'
+import {
+  countTocEntries,
+  findBrokenAnchors,
+  getTocEntry,
+  indentTocEntries,
+  indentTocEntry,
+  insertTocEntry,
+  moveTocEntries,
+  moveTocEntry,
+  moveTocSubtree,
+  outdentTocEntries,
+  outdentTocEntry,
+  rebaseTocHrefs,
+  removeBrokenTocEntries,
+  removeTocEntries,
+  removeTocEntry,
+  updateTocEntry,
+  type TocEntry,
+  type TocInsertPosition,
+  type TocPath,
+} from './toc'
+import { generateTocFromHeadings, refreshTocLabelsFromHeadings, scanBookHeadings } from './tocGenerate'
+import { initializeBookToc } from './tocInit'
 import type { EpubArchive, EpubIssue, EpubPackage } from './types'
 import { parsePackage, readOpfPath } from './unpack'
 import { validateStructure } from './validate'
@@ -33,10 +55,13 @@ export type AgentToolName =
   | 'lint_book'
   | 'get_metadata'
   | 'get_toc'
+  | 'scan_headings'
   | 'edit_file'
   | 'write_file'
   | 'update_metadata'
   | 'update_toc'
+  | 'generate_toc'
+  | 'edit_toc'
   | 'create_chapter'
   | 'rename_file'
   | 'delete_file'
@@ -48,10 +73,13 @@ export const AGENT_TOOL_NAMES: readonly AgentToolName[] = [
   'lint_book',
   'get_metadata',
   'get_toc',
+  'scan_headings',
   'edit_file',
   'write_file',
   'update_metadata',
   'update_toc',
+  'generate_toc',
+  'edit_toc',
   'create_chapter',
   'rename_file',
   'delete_file',
@@ -197,23 +225,31 @@ function pruneToc(entries: TocEntry[], tocPath: string, removed: string): { entr
   return { entries: kept, changed }
 }
 
-function rebaseTocHrefs(entries: TocEntry[], fromPath: string, toPath: string): TocEntry[] {
-  const fromDir = dirname(fromPath)
-  const toDir = dirname(toPath)
-  if (fromDir === toDir) return entries
-  return entries.map((entry) => {
-    let href = entry.href
-    if (href && !/^[a-zA-Z][a-zA-Z0-9+.-]*:/.test(href) && !href.startsWith('#')) {
-      const { path, fragment } = splitFragment(href)
-      const resolved = resolvePath(fromDir, path)
-      href = relativePath(toDir, resolved) + (fragment ? `#${fragment}` : '')
-    }
-    return {
-      ...entry,
-      href,
-      children: rebaseTocHrefs(entry.children, fromPath, toPath),
-    }
-  })
+function parseTocPath(raw: unknown): TocPath | null {
+  if (!Array.isArray(raw)) return null
+  const out: number[] = []
+  for (const seg of raw) {
+    if (typeof seg !== 'number' || !Number.isInteger(seg) || seg < 0) return null
+    out.push(seg)
+  }
+  return out
+}
+
+function parseTocPaths(raw: unknown): TocPath[] | null {
+  if (!Array.isArray(raw)) return null
+  const out: TocPath[] = []
+  for (const item of raw) {
+    const parsed = parseTocPath(item)
+    if (!parsed || parsed.length === 0) return null
+    out.push(parsed)
+  }
+  return out
+}
+
+function parseLevels(raw: unknown): number[] | undefined {
+  if (!Array.isArray(raw)) return undefined
+  const out = raw.filter((lvl): lvl is number => typeof lvl === 'number' && Number.isInteger(lvl) && lvl >= 1 && lvl <= 6)
+  return out.length > 0 ? out : undefined
 }
 
 function cloneEntries(source: EpubArchive): EpubArchive {
@@ -383,6 +419,8 @@ export class AgentWorkspace {
         return this.toolGetMetadata()
       case 'get_toc':
         return this.toolGetToc()
+      case 'scan_headings':
+        return this.toolScanHeadings(args)
       case 'edit_file':
         return this.toolEditFile(args)
       case 'write_file':
@@ -391,6 +429,10 @@ export class AgentWorkspace {
         return this.toolUpdateMetadata(args)
       case 'update_toc':
         return this.toolUpdateToc(args)
+      case 'generate_toc':
+        return this.toolGenerateToc(args)
+      case 'edit_toc':
+        return this.toolEditToc(args)
       case 'create_chapter':
         return this.toolCreateChapter(args)
       case 'rename_file':
@@ -747,6 +789,260 @@ export class AgentWorkspace {
     this.structuralTouched = true
     const brokenAnchors = findBrokenAnchors(entries, primaryTocPath, this.texts)
     return { ok: true, data: { updatedFiles, brokenAnchors } }
+  }
+
+  private readCurrentToc(): { tocPath: string; entries: TocEntry[] } | null {
+    if (this.pkg.navPath) {
+      const navXml = this.texts.get(this.pkg.navPath)
+      if (!navXml) return null
+      return { tocPath: this.pkg.navPath, entries: readNavToc(navXml, this.codec) }
+    }
+    if (this.pkg.ncxPath) {
+      const ncxXml = this.texts.get(this.pkg.ncxPath)
+      if (!ncxXml) return null
+      return { tocPath: this.pkg.ncxPath, entries: readNcxToc(ncxXml, this.codec) }
+    }
+    return null
+  }
+
+  private writeTocTree(entries: TocEntry[]): { ok: true; updatedFiles: string[]; primaryTocPath: string } | { ok: false; error: string } {
+    const { navPath, ncxPath } = this.pkg
+    const primaryTocPath = navPath ?? ncxPath
+    if (!primaryTocPath) return { ok: false, error: 'book has neither nav.xhtml nor toc.ncx' }
+
+    const updatedFiles: string[] = []
+    if (navPath) {
+      const navXml = this.texts.get(navPath)
+      if (!navXml) return { ok: false, error: `nav file missing: ${navPath}` }
+      const nextNav = writeNavToc(navXml, entries, this.codec)
+      const err = this.validateTextIfXml(navPath, nextNav)
+      if (err) return { ok: false, error: `updated nav XML is invalid: ${err}` }
+      this.setTextEntry(navPath, nextNav)
+      updatedFiles.push(navPath)
+    }
+    if (ncxPath) {
+      const ncxXml = this.texts.get(ncxPath)
+      if (ncxXml) {
+        const rebased = rebaseTocHrefs(entries, primaryTocPath, ncxPath)
+        const nextNcx = writeNcxToc(ncxXml, rebased, this.codec)
+        const err = this.validateTextIfXml(ncxPath, nextNcx)
+        if (err) return { ok: false, error: `updated ncx XML is invalid: ${err}` }
+        this.setTextEntry(ncxPath, nextNcx)
+        updatedFiles.push(ncxPath)
+      }
+    }
+    this.structuralTouched = true
+    return { ok: true, updatedFiles, primaryTocPath }
+  }
+
+  private toolScanHeadings(args: Record<string, unknown>): AgentToolResult {
+    const levels = parseLevels(args.levels)
+    const includeUntitledSpine = args.includeUntitledSpine === true
+    const all = scanBookHeadings(this.pkg, this.texts, this.codec, { levels, includeUntitledSpine })
+    const truncated = all.length > 500
+    const headings = truncated ? all.slice(0, 500) : all
+    return {
+      ok: true,
+      data: {
+        count: all.length,
+        truncated,
+        headings,
+      },
+    }
+  }
+
+  private toolGenerateToc(args: Record<string, unknown>): AgentToolResult {
+    const levels = parseLevels(args.levels) ?? [1, 2, 3]
+    const mode = args.mode === 'append_missing' ? 'append_missing' : 'replace'
+    const injectMissingIds = args.injectMissingIds !== false
+    const includeUntitledSpine = args.includeUntitledSpine === true
+
+    const updatedFiles: string[] = []
+    if (!this.pkg.navPath && !this.pkg.ncxPath) {
+      const init = initializeBookToc(this.pkg, this.texts, this.codec)
+      const tocErr = this.validateTextIfXml(init.tocPath, init.tocContent)
+      if (tocErr) return { ok: false, error: `initialized TOC XML is invalid: ${tocErr}` }
+      const opfErr = this.validateTextIfXml(this.pkg.opfPath, init.opfXml)
+      if (opfErr) return { ok: false, error: `updated OPF XML is invalid: ${opfErr}` }
+      this.setTextEntry(init.tocPath, init.tocContent)
+      this.setTextEntry(this.pkg.opfPath, touchOpfModified(init.opfXml, isoModified(this.nowFn()), this.codec))
+      this.structuralTouched = true
+      this.refreshPackage()
+      updatedFiles.push(init.tocPath, this.pkg.opfPath)
+    }
+
+    const current = this.readCurrentToc()
+    if (!current) return { ok: false, error: 'failed to read TOC document after initialization' }
+
+    const generated = generateTocFromHeadings(this.pkg, this.texts, current.tocPath, this.codec, {
+      levels,
+      mode,
+      injectMissingIds,
+      includeUntitledSpine,
+      existingEntries: current.entries,
+    })
+
+    for (const [chapterPath, chapterXml] of generated.updatedChapters) {
+      const err = this.validateTextIfXml(chapterPath, chapterXml)
+      if (err) return { ok: false, error: `chapter ${chapterPath} became invalid XML after id injection: ${err}` }
+    }
+    for (const [chapterPath, chapterXml] of generated.updatedChapters) {
+      this.setTextEntry(chapterPath, chapterXml)
+      updatedFiles.push(chapterPath)
+    }
+
+    const written = this.writeTocTree(generated.entries)
+    if (!written.ok) return written
+    for (const file of written.updatedFiles) {
+      if (!updatedFiles.includes(file)) updatedFiles.push(file)
+    }
+
+    const brokenAnchors = findBrokenAnchors(generated.entries, written.primaryTocPath, this.texts)
+    return {
+      ok: true,
+      data: {
+        tocPath: written.primaryTocPath,
+        mode,
+        addedCount: generated.addedCount,
+        totalCount: countTocEntries(generated.entries),
+        injectedIdCount: generated.injectedIdCount,
+        updatedChapters: [...generated.updatedChapters.keys()],
+        updatedFiles,
+        brokenAnchors,
+      },
+    }
+  }
+
+  private toolEditToc(args: Record<string, unknown>): AgentToolResult {
+    const action = typeof args.action === 'string' ? args.action : ''
+    const current = this.readCurrentToc()
+    if (!current) return { ok: false, error: 'book has neither nav.xhtml nor toc.ncx' }
+
+    let next: TocEntry[] = current.entries
+    let meta: Record<string, unknown> = {}
+
+    switch (action) {
+      case 'insert': {
+        const label = typeof args.label === 'string' ? args.label.trim() : ''
+        const href = typeof args.href === 'string' ? args.href.trim() : ''
+        if (!label || !href) return { ok: false, error: 'insert requires non-empty label and href' }
+        const path = args.path === undefined ? [] : parseTocPath(args.path)
+        if (!path) return { ok: false, error: 'path must be an array of non-negative integers' }
+        const position: TocInsertPosition =
+          args.position === 'before' || args.position === 'inside' ? args.position : 'after'
+        next = insertTocEntry(current.entries, path, { label, href, rawHtml: '', children: [] }, position)
+        break
+      }
+      case 'update': {
+        const path = parseTocPath(args.path)
+        if (!path || path.length === 0) return { ok: false, error: 'update requires a non-empty path' }
+        if (!getTocEntry(current.entries, path)) return { ok: false, error: `toc entry not found at [${path.join(',')}]` }
+        const nextLabel = typeof args.label === 'string' ? args.label.trim() : undefined
+        const nextHref = typeof args.href === 'string' ? args.href.trim() : undefined
+        if (!nextLabel && !nextHref) return { ok: false, error: 'update requires label and/or href' }
+        next = updateTocEntry(current.entries, path, (entry) => ({
+          ...entry,
+          ...(nextLabel ? { label: nextLabel, rawHtml: '' } : {}),
+          ...(nextHref ? { href: nextHref } : {}),
+        }))
+        break
+      }
+      case 'move': {
+        const delta = args.delta === -1 || args.delta === 1 ? args.delta : null
+        if (!delta) return { ok: false, error: 'move requires delta (-1 or 1)' }
+        const paths = args.paths !== undefined ? parseTocPaths(args.paths) : null
+        if (paths) {
+          next = moveTocEntries(current.entries, paths, delta)
+        } else {
+          const path = parseTocPath(args.path)
+          if (!path || path.length === 0) return { ok: false, error: 'move requires path or paths' }
+          next = moveTocEntry(current.entries, path, delta)
+        }
+        break
+      }
+      case 'move_subtree': {
+        const fromPath = parseTocPath(args.path)
+        const toPath = parseTocPath(args.toPath)
+        const position: TocInsertPosition =
+          args.position === 'before' || args.position === 'inside' ? args.position : 'after'
+        if (!fromPath || fromPath.length === 0 || !toPath || toPath.length === 0) {
+          return { ok: false, error: 'move_subtree requires non-empty path and toPath' }
+        }
+        next = moveTocSubtree(current.entries, fromPath, toPath, position)
+        break
+      }
+      case 'indent': {
+        const paths = args.paths !== undefined ? parseTocPaths(args.paths) : null
+        if (paths) {
+          next = indentTocEntries(current.entries, paths)
+        } else {
+          const path = parseTocPath(args.path)
+          if (!path || path.length === 0) return { ok: false, error: 'indent requires path or paths' }
+          next = indentTocEntry(current.entries, path)
+        }
+        break
+      }
+      case 'outdent': {
+        const paths = args.paths !== undefined ? parseTocPaths(args.paths) : null
+        if (paths) {
+          next = outdentTocEntries(current.entries, paths)
+        } else {
+          const path = parseTocPath(args.path)
+          if (!path || path.length === 0) return { ok: false, error: 'outdent requires path or paths' }
+          next = outdentTocEntry(current.entries, path)
+        }
+        break
+      }
+      case 'remove': {
+        const keepChildren = args.keepChildren === true
+        const paths = args.paths !== undefined ? parseTocPaths(args.paths) : null
+        if (paths) {
+          next = removeTocEntries(current.entries, paths, { keepChildren })
+        } else {
+          const path = parseTocPath(args.path)
+          if (!path || path.length === 0) return { ok: false, error: 'remove requires path or paths' }
+          next = removeTocEntry(current.entries, path, { keepChildren })
+        }
+        break
+      }
+      case 'refresh_labels': {
+        const paths = args.paths !== undefined ? parseTocPaths(args.paths) : undefined
+        if (args.paths !== undefined && !paths) return { ok: false, error: 'paths must be an array of valid paths' }
+        const refreshed = refreshTocLabelsFromHeadings(current.entries, current.tocPath, this.texts, this.codec, {
+          paths: paths ?? undefined,
+          overwriteRichHtml: args.overwriteRichHtml === true,
+        })
+        next = refreshed.entries
+        meta = { updatedCount: refreshed.updatedCount, skippedRichCount: refreshed.skippedRichCount }
+        break
+      }
+      case 'clean_broken': {
+        const cleaned = removeBrokenTocEntries(current.entries, current.tocPath, this.texts)
+        next = cleaned.entries
+        meta = { removedCount: cleaned.removedCount }
+        break
+      }
+      default:
+        return {
+          ok: false,
+          error:
+            'action must be one of insert, update, move, move_subtree, indent, outdent, remove, refresh_labels, clean_broken',
+        }
+    }
+
+    const written = this.writeTocTree(next)
+    if (!written.ok) return written
+    const brokenAnchors = findBrokenAnchors(next, written.primaryTocPath, this.texts)
+    return {
+      ok: true,
+      data: {
+        action,
+        totalCount: countTocEntries(next),
+        updatedFiles: written.updatedFiles,
+        brokenAnchors,
+        ...meta,
+      },
+    }
   }
 
   private toolCreateChapter(args: Record<string, unknown>): AgentToolResult {

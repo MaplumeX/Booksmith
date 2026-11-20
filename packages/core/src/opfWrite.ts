@@ -61,9 +61,10 @@ export interface ManifestItemDraft {
   id: string
   href: string
   mediaType: string
+  properties?: string[]
 }
 
-/** Appends a manifest item (imported image, font…) without touching existing entries. */
+/** Appends a manifest item (imported image, font, nav…) without touching existing entries. */
 export function addManifestItem(xml: string, item: ManifestItemDraft, codec: XmlCodec): string {
   const doc = codec.parse(xml)
   const manifest = doc.getElementsByTagNameNS(OPF_NS, 'manifest')[0]
@@ -81,6 +82,9 @@ export function addManifestItem(xml: string, item: ManifestItemDraft, codec: Xml
   element.setAttribute('id', id)
   element.setAttribute('href', item.href)
   element.setAttribute('media-type', item.mediaType)
+  if (item.properties && item.properties.length > 0) {
+    element.setAttribute('properties', item.properties.join(' '))
+  }
   manifest.appendChild(element)
 
   return codec.serialize(doc)

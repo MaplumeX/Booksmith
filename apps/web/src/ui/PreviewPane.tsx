@@ -12,17 +12,42 @@ import {
 } from '../preview/render'
 import { useResolvedTheme } from '../state/settingsStore'
 
+export interface FragmentRevealTarget {
+  path: string
+  fragment: string
+  key: number
+}
+
 interface PreviewPaneProps {
   path: string
   content: string
   archive: EpubArchive
   pkg: EpubPackage
+  revealFragment?: FragmentRevealTarget | null
   subscribeTextChange?: (listener: (changedPath: string, value: string) => void) => () => void
 }
 
 const DEBOUNCE_MS = 180
 
-export function PreviewPane({ path, content, archive, pkg, subscribeTextChange }: PreviewPaneProps) {
+function scrollIframeToFragment(doc: Document, win: Window, fragment: string): void {
+  if (!fragment) {
+    win.scrollTo(0, 0)
+    return
+  }
+  let decoded = fragment
+  try {
+    decoded = decodeURIComponent(fragment)
+  } catch {
+    decoded = fragment
+  }
+  const target = doc.getElementById(decoded) ?? doc.getElementsByName(decoded)[0] ?? null
+  if (target && 'scrollIntoView' in target) {
+    const reduced = window.matchMedia?.('(prefers-reduced-motion: reduce)').matches
+    ;(target as Element).scrollIntoView({ behavior: reduced ? 'auto' : 'smooth', block: 'start' })
+  }
+}
+
+export function PreviewPane({ path, content, archive, pkg, revealFragment, subscribeTextChange }: PreviewPaneProps) {
   const theme = useResolvedTheme()
   const [failure, setFailure] = useState<string | null>(null)
   const frame = useRef<HTMLIFrameElement>(null)
@@ -36,6 +61,9 @@ export function PreviewPane({ path, content, archive, pkg, subscribeTextChange }
   } | null>(null)
   const liveContent = useRef(content)
   const latest = useRef({ path, archive, pkg })
+  const revealRef = useRef(revealFragment ?? null)
+  revealRef.current = revealFragment ?? null
+  const appliedRevealKey = useRef<number | null>(null)
   const themeRef = useRef(theme)
   themeRef.current = theme
 
@@ -82,7 +110,13 @@ export function PreviewPane({ path, content, archive, pkg, subscribeTextChange }
         const pathChanged = prev !== null && prev.path !== nextPath
         patchDocument(doc, built.doc)
         blobCache.current.flushObsolete(nextArchive)
-        if (pathChanged) win.scrollTo(0, 0)
+        const pending = revealRef.current
+        if (pending && pending.path === nextPath && appliedRevealKey.current !== pending.key) {
+          appliedRevealKey.current = pending.key
+          scrollIframeToFragment(doc, win, pending.fragment)
+        } else if (pathChanged) {
+          win.scrollTo(0, 0)
+        }
         applied.current = { path: nextPath, content: nextContent, deps: built.dependencies }
         setFailure(null)
       } catch (error) {
@@ -153,6 +187,17 @@ export function PreviewPane({ path, content, archive, pkg, subscribeTextChange }
       }, DEBOUNCE_MS)
     })
   }, [subscribeTextChange, path, clearTimer, renderNow])
+
+  useEffect(() => {
+    if (!revealFragment || revealFragment.path !== path) return
+    if (appliedRevealKey.current === revealFragment.key) return
+    const iframe = frame.current
+    const doc = iframe?.contentDocument
+    const win = iframe?.contentWindow
+    if (!doc || !win || !isDocReady() || applied.current?.path !== path) return
+    appliedRevealKey.current = revealFragment.key
+    scrollIframeToFragment(doc, win, revealFragment.fragment)
+  }, [revealFragment?.key, revealFragment?.path, revealFragment?.fragment, path, isDocReady])
 
   useEffect(
     () => () => {

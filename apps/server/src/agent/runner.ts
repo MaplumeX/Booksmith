@@ -93,6 +93,10 @@ function summarizeArgs(name: AgentToolName, args: Record<string, unknown>): stri
       return '读取 OPF 元数据'
     case 'get_toc':
       return '读取书籍目录'
+    case 'scan_headings': {
+      const levels = Array.isArray(args.levels) ? `h${args.levels.join('/h')}` : 'h1–h6'
+      return `扫描正文标题（${levels}）`
+    }
     case 'edit_file':
       return String(args.path ?? '')
     case 'write_file':
@@ -101,6 +105,12 @@ function summarizeArgs(name: AgentToolName, args: Record<string, unknown>): stri
       return '更新元数据'
     case 'update_toc':
       return '更新目录'
+    case 'generate_toc': {
+      const mode = args.mode === 'append_missing' ? '补全缺失项' : '重建目录'
+      return `从标题生成目录（${mode}）`
+    }
+    case 'edit_toc':
+      return `目录操作：${String(args.action ?? '')}`
     case 'create_chapter':
       return String(args.filename ?? args.title ?? '新建章节')
     case 'rename_file':
@@ -126,6 +136,8 @@ function summarizeResult(name: AgentToolName, ok: boolean, data: unknown, error?
       return '已读取元数据'
     case 'get_toc':
       return `已读取目录（${Array.isArray(record.entries) ? record.entries.length : 0} 顶层项）`
+    case 'scan_headings':
+      return `扫描到 ${record.count ?? 0} 个标题${record.truncated ? '（已截断）' : ''}`
     case 'edit_file':
       return `已替换 ${record.replacements ?? 1} 处`
     case 'write_file':
@@ -134,6 +146,10 @@ function summarizeResult(name: AgentToolName, ok: boolean, data: unknown, error?
       return '元数据已暂存'
     case 'update_toc':
       return '目录已暂存'
+    case 'generate_toc':
+      return `已生成目录（共 ${record.totalCount ?? 0} 项${record.injectedIdCount ? `，补写 ${record.injectedIdCount} 个锚点` : ''}）`
+    case 'edit_toc':
+      return `目录结构已更新（共 ${record.totalCount ?? 0} 项）`
     case 'create_chapter':
       return `已暂存新建 ${String(record.path ?? '')}`
     case 'rename_file':
@@ -216,6 +232,17 @@ function buildSdkTools(
       inputSchema: z.object({}),
       execute: async () => run('get_toc', {}),
     }),
+    scan_headings: tool({
+      description: '按阅读顺序扫描 spine 各章的 h1–h6 正文标题与现有 id 锚点，便于生成或核对目录。',
+      inputSchema: z.object({
+        levels: z
+          .array(z.number().int().min(1).max(6))
+          .optional()
+          .describe('要扫描的标题级别数组，如 [1, 2, 3]，默认全部 h1–h6'),
+        includeUntitledSpine: z.boolean().optional().describe('是否包含无匹配标题的 spine 章节'),
+      }),
+      execute: async (input) => run('scan_headings', input),
+    }),
     edit_file: tool({
       description: '对已有文本文件执行精确片段替换并即时校验 XML 良构性。优先使用此工具以保真。',
       inputSchema: z.object({
@@ -263,11 +290,60 @@ function buildSdkTools(
       execute: async (input) => run('update_metadata', input),
     }),
     update_toc: tool({
-      description: '整体更新目录树，同时同步 nav.xhtml 与 toc.ncx（如存在）。',
+      description: '整体更新目录树，同时同步 nav.xhtml 与 toc.ncx（如存在）。微调长目录请优先使用 edit_toc。',
       inputSchema: z.object({
         entries: z.array(tocEntrySchema).describe('完整的目录树数组'),
       }),
       execute: async (input) => run('update_toc', input),
+    }),
+    generate_toc: tool({
+      description:
+        '按指定标题级别扫描正文生成或补全目录，自动同步 nav.xhtml 与 toc.ncx；缺失目录时自动初始化。',
+      inputSchema: z.object({
+        levels: z
+          .array(z.number().int().min(1).max(6))
+          .optional()
+          .describe('纳入目录的标题层级，默认 [1, 2, 3]'),
+        mode: z
+          .enum(['replace', 'append_missing'])
+          .optional()
+          .describe('replace 重建目录；append_missing 保留现有目录与 MathML 仅追加缺失项'),
+        injectMissingIds: z.boolean().optional().describe('是否为无 id 标题自动写入稳定锚点，默认 true'),
+        includeUntitledSpine: z.boolean().optional().describe('是否将无匹配标题的章节按文件名补入'),
+      }),
+      execute: async (input) => run('generate_toc', input),
+    }),
+    edit_toc: tool({
+      description:
+        '按节点路径增量调整目录结构（保留未修改条目的内联 MathML），支持插入、改名/改链接、上下移、子树移动、大纲保序缩进/取消缩进、删除（可选保留子项）、刷新标题与清理失效锚点。',
+      inputSchema: z.object({
+        action: z
+          .enum([
+            'insert',
+            'update',
+            'move',
+            'move_subtree',
+            'indent',
+            'outdent',
+            'remove',
+            'refresh_labels',
+            'clean_broken',
+          ])
+          .describe('要执行的增量目录动作'),
+        path: z.array(z.number().int().min(0)).optional().describe('目标节点路径，如 [1, 0]'),
+        paths: z
+          .array(z.array(z.number().int().min(0)))
+          .optional()
+          .describe('批量操作目标路径数组，支持 move/indent/outdent/remove/refresh_labels'),
+        toPath: z.array(z.number().int().min(0)).optional().describe('move_subtree 的目标位置路径'),
+        position: z.enum(['before', 'after', 'inside']).optional().describe('insert 或 move_subtree 的相对位置'),
+        delta: z.union([z.literal(-1), z.literal(1)]).optional().describe('move 方向：-1 上移，1 下移'),
+        label: z.string().optional().describe('insert 或 update 的标题'),
+        href: z.string().optional().describe('insert 或 update 的相对链接'),
+        keepChildren: z.boolean().optional().describe('remove 时是否保留子项并上提一级'),
+        overwriteRichHtml: z.boolean().optional().describe('refresh_labels 时是否覆盖含内联 MathML 的条目，默认 false'),
+      }),
+      execute: async (input) => run('edit_toc', input),
     }),
     create_chapter: tool({
       description: '新建一个 XHTML 章节文件，注册到 OPF manifest 与 spine，可选加入目录。',

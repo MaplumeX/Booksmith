@@ -40,7 +40,9 @@
 | `Dialog` | `src/ui/Dialog.tsx` | Radix Dialog；default / wide / 自定义 `onCloseAutoFocus` / 右上角关闭 / 右下角动作 / Escape 与遮罩关闭 |
 | `FileTypeIcon` | `src/ui/FileTypeIcon.tsx` | 文本 / 样式代码 / 图片 / 容器四类统一线宽图标 |
 | `FileTree` | `src/ui/FileTree.tsx` | 左悬浮结构岛「文件」视图；default / empty（无图片组）/ loading / error / edge（长名截断）/ 接入 `ContextMenu` |
-| `TocPanel` | `src/ui/TocPanel.tsx` | 左悬浮结构岛「目录」视图；default / empty / error（锚点失效徽标）/ 新增表单 / 缩进禁用 / Lucide 行内操作 |
+| `TocPanel` | `src/ui/TocPanel.tsx` | 左悬浮结构岛「目录」视图；default（单击跳转与高亮、折叠/按级展开、过滤、拖拽、多选批量栏、右键与 `···` 菜单、50 步撤销重做）/ empty（缺失目录初始化、空目录、过滤无命中）/ error（断链徽标点击直达修复、仅看断链）/ edge（177+ 项滚动、深层缩进钳制、长标题截断） |
+| `TocLinkDialog` | `src/ui/TocLinkDialog.tsx` | `480px` 居中目录链接弹窗；default（目标文件 + 章内 `#id` 自动扫描下拉 + 读取标题）/ error（缺失文件与断链实时警示）/ edge（自定义 `#fragment`、手贴完整 `path#id`） |
+| `TocGenerateDialog` | `src/ui/TocGenerateDialog.tsx` | `680px` 居中正文标题生成目录弹窗；default（`H1–H6` 独立勾选、补全/重建切换、自动补 `id` 章节计数、可交互预览树）/ empty（无匹配标题引导）/ edge（含 MathML 原书非破坏补全、`+id` 与 `已有` 状态标注、窄屏栈叠） |
 | `TabBar` | `src/ui/TabBar.tsx` | 中央文档白卡顶栏；default / active（胶囊高亮）/ dirty / overflow（滚轮与自动滚入可视）/ 右侧「对照预览」开关 +「代码 \| 可视化」模式切换 |
 | `CodePane` | `src/ui/CodePane.tsx` | default / loading / error（语法错误）/ edge（174KB 单章） |
 | `WysiwygPane` | `src/ui/WysiwygPane.tsx` | default（760px 纸面 + 格式栏，跟随全局主题）/ empty（空章可聚焦）/ loading（骨架）/ error（非良构 XML 拦截切回代码）/ edge（`<math>` 保护岛、`<a>` 锚点与 `<img>` 浮条） |

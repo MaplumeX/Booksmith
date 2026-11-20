@@ -39,6 +39,7 @@ export {
   renameManifestEntry,
   reorderSpine,
   setManifestMediaType,
+  setSpineToc,
 } from './opfEdit'
 export { collectBrokenReferences, collectReferences, rewriteReferences } from './references'
 export type { BookReference } from './references'
@@ -46,17 +47,46 @@ export { createEmptyEpub } from './create'
 export type { NewBookOptions } from './create'
 export {
   cloneToc,
+  compareTocPaths,
   countTocEntries,
   findBrokenAnchors,
   flattenToc,
+  getTocEntry,
+  indentTocEntries,
   indentTocEntry,
   insertTocEntry,
+  isSameOrDescendantTocPath,
+  moveTocEntries,
   moveTocEntry,
+  moveTocSubtree,
+  normalizeTocPaths,
+  outdentTocEntries,
   outdentTocEntry,
+  rebaseTocHrefs,
+  removeBrokenTocEntries,
+  removeTocEntries,
   removeTocEntry,
   updateTocEntry,
 } from './toc'
-export type { BrokenAnchor, TocEntry, TocPath } from './toc'
+export type { BrokenAnchor, TocEntry, TocInsertPosition, TocPath } from './toc'
+export { initializeBookToc } from './tocInit'
+export type { InitializeBookTocResult } from './tocInit'
+export {
+  generateTocFromHeadings,
+  listDocumentAnchors,
+  refreshTocLabelsFromHeadings,
+  scanBookHeadings,
+} from './tocGenerate'
+export type {
+  DocumentAnchor,
+  GeneratedTocCandidate,
+  GenerateTocOptions,
+  GenerateTocResult,
+  RefreshTocLabelsOptions,
+  RefreshTocLabelsResult,
+  ScanHeadingsOptions,
+  ScannedHeading,
+} from './tocGenerate'
 export { readNavToc, writeNavToc } from './nav'
 export { readNcxToc, writeNcxToc } from './ncx'
 export type { SearchFile, SearchMatch, SearchOptions, SearchResult } from './search'
