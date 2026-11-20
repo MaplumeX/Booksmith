@@ -68,14 +68,78 @@ node e2e/audit-shots.mjs               # 1440 / 400 截图与溢出、断图、c
 
 ## 部署
 
-`docker-compose.yml` 起 Postgres + 应用（应用容器内托管构建好的前端）。
+`docker-compose.yml` 起 Postgres + 应用（应用容器内托管构建好的前端）。主机需要 Docker 与
+compose v2，没别的依赖。
+
+**1. 拿 compose 文件**（只需要这一个文件，不需要构建源码）
 
 ```bash
-POSTGRES_PASSWORD='…' ALLOWED_EMAILS='you@example.com' docker compose up -d
+git clone https://github.com/MaplumeX/Booksmith.git && cd Booksmith
 ```
 
-迁移在容器启动时自动执行（`CMD` 里先跑 `db:migrate`），首次启动后看 `docker compose logs -f app`。
-对外暴露时把 `COOKIE_SECURE=true` 并放在 HTTPS 反向代理后面。
+**2. 写 `.env`**（compose 自动读取；`.env` 已在 `.gitignore` 里）
+
+```bash
+POSTGRES_PASSWORD=<openssl rand -base64 24>
+ALLOWED_EMAILS=you@example.com
+AGENT_SECRET_KEY=<openssl rand -hex 32>    # 不填则无法在设置里保存模型 API Key
+COOKIE_SECURE=true                         # 跟在 HTTPS 反代后面才开
+BOOKSMITH_IMAGE=ghcr.io/maplumex/booksmith:0.1.0
+```
+
+`POSTGRES_PASSWORD` 是必填的，缺了 compose 会直接报错退出。`ALLOWED_EMAILS` 为空则任何人都注册不了。
+
+**3. 起服务**
+
+```bash
+docker compose pull app
+docker compose up -d --no-build
+curl -sf http://127.0.0.1:8787/api/health    # → {"ok":true}
+```
+
+迁移在容器启动时自动执行（`CMD` 里先跑 `db:migrate`），首次启动后看 `docker compose logs -f app`
+里应有 `migrations applied` 与 `booksmith server on http://0.0.0.0:8787`。
+
+**4. 反向代理**（应用只绑 `127.0.0.1:8787`，不直接对外）
+
+Caddy：
+
+```
+books.example.com {
+  reverse_proxy 127.0.0.1:8787
+}
+```
+
+nginx：
+
+```nginx
+location / {
+  proxy_pass http://127.0.0.1:8787;
+  proxy_http_version 1.1;
+  proxy_set_header Host $host;
+  proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+  client_max_body_size 64m;      # 与服务端 MAX_UPLOAD_BYTES 对齐，否则大书上传 413
+  proxy_buffering off;           # agent 对话是 SSE，缓冲会让它变成一次性刷出来
+}
+```
+
+服务端已发 `X-Accel-Buffering: no`，但显式关掉更稳。
+
+## 升级与回滚
+
+```bash
+git pull
+# 改 .env 里的 BOOKSMITH_IMAGE 为新 tag
+BOOKSMITH_IMAGE=ghcr.io/maplumex/booksmith:0.2.0 docker compose pull app
+docker compose up -d --no-build
+```
+
+迁移随容器启动自动跑。**数据库迁移是单向的**：升级后回退镜像不会回退 schema，带不兼容迁移的版本
+回退前先备份。回滚镜像：
+
+```bash
+BOOKSMITH_IMAGE=ghcr.io/maplumex/booksmith:0.1.0 docker compose up -d --no-build
+```
 
 ## 发版
 
@@ -90,21 +154,13 @@ git push origin v0.1.0            # → ghcr.io/maplumex/booksmith:0.1.0 / 0.1 /
 要 arm64 就在 workflow 里加 `platforms` 的一行；镜像仍以 tar 形式包含 devDependencies 与 `tsx`，
 要减体积得改成多阶段构建。
 
-服务器上不构建、直接拉镜像部署：
-
-```bash
-POSTGRES_PASSWORD='…' ALLOWED_EMAILS='you@example.com' \
-  BOOKSMITH_IMAGE=ghcr.io/maplumex/booksmith:0.1.0 docker compose pull app
-docker compose up -d --no-build
-```
-
-GHCR 包默认随仓库可见（public 仓库即 public），拉取无需登录；回滚就是把 `BOOKSMITH_IMAGE` 指向旧版本。
+GHCR 包默认随仓库可见（public 仓库即 public），拉取无需登录。
 
 ## 环境变量
 
 | 变量 | 默认值 | 作用 |
 |---|---|---|
-| `DATABASE_URL` | `postgres://booksmith:booksmith@127.0.0.1:55432/booksmith` | Postgres 连接串 |
+| `DATABASE_URL` | `postgres://booksmith:booksmith@127.0.0.1:55432/booksmith` | Postgres 连接串（compose 里指向 `db:5432`） |
 | `ALLOWED_EMAILS` | 空（不允许注册） | 逗号分隔的注册白名单 |
 | `PORT` | `8787` | API 端口 |
 | `HOST` | `0.0.0.0` | 监听地址（容器内必须保持 `0.0.0.0`，否则端口映射连不上） |
@@ -118,8 +174,17 @@ GHCR 包默认随仓库可见（public 仓库即 public），拉取无需登录�
 书籍二进制与版本都在数据库里，所以一份 dump 就是全量备份：
 
 ```bash
+# 开发（embedded Postgres）
 DATABASE_URL=… ./scripts/backup.sh
-pg_restore --clean --if-exists --no-owner --dbname="$DATABASE_URL" backups/booksmith-*.dump
+
+# 服务器（dump 在 db 容器里跑，直接写宿主机）
+docker compose exec -T db pg_dump --no-owner -U booksmith -Fc booksmith > backups/booksmith-$(date -u +%Y%m%dT%H%M%SZ).dump
+```
+
+恢复：
+
+```bash
+docker compose exec -T db pg_restore --clean --if-exists --no-owner -U booksmith -d booksmith < backups/booksmith-….dump
 ```
 
 每个文件保留最近 100 条快照：最近 10 条全留，更早的每天留最后一条；同一文件十分钟内的连续保存合并为一条。整本书只保留当前状态一行。

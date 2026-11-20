@@ -5,10 +5,12 @@ services:
     restart: unless-stopped
     environment:
       POSTGRES_USER: booksmith
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-booksmith}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
       POSTGRES_DB: booksmith
     volumes:
-      - db-data:/var/lib/postgresql/data
+      # postgres:18 moved its default PGDATA to /var/lib/postgresql/18/docker and
+      # only declares /var/lib/postgresql as a volume, so mount the parent.
+      - db-data:/var/lib/postgresql
     healthcheck:
       test: ['CMD-SHELL', 'pg_isready -U booksmith -d booksmith']
       interval: 5s
@@ -23,13 +25,14 @@ services:
       db:
         condition: service_healthy
     environment:
-      DATABASE_URL: postgres://booksmith:${POSTGRES_PASSWORD:-booksmith}@db:5432/booksmith
+      DATABASE_URL: postgres://booksmith:${POSTGRES_PASSWORD}@db:5432/booksmith
       ALLOWED_EMAILS: ${ALLOWED_EMAILS:-}
       AGENT_SECRET_KEY: ${AGENT_SECRET_KEY:-}
       COOKIE_SECURE: ${COOKIE_SECURE:-false}
       PORT: 8787
+    # Loopback only: the app is meant to sit behind a TLS reverse proxy on the host.
     ports:
-      - '8787:8787'
+      - '127.0.0.1:8787:8787'
 
 volumes:
   db-data:
