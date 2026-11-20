@@ -69,8 +69,9 @@ import { SearchPanel } from '../ui/SearchPanel'
 import { TocPanel } from '../ui/TocPanel'
 import type { NavigateTarget, RevealTarget } from '../ui/CodePane'
 import { StatusBar } from '../ui/StatusBar'
-import { TabBar } from '../ui/TabBar'
+import { TabBar, type EditorViewMode } from '../ui/TabBar'
 import { VersionHistory } from '../ui/VersionHistory'
+import { WysiwygPane, type WysiwygShortcut } from '../ui/WysiwygPane'
 
 type LoadState = { status: 'loading' } | { status: 'error'; message: string } | { status: 'ready' }
 type SidebarTab = 'preview' | 'search' | 'metadata' | 'toc' | 'check'
@@ -232,6 +233,9 @@ export function Editor({ bookId }: { bookId: string }) {
   const saveRef = useRef<(options?: { checkpoint?: boolean }) => Promise<void>>(async () => {})
   /** Text and dirty flags from before a book-wide replace, so one click can revert the batch. */
   const replaceUndo = useRef<{ texts: Map<string, string>; dirty: Set<string> } | null>(null)
+  const [editorMode, setEditorMode] = useState<EditorViewMode>('code')
+  const [externalResetVersion, setExternalResetVersion] = useState(0)
+  const wysiwygFlushRef = useRef<(() => void) | null>(null)
 
   const applyBook = useCallback((loaded: LoadedBook) => {
     texts.current = new Map(loaded.texts)
@@ -271,11 +275,23 @@ export function Editor({ bookId }: { bookId: string }) {
   }, [bookId, applyBook])
 
   const open = useCallback((path: string) => {
+    wysiwygFlushRef.current?.()
     setTabs((current) => (current.includes(path) ? current : [...current, path]))
     setActive(path)
   }, [])
 
+  const selectTab = useCallback((path: string) => {
+    wysiwygFlushRef.current?.()
+    setActive(path)
+  }, [])
+
+  const switchMode = useCallback((nextMode: EditorViewMode) => {
+    if (nextMode === 'code') wysiwygFlushRef.current?.()
+    setEditorMode(nextMode)
+  }, [])
+
   const close = useCallback((path: string) => {
+    wysiwygFlushRef.current?.()
     setTabs((current) => {
       const next = current.filter((entry) => entry !== path)
       setActive((currentActive) => {
@@ -307,6 +323,11 @@ export function Editor({ bookId }: { bookId: string }) {
   const handleChange = useCallback(
     (path: string, value: string, options: { rerender?: boolean } = {}) => {
       texts.current.set(path, value)
+      if (!dirtyRef.current.has(path)) {
+        const next = new Set(dirtyRef.current)
+        next.add(path)
+        dirtyRef.current = next
+      }
       setDirty((current) => {
         if (current.has(path)) return current
         const next = new Set(current)
@@ -341,6 +362,7 @@ export function Editor({ bookId }: { bookId: string }) {
         for (const file of plan.files) next.add(file.path)
         return next
       })
+      setExternalResetVersion((v) => v + 1)
       scheduleDraft()
       autosave.current?.touch()
     },
@@ -363,6 +385,7 @@ export function Editor({ bookId }: { bookId: string }) {
       return next
     })
     replaceUndo.current = null
+    setExternalResetVersion((v) => v + 1)
     scheduleDraft()
     autosave.current?.touch()
   }, [scheduleDraft])
@@ -478,6 +501,7 @@ export function Editor({ bookId }: { bookId: string }) {
       for (const entry of changed) set.add(entry)
       return set
     })
+    setExternalResetVersion((v) => v + 1)
     setRenaming(null)
     scheduleDraft()
     autosave.current?.touch()
@@ -621,6 +645,8 @@ export function Editor({ bookId }: { bookId: string }) {
       bookRef.current = loaded
       setBook(loaded)
       setDirty(new Set())
+      dirtyRef.current = new Set()
+      setExternalResetVersion((v) => v + 1)
       setConflict(false)
       setSaveError(null)
       setSaveState('idle')
@@ -637,8 +663,10 @@ export function Editor({ bookId }: { bookId: string }) {
 
   const save = useCallback(
     async (options: { checkpoint?: boolean } = {}) => {
+      wysiwygFlushRef.current?.()
+      const activeDirty = dirtyRef.current
       // Conflict is terminal until the user reloads: retrying would only produce the same 409.
-      if (!book || dirty.size === 0 || saving || conflict) return
+      if (!book || activeDirty.size === 0 || saving || conflict) return
       setSaving(true)
       setSaveState('saving')
       setSaveError(null)
@@ -646,7 +674,7 @@ export function Editor({ bookId }: { bookId: string }) {
         // `dcterms:modified` tracks the package document, not every keystroke: refreshing it on each
         // save would make an unchanged book a new revision and fill the snapshot cap with noise.
         // See ADR 2026-11-19-opf-meta-editing.
-        if (dirty.has(book.pkg.opfPath)) {
+        if (activeDirty.has(book.pkg.opfPath)) {
           const opfText = texts.current.get(book.pkg.opfPath)
           if (opfText !== undefined) {
             const touched = touchOpfModified(
@@ -660,7 +688,7 @@ export function Editor({ bookId }: { bookId: string }) {
 
         const entries = new Map(book.archive.entries)
         const encoder = new TextEncoder()
-        for (const path of dirty) {
+        for (const path of activeDirty) {
           const text = texts.current.get(path)
           if (typeof text === 'string') entries.set(path, encoder.encode(text))
         }
@@ -673,6 +701,7 @@ export function Editor({ bookId }: { bookId: string }) {
         const next = { ...book, version: result.version, archive: { order, entries } }
         bookRef.current = next
         setBook(next)
+        dirtyRef.current = new Set()
         setDirty(new Set())
         setSaveState('saved')
         setSavedAt(Date.now())
@@ -904,6 +933,31 @@ export function Editor({ bookId }: { bookId: string }) {
     />
   ) : null
   const previewable = isPreviewable(active)
+  const canWysiwyg = editable && previewable
+  const showWysiwyg = canWysiwyg && editorMode === 'wysiwyg'
+
+  const handleWysiwygShortcut = (action: WysiwygShortcut) => {
+    if (action === 'save') {
+      void saveRef.current({ checkpoint: true })
+      return
+    }
+    if (action === 'close-tab') {
+      if (active) close(active)
+      return
+    }
+    if (action === 'search') {
+      setSidebarTab('search')
+      setSideOpen(true)
+      return
+    }
+    const list = tabsRef.current
+    if (list.length === 0) return
+    const index = active ? list.indexOf(active) : -1
+    const delta = action === 'prev-tab' ? -1 : 1
+    const next = list[(index + delta + list.length) % list.length]
+    if (next) selectTab(next)
+  }
+
   const searchFiles: SearchFile[] = [...texts.current].map(([path, text]) => ({ path, text }))
   const tocPath = book.pkg.navPath ?? book.pkg.ncxPath ?? null
   const tocEntries: TocEntry[] = (() => {
@@ -940,6 +994,7 @@ export function Editor({ bookId }: { bookId: string }) {
           files={searchFiles}
           onOpen={(path, line, column) => {
             open(path)
+            setEditorMode('code')
             setReveal({ line, column, key: Date.now() })
           }}
           onReplace={applyReplace}
@@ -972,7 +1027,10 @@ export function Editor({ bookId }: { bookId: string }) {
           issues={issues}
           onOpen={(path, line) => {
             open(path)
-            if (line) setReveal({ line, column: 1, key: Date.now() })
+            if (line) {
+              setEditorMode('code')
+              setReveal({ line, column: 1, key: Date.now() })
+            }
           }}
         />
       )
@@ -1008,7 +1066,10 @@ export function Editor({ bookId }: { bookId: string }) {
   const applyDraft = () => {
     if (!draftPrompt) return
     for (const [path, text] of draftPrompt.files) texts.current.set(path, text)
-    setDirty(new Set(draftPrompt.files.map(([path]) => path)))
+    const nextDirty = new Set(draftPrompt.files.map(([path]) => path))
+    dirtyRef.current = nextDirty
+    setDirty(nextDirty)
+    setExternalResetVersion((v) => v + 1)
     setDraftPrompt(null)
     setDraftSavedAt(null)
     autosave.current?.touch()
@@ -1176,16 +1237,44 @@ export function Editor({ bookId }: { bookId: string }) {
           onMove={moveSpine}
         />
         <div className="editor-column">
-          <TabBar tabs={tabs} active={active} dirty={dirty} onSelect={setActive} onClose={close} />
+          <TabBar
+            tabs={tabs}
+            active={active}
+            dirty={dirty}
+            mode={editorMode}
+            canWysiwyg={canWysiwyg}
+            onModeChange={switchMode}
+            onSelect={selectTab}
+            onClose={close}
+          />
           {active ? (
             editable ? (
-              <CodePane
-                path={active}
-                content={content}
-                reveal={reveal}
-                onNavigate={navigateTo}
-                onChange={(value) => handleChange(active, value)}
-              />
+              <>
+                <CodePane
+                  path={active}
+                  content={content}
+                  reveal={reveal}
+                  visible={!showWysiwyg}
+                  syncMode={canWysiwyg ? 'transaction' : 'reset'}
+                  resetVersion={externalResetVersion}
+                  onNavigate={navigateTo}
+                  onChange={(value) => handleChange(active, value)}
+                />
+                {showWysiwyg ? (
+                  <WysiwygPane
+                    path={active}
+                    content={content}
+                    archive={book.archive}
+                    pkg={book.pkg}
+                    externalVersion={externalResetVersion}
+                    flushRef={wysiwygFlushRef}
+                    onChange={(value) => handleChange(active, value, { rerender: true })}
+                    onSwitchToCode={() => switchMode('code')}
+                    onNavigateLink={navigateTo}
+                    onShortcut={handleWysiwygShortcut}
+                  />
+                ) : null}
+              </>
             ) : (
               mediaPane
             )
@@ -1306,6 +1395,7 @@ export function Editor({ bookId }: { bookId: string }) {
                   onClick={() => {
                     setDeleting(null)
                     open(reference.from)
+                    setEditorMode('code')
                     setReveal({ line: reference.line, column: 1, key: Date.now() })
                   }}
                 >

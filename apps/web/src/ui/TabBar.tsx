@@ -1,7 +1,9 @@
-import { X } from 'lucide-react'
+import { Code2, FilePenLine, X } from 'lucide-react'
 import { useEffect, useRef } from 'react'
 import { basename } from '../state/bookStore'
 import { FileTypeIcon } from './FileTypeIcon'
+
+export type EditorViewMode = 'code' | 'wysiwyg'
 
 interface TabBarProps {
   tabs: string[]
@@ -9,9 +11,21 @@ interface TabBarProps {
   dirty: Set<string>
   onSelect: (path: string) => void
   onClose: (path: string) => void
+  mode?: EditorViewMode
+  canWysiwyg?: boolean
+  onModeChange?: (mode: EditorViewMode) => void
 }
 
-export function TabBar({ tabs, active, dirty, onSelect, onClose }: TabBarProps) {
+export function TabBar({
+  tabs,
+  active,
+  dirty,
+  onSelect,
+  onClose,
+  mode = 'code',
+  canWysiwyg = false,
+  onModeChange,
+}: TabBarProps) {
   const listRef = useRef<HTMLDivElement>(null)
 
   useEffect(() => {
@@ -19,46 +33,75 @@ export function TabBar({ tabs, active, dirty, onSelect, onClose }: TabBarProps) 
     activeTab?.scrollIntoView({ block: 'nearest', inline: 'nearest' })
   }, [active])
 
+  const effectiveMode: EditorViewMode = canWysiwyg ? mode : 'code'
+
   return (
-    <div
-      ref={listRef}
-      className="tabbar"
-      role="tablist"
-      aria-label="已打开的文件"
-      onWheel={(event) => {
-        const el = listRef.current
-        if (!el || event.deltaY === 0 || el.scrollWidth <= el.clientWidth) return
-        el.scrollLeft += event.deltaY
-      }}
-    >
-      {tabs.map((path) => (
-        <div
-          key={path}
-          className={`tab${active === path ? ' on' : ''}`}
-          data-dirty={dirty.has(path) ? 'true' : 'false'}
-        >
+    <div className="tabbar">
+      <div
+        ref={listRef}
+        className="tabbar-tabs"
+        role="tablist"
+        aria-label="已打开的文件"
+        onWheel={(event) => {
+          const el = listRef.current
+          if (!el || event.deltaY === 0 || el.scrollWidth <= el.clientWidth) return
+          el.scrollLeft += event.deltaY
+        }}
+      >
+        {tabs.map((path) => (
+          <div
+            key={path}
+            className={`tab${active === path ? ' on' : ''}`}
+            data-dirty={dirty.has(path) ? 'true' : 'false'}
+          >
+            <button
+              type="button"
+              role="tab"
+              aria-selected={active === path}
+              className="tab-label"
+              onClick={() => onSelect(path)}
+              title={path}
+            >
+              <FileTypeIcon path={path} size={13} className="tab-icon" />
+              <span>{basename(path)}</span>
+            </button>
+            {dirty.has(path) ? <span className="dirty-dot" aria-hidden="true" /> : null}
+            <button
+              type="button"
+              className="tab-close"
+              aria-label={`关闭 ${basename(path)}`}
+              onClick={() => onClose(path)}
+            >
+              <X size={12} strokeWidth={1.85} aria-hidden="true" />
+            </button>
+          </div>
+        ))}
+      </div>
+
+      {onModeChange && tabs.length > 0 ? (
+        <div className="mode-switch" role="group" aria-label="编辑模式">
           <button
             type="button"
-            role="tab"
-            aria-selected={active === path}
-            className="tab-label"
-            onClick={() => onSelect(path)}
-            title={path}
+            className={`mode-switch-btn${effectiveMode === 'code' ? ' on' : ''}`}
+            aria-pressed={effectiveMode === 'code'}
+            onClick={() => onModeChange('code')}
           >
-            <FileTypeIcon path={path} size={13} className="tab-icon" />
-            <span>{basename(path)}</span>
+            <Code2 size={13} strokeWidth={1.75} aria-hidden="true" />
+            <span>代码</span>
           </button>
-          {dirty.has(path) ? <span className="dirty-dot" aria-hidden="true" /> : null}
           <button
             type="button"
-            className="tab-close"
-            aria-label={`关闭 ${basename(path)}`}
-            onClick={() => onClose(path)}
+            className={`mode-switch-btn${effectiveMode === 'wysiwyg' ? ' on' : ''}`}
+            aria-pressed={effectiveMode === 'wysiwyg'}
+            disabled={!canWysiwyg}
+            title={canWysiwyg ? '切换到所见即所得校对模式' : '仅 .xhtml / .html 章节支持可视化编辑'}
+            onClick={() => onModeChange('wysiwyg')}
           >
-            <X size={12} strokeWidth={1.85} aria-hidden="true" />
+            <FilePenLine size={13} strokeWidth={1.75} aria-hidden="true" />
+            <span>可视化</span>
           </button>
         </div>
-      ))}
+      ) : null}
     </div>
   )
 }
