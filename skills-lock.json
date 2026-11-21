@@ -1,12 +1,19 @@
 {
   "version": 2,
   "skills": {
+    "mm-archive": {
+      "source": "MaplumeX/M-METHOD",
+      "commit": "dc4f81044a5738e3e626cff8651e0d8712a88733",
+      "sourceType": "github",
+      "skillPath": "skills/mm-archive/SKILL.md",
+      "computedHash": "f1514256e1c58db5797f9afdef622e68e382b58564fcf44f52095f39c685a070"
+    },
     "mm-implement": {
       "source": "MaplumeX/M-METHOD",
-      "commit": "0b860280f4056edf73480739c801d864475d1bd1",
+      "commit": "dc4f81044a5738e3e626cff8651e0d8712a88733",
       "sourceType": "github",
       "skillPath": "skills/mm-implement/SKILL.md",
-      "computedHash": "aa1f469f497b41aff841898ca3cc335db99da51d6523320d338341948be05ab7"
+      "computedHash": "ed7adf0b4fee631f550fe85af178a8e2a522e0481ec3ba2a23b9495661cf2127"
     },
     "mm-land": {
       "source": "MaplumeX/M-METHOD",
@@ -17,24 +24,24 @@
     },
     "mm-plan": {
       "source": "MaplumeX/M-METHOD",
-      "commit": "0b860280f4056edf73480739c801d864475d1bd1",
+      "commit": "dc4f81044a5738e3e626cff8651e0d8712a88733",
       "sourceType": "github",
       "skillPath": "skills/mm-plan/SKILL.md",
-      "computedHash": "cdbea57e4e0c1644abdf1b87883832d9ebd1445bf670f21b583874e8911f2880"
+      "computedHash": "d7d04516f62e2a8fec17238686cdfa060174ab788311d900d911a5dec63aabc8"
     },
     "mm-setup": {
       "source": "MaplumeX/M-METHOD",
-      "commit": "0b860280f4056edf73480739c801d864475d1bd1",
+      "commit": "dc4f81044a5738e3e626cff8651e0d8712a88733",
       "sourceType": "github",
       "skillPath": "skills/mm-setup/SKILL.md",
-      "computedHash": "a7e3fcfbf6a443121b524de63d197f6b710a1e09dd143b39422f93541f95dfb4"
+      "computedHash": "ab7acd37d359c25929a6a3c99e852b8419d525a0b13660fb607d8b8087552cf3"
     },
     "mm-ui": {
       "source": "MaplumeX/M-METHOD",
-      "commit": "0b860280f4056edf73480739c801d864475d1bd1",
+      "commit": "dc4f81044a5738e3e626cff8651e0d8712a88733",
       "sourceType": "github",
       "skillPath": "skills/mm-ui/SKILL.md",
-      "computedHash": "0e6e22e4a121efc048264a6bbe22843d62278d2280183998492fad5eaf6fdd49"
+      "computedHash": "7f68a9bc145b0abb9056f565517811f0bf83c81c2340a5d70ec944370a4e43f0"
     }
   }
 }
