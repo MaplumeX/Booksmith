@@ -5710,12 +5710,105 @@ input {
   color: var(--text-muted);
 }
 
+.sidebar[hidden],
+.splitter[hidden] {
+  display: none !important;
+}
+
 .agent-composer-footer {
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: var(--space-2);
   padding-top: 2px;
+}
+
+.agent-composer-right {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.agent-context-usage {
+  display: inline-flex;
+  align-items: center;
+  height: 22px;
+  padding: 0 7px;
+  border-radius: 999px;
+  background: var(--surface-raised);
+  color: var(--text-muted);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  font-weight: 500;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  user-select: none;
+}
+
+.agent-context-usage.is-warn {
+  background: var(--status-warn-bg);
+  color: var(--status-warn-fg);
+}
+
+.agent-compaction-divider {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin: 2px 0 4px;
+}
+
+.agent-compaction-bar {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+.agent-compaction-line {
+  flex: 1;
+  height: 1px;
+  background: var(--border);
+}
+
+.agent-compaction-toggle {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 8px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--surface-raised);
+  color: var(--text-muted);
+  font: inherit;
+  font-size: 11px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: background-color 120ms, color 120ms, border-color 120ms;
+}
+
+.agent-compaction-toggle:hover {
+  background: var(--hover-bg);
+  border-color: var(--border-strong);
+  color: var(--text-secondary);
+}
+
+.agent-compaction-summary {
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--surface-raised);
+  color: var(--text-secondary);
+  font-size: 12px;
+  line-height: 1.55;
+  white-space: pre-wrap;
+  max-height: 220px;
+  overflow-y: auto;
+}
+
+.agent-avatar-spacer {
+  flex: 0 0 24px;
+  width: 24px;
 }
 
 .agent-composer-controls {

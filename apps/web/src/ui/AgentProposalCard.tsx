@@ -11,6 +11,7 @@ import {
   XCircle,
 } from 'lucide-react'
 import { useMemo } from 'react'
+import type { AgentProposalStatus } from '../api/client'
 import { basename } from '../state/bookStore'
 import { buildComposedProposalPlan, buildFileHunks, type FileDiffModel } from '../state/proposalReview'
 import { Button } from './Button'
@@ -19,12 +20,12 @@ import { Button } from './Button'
  * Slimmed sidebar summary & navigation card for an Agent proposal.
  * Full book-page revision, final preview, and source diffs live in the main canvas `ProposalReviewPane`
  * rather than squeezing code diffs into the narrow sidebar.
- * See ADR 2026-11-21-in-canvas-agent-proposal-review.
+ * See ADR 2026-11-21-in-canvas-agent-proposal-review, ADR 2026-11-21-agent-session-continuity.
  */
 
 interface AgentProposalCardProps {
   proposal: AgentProposal
-  status: 'pending' | 'applied' | 'dismissed'
+  status: AgentProposalStatus
   canUndo: boolean
   busy?: boolean
   autoApplied?: boolean
@@ -93,6 +94,28 @@ export function AgentProposalCard({
         <div className="agent-proposal-compact">
           <XCircle size={14} strokeWidth={1.7} aria-hidden="true" />
           <span>已放弃变更提案（{proposal.files.length} 个文件）</span>
+        </div>
+      </div>
+    )
+  }
+
+  if (status === 'superseded') {
+    return (
+      <div className="agent-proposal-card is-dismissed">
+        <div className="agent-proposal-compact">
+          <FileDiff size={14} strokeWidth={1.7} aria-hidden="true" />
+          <span>已被后续修改替代（{proposal.files.length} 个文件）</span>
+        </div>
+      </div>
+    )
+  }
+
+  if (status === 'reverted') {
+    return (
+      <div className="agent-proposal-card is-dismissed">
+        <div className="agent-proposal-compact">
+          <RotateCcw size={14} strokeWidth={1.7} aria-hidden="true" />
+          <span>已撤销应用到工作区（{proposal.files.length} 个文件）</span>
         </div>
       </div>
     )

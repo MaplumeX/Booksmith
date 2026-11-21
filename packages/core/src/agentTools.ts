@@ -328,6 +328,10 @@ export class AgentWorkspace {
   private readonly originByCurrent = new Map<string, string>()
   private readonly deletedRefs = new Map<string, Array<{ from: string; line: number }>>()
   private structuralTouched = false
+  /** Tracks whether an unapplied prior proposal was seeded into the working copy so read-only follow-ups keep it intact.
+   * See ADR 2026-11-21-agent-session-continuity. */
+  private seededPendingProposal = false
+  private mutatedSinceSeed = false
 
   private constructor(
     archive: EpubArchive,
@@ -388,6 +392,132 @@ export class AgentWorkspace {
     return this.texts.get(path)
   }
 
+  hasSeededPendingProposal(): boolean {
+    return this.seededPendingProposal
+  }
+
+  hasNewMutations(): boolean {
+    return this.mutatedSinceSeed
+  }
+
+  /**
+   * Checks whether every file touched by a prior pending proposal still matches the current
+   * post-overlay editor baseline. Returns drifted paths; empty means safe to seed cumulatively.
+   */
+  detectPendingProposalDrift(proposal: AgentProposal): string[] {
+    const drifted: string[] = []
+    for (const file of proposal.files) {
+      if (isProtectedPath(file.path)) continue
+      if (file.kind === 'create') {
+        if (this.archive.entries.has(file.path)) drifted.push(file.path)
+        continue
+      }
+      if (file.kind === 'rename') {
+        const source = file.previousPath
+        if (!source || !this.archive.entries.has(source)) {
+          drifted.push(source ?? file.path)
+          continue
+        }
+        if (file.path !== source && this.archive.entries.has(file.path)) {
+          drifted.push(file.path)
+          continue
+        }
+        if (file.beforeText !== undefined && this.texts.get(source) !== file.beforeText) {
+          drifted.push(source)
+        }
+        continue
+      }
+      if (file.kind === 'delete') {
+        if (!this.archive.entries.has(file.path)) {
+          drifted.push(file.path)
+          continue
+        }
+        if (file.beforeText !== undefined && this.texts.get(file.path) !== file.beforeText) {
+          drifted.push(file.path)
+        }
+        continue
+      }
+      // kind === 'update'
+      if (!this.texts.has(file.path)) {
+        drifted.push(file.path)
+      } else if (file.beforeText !== undefined && this.texts.get(file.path) !== file.beforeText) {
+        drifted.push(file.path)
+      }
+    }
+    return drifted
+  }
+
+  /**
+   * Overlays an unapplied pending proposal onto the working copy without altering `initialTexts`
+   * or `initialPaths`, so subsequent writes yield a single cumulative diff against the real editor state.
+   * See ADR 2026-11-21-agent-session-continuity.
+   */
+  seedPendingProposal(proposal: AgentProposal): { seeded: boolean; driftedPaths: string[] } {
+    const driftedPaths = this.detectPendingProposalDrift(proposal)
+    if (driftedPaths.length > 0) {
+      return { seeded: false, driftedPaths }
+    }
+
+    const renames = proposal.files.filter((f) => f.kind === 'rename')
+    const deletes = proposal.files.filter((f) => f.kind === 'delete')
+    const creates = proposal.files.filter((f) => f.kind === 'create')
+    const updates = proposal.files.filter((f) => f.kind === 'update')
+
+    for (const file of renames) {
+      const source = file.previousPath
+      if (!source || isProtectedPath(source) || isProtectedPath(file.path)) continue
+      const existingBytes = this.archive.entries.get(source)
+      const origin = this.originByCurrent.get(source) ?? source
+      this.archive.entries.delete(source)
+      this.texts.delete(source)
+      this.originByCurrent.delete(source)
+
+      const orderIdx = this.archive.order.indexOf(source)
+      if (orderIdx >= 0) this.archive.order[orderIdx] = file.path
+      else if (!this.archive.order.includes(file.path)) this.archive.order.push(file.path)
+
+      if (file.afterText !== undefined) {
+        this.texts.set(file.path, file.afterText)
+        this.archive.entries.set(file.path, encoder.encode(file.afterText))
+      } else if (existingBytes) {
+        this.archive.entries.set(file.path, existingBytes)
+        if (isTextEntry(file.path)) this.texts.set(file.path, decoder.decode(existingBytes))
+      }
+      this.originByCurrent.set(file.path, origin)
+    }
+
+    for (const file of deletes) {
+      if (isProtectedPath(file.path)) continue
+      this.archive.entries.delete(file.path)
+      this.archive.order = this.archive.order.filter((p) => p !== file.path)
+      this.texts.delete(file.path)
+      this.originByCurrent.delete(file.path)
+      if (file.referencesAffected && file.referencesAffected.length > 0) {
+        this.deletedRefs.set(file.path, file.referencesAffected)
+      }
+    }
+
+    for (const file of creates) {
+      if (isProtectedPath(file.path)) continue
+      this.setTextEntry(file.path, file.afterText ?? '')
+      this.originByCurrent.delete(file.path)
+    }
+
+    for (const file of updates) {
+      if (isProtectedPath(file.path)) continue
+      this.setTextEntry(file.path, file.afterText ?? '')
+    }
+
+    if (proposal.isStructural) {
+      this.structuralTouched = true
+    }
+
+    this.refreshPackage()
+    this.seededPendingProposal = true
+    this.mutatedSinceSeed = false
+    return { seeded: true, driftedPaths: [] }
+  }
+
   private setTextEntry(path: string, content: string): void {
     this.texts.set(path, content)
     this.archive.entries.set(path, encoder.encode(content))
@@ -441,6 +571,14 @@ export class AgentWorkspace {
   }
 
   executeTool(name: AgentToolName, args: Record<string, unknown> = {}): AgentToolResult {
+    const result = this.dispatchTool(name, args)
+    if (result.ok && !isReadOnlyAgentTool(name)) {
+      this.mutatedSinceSeed = true
+    }
+    return result
+  }
+
+  private dispatchTool(name: AgentToolName, args: Record<string, unknown>): AgentToolResult {
     switch (name) {
       case 'list_files':
         return this.toolListFiles()
@@ -1591,9 +1729,12 @@ export class AgentWorkspace {
 
   /**
    * Compiles the net changes accumulated during a turn into a reviewable proposal.
-   * Returns null when the Agent made no net changes.
+   * Returns null when the Agent made no net changes (or made no new writes after seeding a pending proposal).
    */
   buildProposal(id: string): AgentProposal | null {
+    if (this.seededPendingProposal && !this.mutatedSinceSeed) {
+      return null
+    }
     const files: AgentProposalFile[] = []
     const survivingOrigins = new Set<string>()
 

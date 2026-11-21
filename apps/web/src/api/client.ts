@@ -54,6 +54,35 @@ export interface EntryDeltaPayload {
 
 export type AgentProviderType = 'openai-compatible' | 'anthropic'
 export type AgentApprovalMode = 'ask' | 'review' | 'auto'
+export type AgentProposalStatus = 'pending' | 'applied' | 'dismissed' | 'reverted' | 'superseded'
+
+export interface AgentProposalResolution {
+  keptHunks?: number
+  totalHunks?: number
+  skippedPaths?: string[]
+  summary?: string
+}
+
+export interface AgentCompactionNotice {
+  compactedMessageCount: number
+  beforeTokens: number
+  afterTokens: number
+  contextWindow: number
+  summary: string
+  degraded?: boolean
+}
+
+export type AgentTimelineItem =
+  | { type: 'reasoning'; text: string }
+  | { type: 'text'; text: string }
+  | {
+      type: 'tool'
+      id: string
+      name: AgentToolName
+      argsSummary: string
+      ok: boolean
+      summary: string
+    }
 
 export interface AgentProfileDto {
   id: string
@@ -62,6 +91,8 @@ export interface AgentProfileDto {
   baseUrl: string
   model: string
   models: string[]
+  contextWindow: number | null
+  modelContextWindows: Record<string, number>
   hasApiKey: boolean
   apiKeyLast4: string | null
   isDefault: boolean
@@ -74,6 +105,8 @@ export interface AgentProfileCreateInput {
   baseUrl: string
   model: string
   models?: string[]
+  contextWindow?: number | null
+  modelContextWindows?: Record<string, number>
   apiKey?: string
   isDefault?: boolean
 }
@@ -84,6 +117,8 @@ export interface AgentProfileUpdateInput {
   baseUrl?: string
   model?: string
   models?: string[]
+  contextWindow?: number | null
+  modelContextWindows?: Record<string, number>
   apiKey?: string
   clearApiKey?: boolean
   isDefault?: boolean
@@ -107,6 +142,7 @@ export interface AgentConnectionTestResult {
 export interface AgentProviderModelsResult {
   ok: boolean
   models: string[]
+  modelContextWindows?: Record<string, number>
   errorCode?: string
   error?: string
 }
@@ -118,6 +154,10 @@ export interface AgentThreadDto {
   profileId: string | null
   model: string | null
   approvalMode: AgentApprovalMode
+  compactionSummary?: string | null
+  compactedUpToMessageId?: string | null
+  lastInputTokens?: number | null
+  lastContextWindow?: number | null
   createdAt: string
   updatedAt: string
 }
@@ -136,15 +176,25 @@ export interface AgentMessageDto {
   role: 'user' | 'assistant'
   content: string
   reasoning: string | null
-  context: { activePath?: string | null; selection?: string | null } | null
+  context: {
+    activePath?: string | null
+    selection?: string | null
+    selectionStartLine?: number | null
+    selectionEndLine?: number | null
+  } | null
+  timeline?: AgentTimelineItem[]
   toolCalls: AgentToolCallDto[]
   proposal: AgentProposal | null
-  proposalStatus: 'pending' | 'applied' | 'dismissed' | null
+  proposalStatus: AgentProposalStatus | null
+  proposalResolution?: AgentProposalResolution | null
+  compactionNotice?: AgentCompactionNotice | null
   error: string | null
   createdAt: string
 }
 
 export type AgentSseEvent =
+  | { type: 'compacted'; notice: AgentCompactionNotice }
+  | { type: 'usage'; inputTokens: number; contextWindow: number }
   | { type: 'reasoning_delta'; text: string }
   | { type: 'text_delta'; text: string }
   | { type: 'tool_start'; id: string; name: AgentToolName; argsSummary: string }
@@ -158,6 +208,9 @@ export type AgentSseEvent =
       approvalMode?: AgentApprovalMode
       model?: string
       profileId?: string
+      usage?: { inputTokens: number; contextWindow: number }
+      supersededMessageId?: string | null
+      compactionNotice?: AgentCompactionNotice | null
     }
   | { type: 'error'; code: string; message: string }
 
@@ -466,11 +519,16 @@ export const api = {
   deleteAgentThread: (bookId: string, threadId: string) =>
     request<void>(`/books/${bookId}/agent/threads/${threadId}`, { method: 'DELETE' }),
 
-  updateProposalStatus: (bookId: string, messageId: string, status: 'applied' | 'dismissed') =>
+  updateProposalStatus: (
+    bookId: string,
+    messageId: string,
+    status: 'applied' | 'dismissed' | 'reverted',
+    resolution?: AgentProposalResolution,
+  ) =>
     request<{ message: AgentMessageDto }>(`/books/${bookId}/agent/proposals/${messageId}`, {
       method: 'PATCH',
       headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ status }),
+      body: JSON.stringify({ status, ...(resolution ? { resolution } : {}) }),
     }),
 
   abortAgentThread: (bookId: string, threadId: string) =>
@@ -490,7 +548,12 @@ export const api = {
       baseVersion: number
       dirtyTexts?: Record<string, string>
       deletedPaths?: string[]
-      context?: { activePath?: string | null; selection?: string | null }
+      context?: {
+        activePath?: string | null
+        selection?: string | null
+        selectionStartLine?: number | null
+        selectionEndLine?: number | null
+      }
     },
     options: { onEvent: (event: AgentSseEvent) => void; signal?: AbortSignal },
   ): Promise<void> => {

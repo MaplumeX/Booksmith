@@ -82,3 +82,4 @@ Status: implemented
 - 右侧 5-Tab「预览/结构」侧栏已由 [the Soft Craft Studio UI decision](2026-11-20-soft-craft-studio-ui.md) 彻底拆解移除（目录并入左栏、查找/元数据/检查迁为顶栏唤起的 Dialog 与 Popover、实时预览并入主画布右侧仿真书页），使本文档定义的 `AgentPanel` 成为右侧唯一按需展开的独立悬浮侧栏；`--accent`、`--accent-fg-muted` 与 `--bubble-radius`（`14px`）随新色板同步更新。
 - 对话输入卡底栏已由 [Agent approval modes, multi-model providers, preferences, reasoning & retry](../feature/2026-11-20-agent-modes-and-multimodel.md) 扩展为审批模式与供应商分组多模型双紧凑胶囊，并在消息流中增量加入了默认折叠的 `ReasoningBlock` 思考过程卡、自动应用/降级状态提示与末条助手重试操作。
 - 侧栏 `AgentProposalCard` 的内嵌折叠 Diff 契约已由 [in-canvas EPUB Agent proposal review](../feature/2026-11-21-in-canvas-agent-proposal-review.md) 部分替代，瘦身为仅含文件清单、统计与跳转入口的导航摘要卡，完整书籍审阅迁移至中央主画布 `ProposalReviewPane`；独立右侧栏壳层、IM 气泡对话流与 `AgentMarkdown` 契约保持有效。
+- 关闭侧栏卸载面板与工具步骤统一置顶折叠条款已由 [continuous multi-turn Agent sessions](../feature/2026-11-21-agent-session-continuity.md) 部分替代，升级为 `hidden` 隐藏保活、流式期可提前起草、多步交错时间线、底栏紧凑上下文占用指示与可折叠自动压缩分隔条；既有语义 Token 与气泡规范保持有效。

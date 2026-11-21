@@ -4,11 +4,19 @@ import {
   isReadOnlyAgentTool,
   type AgentProposal,
   type AgentToolName,
+  type AgentToolResult,
   type AgentWorkspaceOverlay,
   type EpubArchive,
 } from '@booksmith/core'
-import { stepCountIs, streamText, tool, type ModelMessage } from 'ai'
+import { generateText, stepCountIs, streamText, tool, type ModelMessage } from 'ai'
 import { z } from 'zod'
+import {
+  AUTO_COMPACT_RATIO,
+  DEFAULT_CONTEXT_WINDOW,
+  estimateMessageTokens,
+  estimatePromptTokens,
+  estimateTextTokens,
+} from './contextWindow'
 import { nodeCheckXml, nodeXmlCodec } from './nodeXmlCodec'
 import { classifyProviderError, createLanguageModel, type ResolvedProviderConfig } from './providers'
 import { buildSystemPrompt, formatUserMessageWithContext, type AgentTurnContext } from './systemPrompt'
@@ -16,14 +24,35 @@ import { buildSystemPrompt, formatUserMessageWithContext, type AgentTurnContext 
 /**
  * Server-side multi-step Agent turn executor bridging Vercel AI SDK `streamText`
  * to `@booksmith/core`'s framework-agnostic `AgentWorkspace`.
- * See ADR 2026-11-20-builtin-epub-agent, ADR 2026-11-20-agent-modes-and-multimodel.
+ * Persists & replays provider-neutral tool traces, seeds cumulative pending proposals,
+ * and applies two-tier 80% context-window auto-compaction.
+ * See ADR 2026-11-20-builtin-epub-agent, ADR 2026-11-20-agent-modes-and-multimodel, ADR 2026-11-21-agent-session-continuity.
  */
 
 export const MAX_TOOL_STEPS = 15
 const HISTORY_CHAR_BUDGET = 24_000
 
+const RECENT_FULL_TOOL_TURNS = 3
+const FOLD_TOOL_OUTPUT_MIN_CHARS = 600
+const MAX_STORED_TOOL_RESULT_CHARS = 32_000
+const COMPACTION_TARGET_TAIL_RATIO = 0.28
+const COMPACTION_TIMEOUT_MS = 45_000
+
+const COMPACTION_SYSTEM_PROMPT = [
+  '你是 Booksmith EPUB 编辑助手的会话上下文压缩器。',
+  '请将给定的早期对话与工具轨迹压缩为一份简洁、结构化、高信息密度的中文工作摘要，供后续轮次无缝衔接。',
+  '必须保留：',
+  '1. 用户的核心编辑目标、校对规范、风格要求或明确约定；',
+  '2. 已经排查/读取/修改过的文件路径、关键行号范围、问题清单与结论；',
+  '3. 已提出的变更提案及其真实处置结果（已应用、部分跳过、已放弃、已撤销或待审阅）；',
+  '4. 尚未完成或用户约定下一步要处理的事项。',
+  '要求：只输出摘要正文，不要寒暄或解释；不要编造未出现的行号或内容；控制在 1200 字以内。',
+].join('\n')
+
 export type AgentApprovalMode = 'ask' | 'review' | 'auto'
 export const AGENT_APPROVAL_MODES: readonly AgentApprovalMode[] = ['ask', 'review', 'auto'] as const
+
+export type AgentProposalStatus = 'pending' | 'applied' | 'dismissed' | 'reverted' | 'superseded'
 
 export function isAgentApprovalMode(value: unknown): value is AgentApprovalMode {
   return value === 'ask' || value === 'review' || value === 'auto'
@@ -37,10 +66,20 @@ export function normalizeMaxToolSteps(value: number | null | undefined): number 
   return rounded <= 0 ? 0 : rounded
 }
 
-export interface HistoryTurn {
-  role: 'user' | 'assistant'
-  content: string
-  context?: AgentTurnContext | null
+export interface ProposalResolution {
+  keptHunks?: number
+  totalHunks?: number
+  skippedPaths?: string[]
+  summary?: string
+}
+
+export interface CompactionNotice {
+  compactedMessageCount: number
+  beforeTokens: number
+  afterTokens: number
+  contextWindow: number
+  summary: string
+  degraded?: boolean
 }
 
 export interface ToolCallSummary {
@@ -51,7 +90,74 @@ export interface ToolCallSummary {
   summary: string
 }
 
+export type AgentStepRecord =
+  | { type: 'reasoning'; text: string }
+  | { type: 'text'; text: string }
+  | {
+      type: 'tool'
+      id: string
+      callId: string
+      name: AgentToolName
+      args: Record<string, unknown>
+      argsSummary: string
+      ok: boolean
+      summary: string
+      result: AgentToolResult
+    }
+
+/** Lightweight client-safe timeline item omitting raw tool outputs. */
+export type AgentTimelineItem =
+  | { type: 'reasoning'; text: string }
+  | { type: 'text'; text: string }
+  | {
+      type: 'tool'
+      id: string
+      name: AgentToolName
+      argsSummary: string
+      ok: boolean
+      summary: string
+    }
+
+export function toTimelineItems(steps: readonly AgentStepRecord[]): AgentTimelineItem[] {
+  const out: AgentTimelineItem[] = []
+  for (const step of steps) {
+    if (step.type === 'reasoning') {
+      if (step.text.trim()) out.push({ type: 'reasoning', text: step.text })
+    } else if (step.type === 'text') {
+      if (step.text) out.push({ type: 'text', text: step.text })
+    } else if (step.type === 'tool') {
+      out.push({
+        type: 'tool',
+        id: step.id,
+        name: step.name,
+        argsSummary: step.argsSummary,
+        ok: step.ok,
+        summary: step.summary,
+      })
+    }
+  }
+  return out
+}
+
+export interface HistoryTurn {
+  id?: string
+  role: 'user' | 'assistant'
+  content: string
+  context?: AgentTurnContext | null
+  steps?: AgentStepRecord[] | null
+  proposalStatus?: AgentProposalStatus | null
+  proposalResolution?: ProposalResolution | null
+  proposalFilePaths?: string[] | null
+}
+
+export interface PendingProposalSeed {
+  messageId: string
+  proposal: AgentProposal
+}
+
 export type AgentStreamEvent =
+  | { type: 'compacted'; notice: CompactionNotice }
+  | { type: 'usage'; inputTokens: number; contextWindow: number }
   | { type: 'reasoning_delta'; text: string }
   | { type: 'text_delta'; text: string }
   | { type: 'tool_start'; id: string; name: AgentToolName; argsSummary: string }
@@ -69,6 +175,10 @@ export interface RunAgentTurnOptions {
   context?: AgentTurnContext
   approvalMode?: AgentApprovalMode
   customInstructions?: string
+  contextWindow?: number
+  compactionSummary?: string | null
+  previousInputTokens?: number | null
+  pendingProposalSeed?: PendingProposalSeed | null
   abortSignal?: AbortSignal
   maxSteps?: number
   onEvent?: (event: AgentStreamEvent) => void
@@ -77,13 +187,26 @@ export interface RunAgentTurnOptions {
 export interface RunAgentTurnResult {
   content: string
   reasoning: string
+  steps: AgentStepRecord[]
   toolCalls: ToolCallSummary[]
   proposal: AgentProposal | null
+  /** Set when a seeded pending proposal was replaced (new cumulative proposal or reverted back to baseline). */
+  supersededProposalMessageId: string | null
+  /** Populated when 80% auto-compaction ran before this turn. */
+  compaction: {
+    summary: string | null
+    compactedUpToMessageId: string | null
+    notice: CompactionNotice
+  } | null
+  usage: {
+    inputTokens: number
+    contextWindow: number
+  }
   stopped: boolean
   error: { code: string; message: string } | null
 }
 
-/** Deterministic sliding window keeping the newest turns within a character budget. */
+/** Deterministic legacy sliding window kept exported for compatibility tests. */
 export function trimHistory(history: HistoryTurn[], budget = HISTORY_CHAR_BUDGET): ModelMessage[] {
   const kept: ModelMessage[] = []
   let chars = 0
@@ -97,6 +220,413 @@ export function trimHistory(history: HistoryTurn[], budget = HISTORY_CHAR_BUDGET
     chars += text.length
   }
   return kept.reverse()
+}
+
+/**
+ * Normalizes tool call IDs to provider-safe `[a-zA-Z0-9_-]{1,64}` identifiers so replayed
+ * OpenAI-compatible traces remain valid when switching to Anthropic (and vice versa).
+ * See ADR 2026-11-21-agent-session-continuity.
+ */
+export function normalizeToolCallId(raw: string, fallbackIndex: number): string {
+  const cleaned = raw.replace(/[^a-zA-Z0-9_-]/g, '_').slice(0, 56)
+  return cleaned.length > 0 ? cleaned : `tc_${fallbackIndex}`
+}
+
+function capToolResultForStorage(result: AgentToolResult): AgentToolResult {
+  let serialized: string
+  try {
+    serialized = JSON.stringify(result)
+  } catch {
+    return { ok: result.ok, ...(result.error ? { error: result.error.slice(0, 500) } : {}) }
+  }
+  if (serialized.length <= MAX_STORED_TOOL_RESULT_CHARS) return result
+
+  // Preserve key metadata while capping oversized string fields inside `data`.
+  if (result.data && typeof result.data === 'object' && !Array.isArray(result.data)) {
+    const copy: Record<string, unknown> = { ...(result.data as Record<string, unknown>) }
+    if (typeof copy.content === 'string' && copy.content.length > 24_000) {
+      copy.content = `${copy.content.slice(0, 24_000)}\n...(已截断以控制历史体积)`
+      copy.truncated = true
+    }
+    try {
+      if (JSON.stringify({ ok: result.ok, data: copy }).length <= MAX_STORED_TOOL_RESULT_CHARS) {
+        return { ok: result.ok, data: copy }
+      }
+    } catch {
+      // fall through
+    }
+  }
+  return {
+    ok: result.ok,
+    data: {
+      truncated: true,
+      preview: serialized.slice(0, 2_000),
+    },
+    ...(result.error ? { error: result.error.slice(0, 500) } : {}),
+  }
+}
+
+function formatProposalAnnotation(
+  turn: HistoryTurn,
+  pendingState?: { messageId: string; seeded: boolean; driftedPaths: string[] } | null,
+): string | null {
+  const status = turn.proposalStatus
+  if (!status) return null
+  const filesHint =
+    turn.proposalFilePaths && turn.proposalFilePaths.length > 0
+      ? `（涉及：${turn.proposalFilePaths.slice(0, 5).join('、')}${turn.proposalFilePaths.length > 5 ? ' 等' : ''}）`
+      : ''
+
+  if (status === 'applied') {
+    const res = turn.proposalResolution
+    if (res?.summary) return `[提案状态：用户已应用 — ${res.summary}]`
+    if (typeof res?.keptHunks === 'number' && typeof res?.totalHunks === 'number' && res.keptHunks < res.totalHunks) {
+      const skippedNote =
+        res.skippedPaths && res.skippedPaths.length > 0 ? `，跳过涉及：${res.skippedPaths.join('、')}` : ''
+      return `[提案状态：用户已部分应用（保留 ${res.keptHunks}/${res.totalHunks} 处变更${skippedNote}）]`
+    }
+    return `[提案状态：用户已将本轮提案全部应用到工作区${filesHint}]`
+  }
+  if (status === 'dismissed') {
+    return `[提案状态：用户已放弃本轮提案，相关改动未生效${filesHint}]`
+  }
+  if (status === 'reverted') {
+    return `[提案状态：用户曾应用但随后撤销了本轮提案，相关文件已恢复原状${filesHint}]`
+  }
+  if (status === 'superseded') {
+    return `[提案状态：本轮提案已被后续轮次的累计新提案替代]`
+  }
+  if (status === 'pending') {
+    if (pendingState && turn.id === pendingState.messageId) {
+      if (pendingState.seeded) {
+        return `[提案状态：待审阅（未落盘），本轮沙盒已自动承接此草稿；若本轮无新写操作将保持原提案，若有新写操作将生成累计新提案替代此提案]`
+      }
+      if (pendingState.driftedPaths.length > 0) {
+        return `[提案状态：待审阅但已过时 — 用户此后已手动修改 ${pendingState.driftedPaths.join('、')}，本轮沙盒已基于编辑器最新内容重建]`
+      }
+    }
+    return `[提案状态：待审阅，用户尚未应用到工作区${filesHint}]`
+  }
+  return null
+}
+
+function buildToolResultPayload(
+  step: Extract<AgentStepRecord, { type: 'tool' }>,
+  foldLargeReadOnly: boolean,
+): unknown {
+  if (foldLargeReadOnly && isReadOnlyAgentTool(step.name)) {
+    let rawLen = 0
+    try {
+      rawLen = JSON.stringify(step.result).length
+    } catch {
+      rawLen = FOLD_TOOL_OUTPUT_MIN_CHARS + 1
+    }
+    if (rawLen > FOLD_TOOL_OUTPUT_MIN_CHARS) {
+      return {
+        ok: step.ok,
+        compacted: true,
+        tool: step.name,
+        argsSummary: step.argsSummary,
+        summary: step.summary,
+        note: '较早轮次的详细只读输出已折叠；如需核实具体原文或行号，请重新调用工具读取。',
+      }
+    }
+  }
+  return step.result
+}
+
+function toJsonValue(value: unknown): unknown {
+  try {
+    return JSON.parse(JSON.stringify(value ?? null))
+  } catch {
+    return { ok: false, error: 'unserializable tool result' }
+  }
+}
+
+function buildAssistantReplayMessages(
+  turn: HistoryTurn,
+  options: {
+    foldLargeReadOnly: boolean
+    pendingState?: { messageId: string; seeded: boolean; driftedPaths: string[] } | null
+    idCounter: { next: number }
+  },
+): ModelMessage[] {
+  const annotation = formatProposalAnnotation(turn, options.pendingState)
+  const steps = turn.steps ?? null
+
+  if (!steps || steps.length === 0) {
+    const baseText = turn.content.trim()
+    const combined = [baseText, annotation].filter(Boolean).join('\n\n')
+    if (!combined) return []
+    return [{ role: 'assistant', content: combined }]
+  }
+
+  const out: ModelMessage[] = []
+  let pendingTextParts: string[] = []
+  let pendingToolSteps: Array<Extract<AgentStepRecord, { type: 'tool' }>> = []
+
+  const flushGroup = () => {
+    if (pendingToolSteps.length > 0) {
+      const assistantParts: Array<
+        | { type: 'text'; text: string }
+        | { type: 'tool-call'; toolCallId: string; toolName: string; input: unknown }
+      > = []
+      const joinedText = pendingTextParts.join('').trim()
+      if (joinedText) {
+        assistantParts.push({ type: 'text', text: joinedText })
+      }
+      const toolParts: Array<{
+        type: 'tool-result'
+        toolCallId: string
+        toolName: string
+        output: { type: 'json'; value: any }
+      }> = []
+
+      for (const toolStep of pendingToolSteps) {
+        options.idCounter.next += 1
+        const callId = normalizeToolCallId(toolStep.callId || toolStep.id, options.idCounter.next)
+        assistantParts.push({
+          type: 'tool-call',
+          toolCallId: callId,
+          toolName: toolStep.name,
+          input: toJsonValue(toolStep.args ?? {}),
+        })
+        toolParts.push({
+          type: 'tool-result',
+          toolCallId: callId,
+          toolName: toolStep.name,
+          output: {
+            type: 'json',
+            value: toJsonValue(buildToolResultPayload(toolStep, options.foldLargeReadOnly)),
+          },
+        })
+      }
+
+      out.push({ role: 'assistant', content: assistantParts })
+      out.push({ role: 'tool', content: toolParts })
+      pendingTextParts = []
+      pendingToolSteps = []
+      return
+    }
+
+    const joinedText = pendingTextParts.join('').trim()
+    if (joinedText) {
+      out.push({ role: 'assistant', content: joinedText })
+    }
+    pendingTextParts = []
+  }
+
+  for (const step of steps) {
+    if (step.type === 'reasoning') continue
+    if (step.type === 'text') {
+      if (pendingToolSteps.length > 0 && step.text.trim()) {
+        flushGroup()
+      }
+      pendingTextParts.push(step.text)
+    } else if (step.type === 'tool') {
+      pendingToolSteps.push(step)
+    }
+  }
+  flushGroup()
+
+  if (out.length === 0) {
+    const fallback = [turn.content.trim(), annotation].filter(Boolean).join('\n\n')
+    if (!fallback) return []
+    return [{ role: 'assistant', content: fallback }]
+  }
+
+  // Ensure every replayed assistant turn ends with an `assistant` message (never dangling `tool`),
+  // and attach any proposal resolution annotation to that concluding assistant text.
+  const last = out[out.length - 1]!
+  if (last.role === 'tool') {
+    out.push({
+      role: 'assistant',
+      content: annotation ?? turn.content.trim() ?? '（本轮工具执行已结束）',
+    })
+  } else if (annotation) {
+    if (typeof last.content === 'string') {
+      last.content = `${last.content}\n\n${annotation}`
+    } else if (Array.isArray(last.content)) {
+      ;(last.content as Array<{ type: string; text?: string }>).push({
+        type: 'text',
+        text: `\n\n${annotation}`,
+      })
+    }
+  }
+
+  return out
+}
+
+interface LogicalTurn {
+  turns: HistoryTurn[]
+  lastMessageId: string | null
+  messageCount: number
+}
+
+function groupIntoLogicalTurns(history: readonly HistoryTurn[]): LogicalTurn[] {
+  const groups: LogicalTurn[] = []
+  let current: HistoryTurn[] = []
+
+  const flush = () => {
+    if (current.length === 0) return
+    const lastId = [...current].reverse().find((t) => Boolean(t.id))?.id ?? null
+    groups.push({ turns: current, lastMessageId: lastId, messageCount: current.length })
+    current = []
+  }
+
+  for (const turn of history) {
+    if (turn.role === 'user') {
+      if (current.length > 0) flush()
+      current.push(turn)
+    } else {
+      if (current.length === 0) {
+        // Orphan leading assistant turn: skip to preserve strict user-first ordering.
+        continue
+      }
+      current.push(turn)
+      flush()
+    }
+  }
+  flush()
+  return groups
+}
+
+function buildCompactionPrefixMessages(summary: string | null | undefined): ModelMessage[] {
+  const trimmed = summary?.trim()
+  if (!trimmed) return []
+  return [
+    {
+      role: 'user',
+      content: `<session_compaction_summary>\n以下是本会话较早轮次的自动压缩摘要，请将其视为已知上下文继续工作：\n\n${trimmed}\n</session_compaction_summary>`,
+    },
+    {
+      role: 'assistant',
+      content: '已了解早期会话摘要，我将在此基础上继续协助处理本书。',
+    },
+  ]
+}
+
+function renderLogicalTurnsToMessages(
+  logicalTurns: readonly LogicalTurn[],
+  options: {
+    foldOlderThanLastN: number
+    pendingState?: { messageId: string; seeded: boolean; driftedPaths: string[] } | null
+  },
+): ModelMessage[] {
+  const messages: ModelMessage[] = []
+  const idCounter = { next: 0 }
+
+  // Identify the indices of the newest N logical turns that retain full read-only tool outputs.
+  const fullCutoff = Math.max(0, logicalTurns.length - options.foldOlderThanLastN)
+
+  for (let i = 0; i < logicalTurns.length; i += 1) {
+    const group = logicalTurns[i]!
+    const foldLargeReadOnly = i < fullCutoff
+    const turnMessages: ModelMessage[] = []
+
+    for (const turn of group.turns) {
+      if (turn.role === 'user') {
+        const trimmed = turn.content.trim()
+        if (!trimmed) continue
+        const text = formatUserMessageWithContext(trimmed, turn.context)
+        turnMessages.push({ role: 'user', content: text })
+      } else {
+        const assistantMsgs = buildAssistantReplayMessages(turn, {
+          foldLargeReadOnly,
+          pendingState: options.pendingState,
+          idCounter,
+        })
+        turnMessages.push(...assistantMsgs)
+      }
+    }
+
+    if (turnMessages.length === 0) continue
+
+    // Guard against consecutive `user` messages when an older assistant reply failed with empty output.
+    const prev = messages[messages.length - 1]
+    if (prev && prev.role === 'user' && turnMessages[0]!.role === 'user') {
+      messages.push({ role: 'assistant', content: '（上一轮未生成文本回复）' })
+    }
+    messages.push(...turnMessages)
+  }
+
+  return messages
+}
+
+function buildCompactionTranscript(
+  existingSummary: string | null | undefined,
+  logicalTurns: readonly LogicalTurn[],
+  pendingState?: { messageId: string; seeded: boolean; driftedPaths: string[] } | null,
+): string {
+  const sections: string[] = []
+  if (existingSummary?.trim()) {
+    sections.push(`## 既有早期摘要\n${existingSummary.trim()}`)
+  }
+
+  const lines: string[] = ['## 待归并的对话记录']
+  for (const group of logicalTurns) {
+    for (const turn of group.turns) {
+      if (turn.role === 'user') {
+        const ctxNote = turn.context?.activePath ? `（查看文件：${turn.context.activePath}）` : ''
+        lines.push(`- 用户${ctxNote}：${turn.content.trim().slice(0, 1500)}`)
+      } else {
+        const toolSummaries = (turn.steps ?? [])
+          .filter((s): s is Extract<AgentStepRecord, { type: 'tool' }> => s.type === 'tool')
+          .map((s) => `${s.name}(${s.argsSummary})→${s.ok ? s.summary : `失败:${s.summary}`}`)
+        const toolLine = toolSummaries.length > 0 ? `\n  工具步骤：${toolSummaries.join('；')}` : ''
+        const annotation = formatProposalAnnotation(turn, pendingState)
+        const propLine = annotation ? `\n  ${annotation}` : ''
+        const text = turn.content.trim().slice(0, 2000) || '（无正文）'
+        lines.push(`- 助手：${text}${toolLine}${propLine}`)
+      }
+    }
+  }
+  sections.push(lines.join('\n'))
+  return sections.join('\n\n')
+}
+
+/**
+ * Prunes oversized read-only tool results inside an active multi-step `streamText` loop
+ * when accumulated in-turn tool outputs exceed 80% of the context window.
+ */
+function pruneInTurnStepMessages(messages: ModelMessage[], contextWindow: number, systemPrompt: string): ModelMessage[] {
+  const threshold = Math.floor(contextWindow * AUTO_COMPACT_RATIO)
+  const currentEst = estimatePromptTokens({ system: systemPrompt, messages, includeToolsOverhead: true })
+  if (currentEst <= threshold) return messages
+
+  // Locate indices of `tool` messages; keep the newest 2 tool messages verbatim and fold older large read-only outputs.
+  const toolMsgIndices: number[] = []
+  for (let i = 0; i < messages.length; i += 1) {
+    if (messages[i]?.role === 'tool') toolMsgIndices.push(i)
+  }
+  if (toolMsgIndices.length <= 2) return messages
+  const foldableIndices = new Set(toolMsgIndices.slice(0, -2))
+
+  let changed = false
+  const next = messages.map((msg, idx) => {
+    if (!foldableIndices.has(idx) || msg.role !== 'tool' || !Array.isArray(msg.content)) return msg
+    const newParts = msg.content.map((part) => {
+      if (!part || typeof part !== 'object' || part.type !== 'tool-result') return part
+      const toolName = String(part.toolName ?? '') as AgentToolName
+      if (!isReadOnlyAgentTool(toolName)) return part
+      const size = estimateMessageTokens({ role: 'tool', content: [part] })
+      if (size < 200) return part
+      changed = true
+      return {
+        ...part,
+        output: {
+          type: 'json' as const,
+          value: {
+            compacted: true,
+            tool: toolName,
+            note: '本轮较早步骤的只读结果已折叠以维持上下文窗口；如需原文请重新读取。',
+          },
+        },
+      }
+    })
+    return { ...msg, content: newParts } as ModelMessage
+  })
+  return changed ? next : messages
 }
 
 function summarizeArgs(name: AgentToolName, args: Record<string, unknown>): string {
@@ -213,7 +743,9 @@ function summarizeResult(name: AgentToolName, ok: boolean, data: unknown, error?
       return `已暂存新建 ${String(record.path ?? '')}`
     case 'cleanup_unused_resources': {
       const removed = Array.isArray(record.removedPaths) ? record.removedPaths.length : 0
-      return removed > 0 ? `已清理 ${removed} 个未引用资源` : `扫描完成（共 ${Array.isArray(record.unused) ? record.unused.length : 0} 个未引用资源）`
+      return removed > 0
+        ? `已清理 ${removed} 个未引用资源`
+        : `扫描完成（共 ${Array.isArray(record.unused) ? record.unused.length : 0} 个未引用资源）`
     }
   }
 }
@@ -243,18 +775,31 @@ function createAbortError(): Error {
 function buildSdkTools(
   workspace: AgentWorkspace,
   records: ToolCallSummary[],
+  steps: AgentStepRecord[],
   emit: (event: AgentStreamEvent) => void,
   approvalMode: AgentApprovalMode,
   abortSignal?: AbortSignal,
 ) {
-  function run(name: AgentToolName, args: Record<string, unknown>) {
+  function run(name: AgentToolName, args: Record<string, unknown>, toolCallId?: string) {
     if (abortSignal?.aborted) throw createAbortError()
     const id = randomUUID()
+    const callId = normalizeToolCallId(toolCallId || id, records.length + 1)
     const argsSummary = summarizeArgs(name, args)
     emit({ type: 'tool_start', id, name, argsSummary })
     const result = workspace.executeTool(name, args)
     const summary = summarizeResult(name, result.ok, result.data, result.error)
     records.push({ id, name, argsSummary, ok: result.ok, summary })
+    steps.push({
+      type: 'tool',
+      id,
+      callId,
+      name,
+      args: (toJsonValue(args) ?? {}) as Record<string, unknown>,
+      argsSummary,
+      ok: result.ok,
+      summary,
+      result: capToolResultForStorage(result),
+    })
     emit({ type: 'tool_end', id, name, ok: result.ok, summary })
     return result
   }
@@ -263,7 +808,7 @@ function buildSdkTools(
     list_files: tool({
       description: '列出当前 EPUB 的元数据概要、spine 阅读顺序和全部文件路径、类型与行数。',
       inputSchema: z.object({}),
-      execute: async () => run('list_files', {}),
+      execute: async (_input, options) => run('list_files', {}, options?.toolCallId),
     }),
     read_file: tool({
       description: '按行分页读取指定文本文件（默认 200 行，最多 400 行 / 24KB）。大章节请分段读取。',
@@ -272,7 +817,7 @@ function buildSdkTools(
         startLine: z.number().int().min(1).optional().describe('起始行号（1-based）'),
         endLine: z.number().int().min(1).optional().describe('结束行号（1-based，含）'),
       }),
-      execute: async (input) => run('read_file', input),
+      execute: async (input, options) => run('read_file', input, options?.toolCallId),
     }),
     search_book: tool({
       description: '在全书文本文件中检索字符串或正则表达式，返回路径、行号与前后文预览。',
@@ -283,22 +828,22 @@ function buildSdkTools(
         pathFilter: z.string().optional().describe('仅搜索路径包含该子串的文件'),
         maxResults: z.number().int().min(1).max(100).optional().describe('最大返回条数，默认 40'),
       }),
-      execute: async (input) => run('search_book', input),
+      execute: async (input, options) => run('search_book', input, options?.toolCallId),
     }),
     lint_book: tool({
       description: '运行全书结构检查，返回 manifest/spine 缺失、断链、断锚点、未引用资源等问题。',
       inputSchema: z.object({}),
-      execute: async () => run('lint_book', {}),
+      execute: async (_input, options) => run('lint_book', {}, options?.toolCallId),
     }),
     get_metadata: tool({
       description: '读取 OPF 中的 dc:* 元数据字段和全部 <meta> 标签。',
       inputSchema: z.object({}),
-      execute: async () => run('get_metadata', {}),
+      execute: async (_input, options) => run('get_metadata', {}, options?.toolCallId),
     }),
     get_toc: tool({
       description: '读取书籍目录树（nav.xhtml 或 toc.ncx）以及失效锚点列表。',
       inputSchema: z.object({}),
-      execute: async () => run('get_toc', {}),
+      execute: async (_input, options) => run('get_toc', {}, options?.toolCallId),
     }),
     scan_headings: tool({
       description: '按阅读顺序扫描 spine 各章的 h1–h6 正文标题与现有 id 锚点，便于生成或核对目录。',
@@ -309,7 +854,7 @@ function buildSdkTools(
           .describe('要扫描的标题级别数组，如 [1, 2, 3]，默认全部 h1–h6'),
         includeUntitledSpine: z.boolean().optional().describe('是否包含无匹配标题的 spine 章节'),
       }),
-      execute: async (input) => run('scan_headings', input),
+      execute: async (input, options) => run('scan_headings', input, options?.toolCallId),
     }),
     edit_file: tool({
       description: '对已有文本文件执行精确片段替换并即时校验 XML 良构性。优先使用此工具以保真。',
@@ -319,7 +864,7 @@ function buildSdkTools(
         newText: z.string().describe('替换后的新文本'),
         replaceAll: z.boolean().optional().describe('是否替换该文件内全部匹配项，默认 false'),
       }),
-      execute: async (input) => run('edit_file', input),
+      execute: async (input, options) => run('edit_file', input, options?.toolCallId),
     }),
     write_file: tool({
       description: '整文件覆写已有文本文件并校验 XML 良构性（不可用于新建文件，新建章节请用 create_chapter）。',
@@ -327,7 +872,7 @@ function buildSdkTools(
         path: z.string().describe('已存在的文本文件路径'),
         content: z.string().describe('完整的新文件内容'),
       }),
-      execute: async (input) => run('write_file', input),
+      execute: async (input, options) => run('write_file', input, options?.toolCallId),
     }),
     update_metadata: tool({
       description: '更新 OPF 的 dc:* 元数据字段和/或 <meta> 行，并同步 dcterms:modified。',
@@ -355,14 +900,14 @@ function buildSdkTools(
           )
           .optional(),
       }),
-      execute: async (input) => run('update_metadata', input),
+      execute: async (input, options) => run('update_metadata', input, options?.toolCallId),
     }),
     update_toc: tool({
       description: '整体更新目录树，同时同步 nav.xhtml 与 toc.ncx（如存在）。微调长目录请优先使用 edit_toc。',
       inputSchema: z.object({
         entries: z.array(tocEntrySchema).describe('完整的目录树数组'),
       }),
-      execute: async (input) => run('update_toc', input),
+      execute: async (input, options) => run('update_toc', input, options?.toolCallId),
     }),
     generate_toc: tool({
       description:
@@ -379,7 +924,7 @@ function buildSdkTools(
         injectMissingIds: z.boolean().optional().describe('是否为无 id 标题自动写入稳定锚点，默认 true'),
         includeUntitledSpine: z.boolean().optional().describe('是否将无匹配标题的章节按文件名补入'),
       }),
-      execute: async (input) => run('generate_toc', input),
+      execute: async (input, options) => run('generate_toc', input, options?.toolCallId),
     }),
     edit_toc: tool({
       description:
@@ -411,7 +956,7 @@ function buildSdkTools(
         keepChildren: z.boolean().optional().describe('remove 时是否保留子项并上提一级'),
         overwriteRichHtml: z.boolean().optional().describe('refresh_labels 时是否覆盖含内联 MathML 的条目，默认 false'),
       }),
-      execute: async (input) => run('edit_toc', input),
+      execute: async (input, options) => run('edit_toc', input, options?.toolCallId),
     }),
     create_chapter: tool({
       description: '新建一个 XHTML 章节文件，注册到 OPF manifest 与 spine，可选加入目录。',
@@ -422,7 +967,7 @@ function buildSdkTools(
         insertAfter: z.string().optional().describe('可选：插入到指定已有章节路径之后'),
         addToToc: z.boolean().optional().describe('是否同时追加到目录末尾'),
       }),
-      execute: async (input) => run('create_chapter', input),
+      execute: async (input, options) => run('create_chapter', input, options?.toolCallId),
     }),
     rename_file: tool({
       description: '同目录重命名文件，自动更新 OPF manifest 并级联重写全书章节与目录中的引用。',
@@ -430,14 +975,14 @@ function buildSdkTools(
         path: z.string().describe('原文件路径'),
         newFilename: z.string().min(1).describe('新文件名（不含斜杠）'),
       }),
-      execute: async (input) => run('rename_file', input),
+      execute: async (input, options) => run('rename_file', input, options?.toolCallId),
     }),
     delete_file: tool({
       description: '删除指定文件，自动从 OPF manifest/spine 移除并清理目录条目（不可删除 OPF 或 nav）。',
       inputSchema: z.object({
         path: z.string().describe('待删除的文件路径'),
       }),
-      execute: async (input) => run('delete_file', input),
+      execute: async (input, options) => run('delete_file', input, options?.toolCallId),
     }),
     split_chapter: tool({
       description:
@@ -449,14 +994,14 @@ function buildSdkTools(
         byMarkers: z.boolean().optional().describe('按章节中的 <hr class="sigil_split_marker" /> 标记批量拆分'),
         headingLevel: z.number().int().min(1).max(6).optional().describe('按 h1–h6 标题层级自动拆分为多章'),
       }),
-      execute: async (input) => run('split_chapter', input),
+      execute: async (input, options) => run('split_chapter', input, options?.toolCallId),
     }),
     merge_chapters: tool({
       description: '将多个章节按顺序合并至第一个章节，补齐缺失样式表、重写全书与目录引用并从 OPF 移除被合并文件。',
       inputSchema: z.object({
         paths: z.array(z.string().min(1)).min(2).describe('按阅读顺序排列的待合并章节路径，首项保留为主章节'),
       }),
-      execute: async (input) => run('merge_chapters', input),
+      execute: async (input, options) => run('merge_chapters', input, options?.toolCallId),
     }),
     link_stylesheets: tool({
       description: '为一个或多个章节设置、追加或移除 <head> 中的 CSS 样式表 <link> 引用。',
@@ -466,7 +1011,7 @@ function buildSdkTools(
         add: z.array(z.string()).optional().describe('追加挂载的样式表路径'),
         remove: z.array(z.string()).optional().describe('取消挂载的样式表路径'),
       }),
-      execute: async (input) => run('link_stylesheets', input),
+      execute: async (input, options) => run('link_stylesheets', input, options?.toolCallId),
     }),
     create_stylesheet: tool({
       description: '新建空白或带初始内容的 CSS 样式表并注册到 OPF manifest，可选同时关联到指定章节。',
@@ -475,7 +1020,7 @@ function buildSdkTools(
         content: z.string().optional().describe('可选初始 CSS 内容'),
         linkToChapters: z.array(z.string()).optional().describe('可选：创建后自动关联到这些章节'),
       }),
-      execute: async (input) => run('create_stylesheet', input),
+      execute: async (input, options) => run('create_stylesheet', input, options?.toolCallId),
     }),
     cleanup_unused_resources: tool({
       description:
@@ -488,7 +1033,7 @@ function buildSdkTools(
           .describe('按分类清理（image / font / stylesheet）'),
         dryRun: z.boolean().optional().describe('true 时仅返回未引用清单不执行删除'),
       }),
-      execute: async (input) => run('cleanup_unused_resources', input),
+      execute: async (input, options) => run('cleanup_unused_resources', input, options?.toolCallId),
     }),
   }
 
@@ -507,46 +1052,261 @@ function buildSdkTools(
   return allTools
 }
 
+function appendTimelineDelta(steps: AgentStepRecord[], type: 'reasoning' | 'text', delta: string): void {
+  if (!delta) return
+  const tail = steps[steps.length - 1]
+  if (tail && tail.type === type) {
+    tail.text += delta
+  } else {
+    steps.push({ type, text: delta })
+  }
+}
+
 export async function runAgentTurn(options: RunAgentTurnOptions): Promise<RunAgentTurnResult> {
   const emit = options.onEvent ?? (() => {})
   const approvalMode: AgentApprovalMode = options.approvalMode ?? 'review'
+  const contextWindow = options.contextWindow ?? DEFAULT_CONTEXT_WINDOW
   const workspace = AgentWorkspace.fromArchive(options.archive, {
     codec: nodeXmlCodec,
     checkXml: nodeCheckXml,
     overlay: options.overlay,
   })
 
+  // Seed unapplied pending proposal onto the working copy (unless ask-mode or user drifted files).
+  // See ADR 2026-11-21-agent-session-continuity.
+  let pendingState: { messageId: string; seeded: boolean; driftedPaths: string[] } | null = null
+  if (options.pendingProposalSeed && approvalMode !== 'ask') {
+    const seedResult = workspace.seedPendingProposal(options.pendingProposalSeed.proposal)
+    pendingState = {
+      messageId: options.pendingProposalSeed.messageId,
+      seeded: seedResult.seeded,
+      driftedPaths: seedResult.driftedPaths,
+    }
+  }
+
   const toolCalls: ToolCallSummary[] = []
+  const steps: AgentStepRecord[] = []
   let content = ''
   let reasoning = ''
+  let compactionResult: RunAgentTurnResult['compaction'] = null
+  let reportedInputTokens = 0
 
   try {
     if (options.abortSignal?.aborted) {
       emit({ type: 'done', stopped: true })
-      return { content, reasoning, toolCalls, proposal: null, stopped: true, error: null }
+      return {
+        content,
+        reasoning,
+        steps,
+        toolCalls,
+        proposal: null,
+        supersededProposalMessageId: null,
+        compaction: null,
+        usage: { inputTokens: 0, contextWindow },
+        stopped: true,
+        error: null,
+      }
     }
 
     const model = createLanguageModel(options.provider)
+    const systemPrompt = buildSystemPrompt(workspace.getPackage(), {
+      approvalMode,
+      customInstructions: options.customInstructions,
+    })
     const trimmedUserMessage = options.userMessage.trim()
     const currentUserContent = formatUserMessageWithContext(
       trimmedUserMessage || options.userMessage,
       options.context,
     )
-    const messages: ModelMessage[] = [
-      ...trimHistory(options.history),
-      { role: 'user', content: currentUserContent },
-    ]
+    const currentUserMsg: ModelMessage = { role: 'user', content: currentUserContent }
+    const includeToolsOverhead = approvalMode !== 'ask'
+
+    // Tier 1: replay full tool traces for recent turns and fold oversized read-only outputs in older turns.
+    const logicalTurns = groupIntoLogicalTurns(options.history)
+    const existingPrefix = buildCompactionPrefixMessages(options.compactionSummary)
+
+    const unfoldedHistoryMsgs = renderLogicalTurnsToMessages(logicalTurns, {
+      foldOlderThanLastN: logicalTurns.length,
+      pendingState,
+    })
+    const foldedHistoryMsgs = renderLogicalTurnsToMessages(logicalTurns, {
+      foldOlderThanLastN: RECENT_FULL_TOOL_TURNS,
+      pendingState,
+    })
+
+    const estimatedBeforeFold = estimatePromptTokens({
+      system: systemPrompt,
+      messages: [...existingPrefix, ...unfoldedHistoryMsgs, currentUserMsg],
+      includeToolsOverhead,
+    })
+    const estimatedAfterFold = estimatePromptTokens({
+      system: systemPrompt,
+      messages: [...existingPrefix, ...foldedHistoryMsgs, currentUserMsg],
+      includeToolsOverhead,
+    })
+
+    const foldedSavings = Math.max(0, estimatedBeforeFold - estimatedAfterFold)
+    const currentUserTokens = estimateMessageTokens(currentUserMsg)
+    const calibratedTokens =
+      typeof options.previousInputTokens === 'number' && options.previousInputTokens > 0
+        ? Math.max(estimatedAfterFold, options.previousInputTokens - foldedSavings + currentUserTokens)
+        : estimatedAfterFold
+
+    const compactThreshold = Math.floor(contextWindow * AUTO_COMPACT_RATIO)
+    let activePrefix = existingPrefix
+    let activeHistoryMsgs = foldedHistoryMsgs
+
+    // Tier 2: when still >= 80% of context window, auto-compact older turns via the active model
+    // (gracefully degrading to turn-aligned trimming if compaction fails). See ADR 2026-11-21-agent-session-continuity.
+    if (calibratedTokens >= compactThreshold && logicalTurns.length > 0) {
+      const tailBudget = Math.max(512, Math.floor(contextWindow * COMPACTION_TARGET_TAIL_RATIO))
+      let tailTokens = currentUserTokens
+      let keepFromIndex = logicalTurns.length
+
+      for (let i = logicalTurns.length - 1; i >= 0; i -= 1) {
+        const singleTurnMsgs = renderLogicalTurnsToMessages([logicalTurns[i]!], {
+          foldOlderThanLastN: 1,
+          pendingState,
+        })
+        const turnCost = singleTurnMsgs.reduce((acc, m) => acc + estimateMessageTokens(m), 0)
+        if (keepFromIndex < logicalTurns.length && tailTokens + turnCost > tailBudget) break
+        if (tailTokens + turnCost > tailBudget) {
+          // Even the newest single turn alone exceeds tail budget; compact all prior turns if any.
+          if (i > 0) keepFromIndex = i
+          break
+        }
+        tailTokens += turnCost
+        keepFromIndex = i
+      }
+
+      // Ensure at least the oldest turn gets compacted when pressure is >= 80%.
+      if (keepFromIndex === 0 && logicalTurns.length > 1) {
+        keepFromIndex = 1
+      } else if (keepFromIndex === 0 && logicalTurns.length === 1) {
+        keepFromIndex = 1
+      }
+
+      const turnsToCompact = logicalTurns.slice(0, keepFromIndex)
+      const remainingTurns = logicalTurns.slice(keepFromIndex)
+
+      if (turnsToCompact.length > 0) {
+        const compactedMessageCount = turnsToCompact.reduce((sum, g) => sum + g.messageCount, 0)
+        const compactedUpToMessageId =
+          [...turnsToCompact].reverse().find((g) => g.lastMessageId)?.lastMessageId ?? null
+
+        let summaryText: string | null = null
+        let degraded = false
+        try {
+          const transcript = buildCompactionTranscript(options.compactionSummary, turnsToCompact, pendingState)
+          const timeoutSignal = AbortSignal.timeout(COMPACTION_TIMEOUT_MS)
+          const combinedSignal = options.abortSignal
+            ? AbortSignal.any([options.abortSignal, timeoutSignal])
+            : timeoutSignal
+          const compactRes = await generateText({
+            model,
+            system: COMPACTION_SYSTEM_PROMPT,
+            prompt: transcript,
+            maxOutputTokens: Math.min(2048, Math.max(512, Math.floor(contextWindow * 0.2))),
+            maxRetries: 0,
+            abortSignal: combinedSignal,
+          })
+          const candidate = compactRes.text.trim()
+          if (candidate) summaryText = candidate
+          else degraded = true
+        } catch (compactError) {
+          if (options.abortSignal?.aborted) throw compactError
+          degraded = true
+        }
+
+        if (summaryText) {
+          activePrefix = buildCompactionPrefixMessages(summaryText)
+          activeHistoryMsgs = renderLogicalTurnsToMessages(remainingTurns, {
+            foldOlderThanLastN: RECENT_FULL_TOOL_TURNS,
+            pendingState,
+          })
+          const afterTokens = estimatePromptTokens({
+            system: systemPrompt,
+            messages: [...activePrefix, ...activeHistoryMsgs, currentUserMsg],
+            includeToolsOverhead,
+          })
+          const notice: CompactionNotice = {
+            compactedMessageCount,
+            beforeTokens: calibratedTokens,
+            afterTokens,
+            contextWindow,
+            summary: summaryText,
+          }
+          compactionResult = { summary: summaryText, compactedUpToMessageId, notice }
+          emit({ type: 'compacted', notice })
+        } else {
+          // Graceful fallback: drop oldest logical turns until under 80% without failing the turn.
+          let trimmedTurns = remainingTurns
+          while (trimmedTurns.length > 0) {
+            const candidateMsgs = renderLogicalTurnsToMessages(trimmedTurns, {
+              foldOlderThanLastN: RECENT_FULL_TOOL_TURNS,
+              pendingState,
+            })
+            const est = estimatePromptTokens({
+              system: systemPrompt,
+              messages: [...existingPrefix, ...candidateMsgs, currentUserMsg],
+              includeToolsOverhead,
+            })
+            if (est < compactThreshold) break
+            trimmedTurns = trimmedTurns.slice(1)
+          }
+          activePrefix = existingPrefix
+          activeHistoryMsgs = renderLogicalTurnsToMessages(trimmedTurns, {
+            foldOlderThanLastN: RECENT_FULL_TOOL_TURNS,
+            pendingState,
+          })
+          const afterTokens = estimatePromptTokens({
+            system: systemPrompt,
+            messages: [...activePrefix, ...activeHistoryMsgs, currentUserMsg],
+            includeToolsOverhead,
+          })
+          const droppedCount =
+            logicalTurns.reduce((sum, g) => sum + g.messageCount, 0) -
+            trimmedTurns.reduce((sum, g) => sum + g.messageCount, 0)
+          if (droppedCount > 0) {
+            const notice: CompactionNotice = {
+              compactedMessageCount: droppedCount,
+              beforeTokens: calibratedTokens,
+              afterTokens,
+              contextWindow,
+              summary: '自动摘要服务暂时不可用，已按完整回合裁剪最旧上下文以继续对话。',
+              degraded: true,
+            }
+            compactionResult = { summary: options.compactionSummary ?? null, compactedUpToMessageId: null, notice }
+            emit({ type: 'compacted', notice })
+          }
+        }
+      }
+    }
+
+    const messages: ModelMessage[] = [...activePrefix, ...activeHistoryMsgs]
+    if (messages.length > 0 && messages[messages.length - 1]!.role === 'user') {
+      messages.push({ role: 'assistant', content: '（上一轮未生成文本回复）' })
+    }
+    messages.push(currentUserMsg)
+
+    const initialEstimatedTokens = estimatePromptTokens({
+      system: systemPrompt,
+      messages,
+      includeToolsOverhead,
+    })
 
     const maxSteps = normalizeMaxToolSteps(options.maxSteps)
     const result = streamText({
       model,
-      system: buildSystemPrompt(workspace.getPackage(), {
-        approvalMode,
-        customInstructions: options.customInstructions,
-      }),
+      system: systemPrompt,
       messages,
-      tools: buildSdkTools(workspace, toolCalls, emit, approvalMode, options.abortSignal),
+      tools: buildSdkTools(workspace, toolCalls, steps, emit, approvalMode, options.abortSignal),
       stopWhen: maxSteps > 0 ? stepCountIs(maxSteps) : () => false,
+      prepareStep: ({ messages: stepMessages, stepNumber }) => {
+        if (stepNumber < 2) return undefined
+        const pruned = pruneInTurnStepMessages(stepMessages, contextWindow, systemPrompt)
+        return pruned === stepMessages ? undefined : { messages: pruned }
+      },
       abortSignal: options.abortSignal,
     })
 
@@ -554,33 +1314,101 @@ export async function runAgentTurn(options: RunAgentTurnOptions): Promise<RunAge
       if (options.abortSignal?.aborted || part.type === 'abort') break
       if (part.type === 'reasoning-delta') {
         reasoning += part.text
+        appendTimelineDelta(steps, 'reasoning', part.text)
         emit({ type: 'reasoning_delta', text: part.text })
       } else if (part.type === 'text-delta') {
         content += part.text
+        appendTimelineDelta(steps, 'text', part.text)
         emit({ type: 'text_delta', text: part.text })
+      } else if (part.type === 'finish-step') {
+        const stepInput = part.usage?.inputTokens
+        if (typeof stepInput === 'number' && Number.isFinite(stepInput) && stepInput > 0) {
+          reportedInputTokens = stepInput
+          emit({ type: 'usage', inputTokens: reportedInputTokens, contextWindow })
+        }
       } else if (part.type === 'error') {
         throw part.error
       }
     }
 
+    const finalInputTokens =
+      reportedInputTokens > 0
+        ? reportedInputTokens
+        : initialEstimatedTokens +
+          estimateTextTokens(content) +
+          steps
+            .filter((s): s is Extract<AgentStepRecord, { type: 'tool' }> => s.type === 'tool')
+            .reduce((acc, s) => acc + estimateTextTokens(JSON.stringify(s.result)), 0)
+
+    if (reportedInputTokens === 0 && !options.abortSignal?.aborted) {
+      emit({ type: 'usage', inputTokens: finalInputTokens, contextWindow })
+    }
+
     if (options.abortSignal?.aborted) {
       emit({ type: 'done', stopped: true })
-      return { content, reasoning, toolCalls, proposal: null, stopped: true, error: null }
+      return {
+        content,
+        reasoning,
+        steps,
+        toolCalls,
+        proposal: null,
+        supersededProposalMessageId: null,
+        compaction: compactionResult,
+        usage: { inputTokens: finalInputTokens, contextWindow },
+        stopped: true,
+        error: null,
+      }
     }
 
     const proposal = approvalMode === 'ask' ? null : workspace.buildProposal(randomUUID())
+    const supersededProposalMessageId =
+      pendingState?.seeded && workspace.hasNewMutations() ? pendingState.messageId : null
+
     if (proposal) {
       emit({ type: 'proposal', proposal })
     }
     emit({ type: 'done', stopped: false })
-    return { content, reasoning, toolCalls, proposal, stopped: false, error: null }
+    return {
+      content,
+      reasoning,
+      steps,
+      toolCalls,
+      proposal,
+      supersededProposalMessageId,
+      compaction: compactionResult,
+      usage: { inputTokens: finalInputTokens, contextWindow },
+      stopped: false,
+      error: null,
+    }
   } catch (error) {
     if (options.abortSignal?.aborted) {
       emit({ type: 'done', stopped: true })
-      return { content, reasoning, toolCalls, proposal: null, stopped: true, error: null }
+      return {
+        content,
+        reasoning,
+        steps,
+        toolCalls,
+        proposal: null,
+        supersededProposalMessageId: null,
+        compaction: compactionResult,
+        usage: { inputTokens: reportedInputTokens, contextWindow },
+        stopped: true,
+        error: null,
+      }
     }
     const classified = classifyProviderError(error)
     emit({ type: 'error', code: classified.code, message: classified.message })
-    return { content, reasoning, toolCalls, proposal: null, stopped: false, error: classified }
+    return {
+      content,
+      reasoning,
+      steps,
+      toolCalls,
+      proposal: null,
+      supersededProposalMessageId: null,
+      compaction: compactionResult,
+      usage: { inputTokens: reportedInputTokens, contextWindow },
+      stopped: false,
+      error: classified,
+    }
   }
 }

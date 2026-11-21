@@ -62,6 +62,8 @@ describe('agent REST & SSE routes', () => {
   let lastSeenSystem: string | null = null
   let lastSeenToolCount = 0
   let capturedChatMessages: Array<Array<{ role?: string; content?: string }>> = []
+  let continuityStep = 0
+  let compactionCallCount = 0
   let store: ReturnType<typeof createDb>
 
   beforeAll(async () => {
@@ -91,6 +93,33 @@ describe('agent REST & SSE routes', () => {
         }
 
         if (body.stream !== true) {
+          const isCompaction = msgs.some(
+            (m) => m.role === 'system' && typeof m.content === 'string' && m.content.includes('上下文压缩器'),
+          )
+          if (isCompaction) {
+            compactionCallCount += 1
+            res.writeHead(200, { 'content-type': 'application/json' })
+            res.end(
+              JSON.stringify({
+                id: `compact-${compactionCallCount}`,
+                object: 'chat.completion',
+                created: 1,
+                model: body.model ?? 'mock',
+                choices: [
+                  {
+                    index: 0,
+                    message: {
+                      role: 'assistant',
+                      content: '【持久化摘要】前两轮已完成第一章两处正文校对并记录撤销状态。',
+                    },
+                    finish_reason: 'stop',
+                  },
+                ],
+                usage: { prompt_tokens: 100, completion_tokens: 30, total_tokens: 130 },
+              }),
+            )
+            return
+          }
           res.writeHead(200, { 'content-type': 'application/json' })
           res.end(
             JSON.stringify({
@@ -101,6 +130,135 @@ describe('agent REST & SSE routes', () => {
               choices: [{ index: 0, message: { role: 'assistant', content: 'OK' }, finish_reason: 'stop' }],
             }),
           )
+          return
+        }
+
+        if (body.model === 'mock-continuity') {
+          continuityStep += 1
+          if (continuityStep === 1) {
+            // Turn 1 step 1: edit first line
+            writeOpenAiSse(res, [
+              {
+                id: 'ct1',
+                object: 'chat.completion.chunk',
+                created: 1,
+                model: 'mock-continuity',
+                choices: [
+                  {
+                    index: 0,
+                    delta: {
+                      role: 'assistant',
+                      content: '先修改第一句。',
+                      tool_calls: [
+                        {
+                          index: 0,
+                          id: 'call_ct_1',
+                          type: 'function',
+                          function: {
+                            name: 'edit_file',
+                            arguments: JSON.stringify({
+                              path: 'EPUB/text/ch001.xhtml',
+                              oldText: '<p>从这里开始写。</p>',
+                              newText: '<p>第一轮修订完成。</p>\n<p>待微调句。</p>',
+                            }),
+                          },
+                        },
+                      ],
+                    },
+                    finish_reason: null,
+                  },
+                ],
+              },
+              {
+                id: 'ct1',
+                object: 'chat.completion.chunk',
+                created: 1,
+                model: 'mock-continuity',
+                choices: [{ index: 0, delta: {}, finish_reason: 'tool_calls' }],
+              },
+            ])
+            return
+          }
+          if (continuityStep === 2) {
+            // Turn 1 step 2: summary
+            writeOpenAiSse(res, [
+              {
+                id: 'ct2',
+                object: 'chat.completion.chunk',
+                created: 1,
+                model: 'mock-continuity',
+                choices: [{ index: 0, delta: { role: 'assistant', content: '已完成第一轮修改。' }, finish_reason: 'stop' }],
+                usage: { prompt_tokens: 600, completion_tokens: 20, total_tokens: 620 },
+              },
+            ])
+            return
+          }
+          if (continuityStep === 3) {
+            // Turn 2 step 1: edit on top of unapplied Turn 1 pending proposal!
+            writeOpenAiSse(res, [
+              {
+                id: 'ct3',
+                object: 'chat.completion.chunk',
+                created: 1,
+                model: 'mock-continuity',
+                choices: [
+                  {
+                    index: 0,
+                    delta: {
+                      role: 'assistant',
+                      tool_calls: [
+                        {
+                          index: 0,
+                          id: 'call_ct_2',
+                          type: 'function',
+                          function: {
+                            name: 'edit_file',
+                            arguments: JSON.stringify({
+                              path: 'EPUB/text/ch001.xhtml',
+                              oldText: '<p>待微调句。</p>',
+                              newText: '<p>第二轮顺带微调完成。</p>',
+                            }),
+                          },
+                        },
+                      ],
+                    },
+                    finish_reason: null,
+                  },
+                ],
+              },
+              {
+                id: 'ct3',
+                object: 'chat.completion.chunk',
+                created: 1,
+                model: 'mock-continuity',
+                choices: [{ index: 0, delta: {}, finish_reason: 'tool_calls' }],
+              },
+            ])
+            return
+          }
+          if (continuityStep === 4) {
+            writeOpenAiSse(res, [
+              {
+                id: 'ct4',
+                object: 'chat.completion.chunk',
+                created: 1,
+                model: 'mock-continuity',
+                choices: [{ index: 0, delta: { role: 'assistant', content: '已在原草稿上叠加微调。' }, finish_reason: 'stop' }],
+                usage: { prompt_tokens: 3400, completion_tokens: 24, total_tokens: 3424 },
+              },
+            ])
+            return
+          }
+          writeOpenAiSse(res, [
+            {
+              id: `ct-${continuityStep}`,
+              object: 'chat.completion.chunk',
+              created: 1,
+              model: 'mock-continuity',
+              choices: [{ index: 0, delta: { role: 'assistant', content: '已收到压缩摘要与最新状态。' }, finish_reason: 'stop' }],
+              usage: { prompt_tokens: 1100, completion_tokens: 18, total_tokens: 1118 },
+            },
+          ])
           return
         }
 
@@ -1034,5 +1192,166 @@ describe('agent REST & SSE routes', () => {
     // Prior 4 messages (2 turns) + only the 1 new user message (no empty assistant bubble)
     expect(afterEmptyAbort.messages).toHaveLength(5)
     expect(afterEmptyAbort.messages.at(-1)?.role).toBe('user')
+  })
+
+  it('persists full tool traces, seeds cumulative pending proposals, records proposal resolutions, and auto-compacts at 80%', async () => {
+    const loginA = await fetch(`${appUrl}/api/auth/login`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ email: emailA, password: 'strong-password-123' }),
+    })
+    const cookieA = (loginA.headers.getSetCookie?.()[0] ?? '').split(';')[0]!
+
+    const epub = createEmptyEpub({ title: '会话连续性测试书' })
+    const uploadRes = await fetch(`${appUrl}/api/books`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/epub+zip', cookie: cookieA },
+      body: Buffer.from(epub),
+    })
+    expect(uploadRes.status).toBe(201)
+    const { book } = (await uploadRes.json()) as { book: { id: string; currentVersion: number } }
+
+    // Create a profile with an explicit small contextWindow (4096) so 80% (~3276) triggers predictably on Turn 3
+    const profileRes = await fetch(`${appUrl}/api/agent/profiles`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', cookie: cookieA },
+      body: JSON.stringify({
+        name: '连续会话测试预设',
+        provider: 'openai-compatible',
+        baseUrl: `${mockUrl}/v1`,
+        model: 'mock-continuity',
+        contextWindow: 4096,
+        modelContextWindows: { 'mock-continuity': 8192 },
+      }),
+    })
+    expect(profileRes.status).toBe(201)
+    const { profile } = (await profileRes.json()) as {
+      profile: { id: string; contextWindow: number | null; modelContextWindows: Record<string, number> }
+    }
+    expect(profile.contextWindow).toBe(4096)
+    expect(profile.modelContextWindows).toEqual({ 'mock-continuity': 8192 })
+
+    const threadRes = await fetch(`${appUrl}/api/books/${book.id}/agent/threads`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', cookie: cookieA },
+      body: JSON.stringify({ profileId: profile.id, model: 'mock-continuity', approvalMode: 'review' }),
+    })
+    expect(threadRes.status).toBe(201)
+    const { thread } = (await threadRes.json()) as { thread: { id: string } }
+
+    const parseSse = (raw: string) =>
+      raw
+        .split('\n\n')
+        .filter((b) => b.startsWith('data: '))
+        .map((b) => JSON.parse(b.slice(6)) as Record<string, unknown>)
+
+    continuityStep = 0
+    compactionCallCount = 0
+    capturedChatMessages = []
+
+    // Turn 1: produces pending proposal + interleaved timeline
+    const t1Res = await fetch(`${appUrl}/api/books/${book.id}/agent/threads/${thread.id}/messages`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', cookie: cookieA },
+      body: JSON.stringify({ content: '帮我修改第一章第一句', baseVersion: book.currentVersion }),
+    })
+    expect(t1Res.status).toBe(200)
+    const t1Events = parseSse(await t1Res.text())
+    const t1Done = t1Events.find((e) => e.type === 'done') as { messageId: string; usage?: { inputTokens: number; contextWindow: number } }
+    expect(t1Done.messageId).toBeTruthy()
+    expect(t1Done.usage).toEqual({ inputTokens: 600, contextWindow: 4096 })
+
+    // Turn 2: without applying Turn 1 proposal, ask to tweak the second sentence -> seeds Turn 1 pending proposal,
+    // emits cumulative proposal covering BOTH edits, and marks Turn 1 proposal `superseded`!
+    const t2Res = await fetch(`${appUrl}/api/books/${book.id}/agent/threads/${thread.id}/messages`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', cookie: cookieA },
+      body: JSON.stringify({ content: '顺便把第二句也微调一下', baseVersion: book.currentVersion }),
+    })
+    expect(t2Res.status).toBe(200)
+    const t2Events = parseSse(await t2Res.text())
+    const t2Proposal = t2Events.find((e) => e.type === 'proposal')?.proposal as {
+      files: Array<{ beforeText?: string; afterText?: string }>
+    }
+    const t2Done = t2Events.find((e) => e.type === 'done') as {
+      messageId: string
+      supersededMessageId: string | null
+      usage?: { inputTokens: number; contextWindow: number }
+    }
+    expect(t2Proposal.files[0]?.beforeText).toContain('<p>从这里开始写。</p>')
+    expect(t2Proposal.files[0]?.afterText).toContain('第一轮修订完成。')
+    expect(t2Proposal.files[0]?.afterText).toContain('第二轮顺带微调完成。')
+    expect(t2Done.supersededMessageId).toBe(t1Done.messageId)
+    expect(t2Done.usage?.inputTokens).toBe(3400)
+
+    // Verify Turn 2 upstream request actually replayed Turn 1's tool_calls & role:'tool' result!
+    const t2FirstReq = capturedChatMessages[2]!
+    expect(JSON.stringify(t2FirstReq)).toContain('call_ct_1')
+    expect(t2FirstReq.some((m) => m.role === 'tool')).toBe(true)
+
+    // Record partial-apply resolution then revert on Turn 2 proposal
+    const applyRes = await fetch(`${appUrl}/api/books/${book.id}/agent/proposals/${t2Done.messageId}`, {
+      method: 'PATCH',
+      headers: { 'content-type': 'application/json', cookie: cookieA },
+      body: JSON.stringify({
+        status: 'applied',
+        resolution: { keptHunks: 1, totalHunks: 2, skippedPaths: ['EPUB/text/ch001.xhtml'] },
+      }),
+    })
+    expect(applyRes.status).toBe(200)
+    const applyJson = (await applyRes.json()) as {
+      message: { proposalStatus: string; proposalResolution: { keptHunks: number; totalHunks: number } }
+    }
+    expect(applyJson.message.proposalStatus).toBe('applied')
+    expect(applyJson.message.proposalResolution.keptHunks).toBe(1)
+
+    const revertRes = await fetch(`${appUrl}/api/books/${book.id}/agent/proposals/${t2Done.messageId}`, {
+      method: 'PATCH',
+      headers: { 'content-type': 'application/json', cookie: cookieA },
+      body: JSON.stringify({ status: 'reverted' }),
+    })
+    expect(revertRes.status).toBe(200)
+    expect(((await revertRes.json()) as { message: { proposalStatus: string } }).message.proposalStatus).toBe('reverted')
+
+    // Turn 3: previousInputTokens=3400 >= 80% of 4096 (3276) -> triggers auto-compaction & persists summary on thread!
+    const t3Res = await fetch(`${appUrl}/api/books/${book.id}/agent/threads/${thread.id}/messages`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', cookie: cookieA },
+      body: JSON.stringify({ content: '我刚才撤销了，继续下一步吧', baseVersion: book.currentVersion }),
+    })
+    expect(t3Res.status).toBe(200)
+    const t3Events = parseSse(await t3Res.text())
+    expect(compactionCallCount).toBe(1)
+    expect(t3Events.some((e) => e.type === 'compacted')).toBe(true)
+
+    const threadAfter = (await (
+      await fetch(`${appUrl}/api/books/${book.id}/agent/threads/${thread.id}`, { headers: { cookie: cookieA } })
+    ).json()) as {
+      thread: {
+        compactionSummary: string | null
+        compactedUpToMessageId: string | null
+        lastInputTokens: number | null
+        lastContextWindow: number | null
+      }
+      messages: Array<{
+        id: string
+        role: string
+        timeline: Array<{ type: string }>
+        proposalStatus: string | null
+        compactionNotice: { summary: string } | null
+      }>
+    }
+
+    expect(threadAfter.thread.compactionSummary).toContain('【持久化摘要】')
+    expect(threadAfter.thread.compactedUpToMessageId).toBeTruthy()
+    expect(threadAfter.thread.lastInputTokens).toBe(1100)
+    expect(threadAfter.thread.lastContextWindow).toBe(4096)
+
+    const msg1 = threadAfter.messages.find((m) => m.id === t1Done.messageId)!
+    expect(msg1.proposalStatus).toBe('superseded')
+    expect(msg1.timeline.map((item) => item.type)).toEqual(['text', 'tool', 'text'])
+
+    const latestAssistant = threadAfter.messages.at(-1)!
+    expect(latestAssistant.compactionNotice?.summary).toContain('【持久化摘要】')
   })
 })

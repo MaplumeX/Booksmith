@@ -39,7 +39,7 @@ interface CodePaneProps {
   onChange: (value: string) => void
   reveal?: RevealTarget | null
   onNavigate?: (target: NavigateTarget) => void
-  onSelectionChange?: (selection: string) => void
+  onSelectionChange?: (selection: string, range?: { startLine: number; endLine: number } | null) => void
   onSplitAtCursor?: (offset: number) => void
   onInsertSplitMarker?: () => void
   onFormatDocument?: () => void
@@ -262,7 +262,13 @@ export function CodePane({
             }
             if (update.selectionSet && onSelectionRef.current) {
               const { from, to } = update.state.selection.main
-              onSelectionRef.current(from === to ? '' : update.state.sliceDoc(from, to))
+              if (from === to) {
+                onSelectionRef.current('', null)
+              } else {
+                const startLine = update.state.doc.lineAt(from).number
+                const endLine = update.state.doc.lineAt(Math.max(from, to - 1)).number
+                onSelectionRef.current(update.state.sliceDoc(from, to), { startLine, endLine })
+              }
             }
           }),
           EditorView.domEventHandlers({
@@ -317,6 +323,16 @@ export function CodePane({
       instance.setState(created)
     }
     shownPath.current = path
+    if (onSelectionRef.current) {
+      const { from, to } = instance.state.selection.main
+      if (from === to) {
+        onSelectionRef.current('', null)
+      } else {
+        const startLine = instance.state.doc.lineAt(from).number
+        const endLine = instance.state.doc.lineAt(Math.max(from, to - 1)).number
+        onSelectionRef.current(instance.state.sliceDoc(from, to), { startLine, endLine })
+      }
+    }
     // `content` only seeds a file that has never been shown; after that the document owns the text.
   }, [path, makeState])
 

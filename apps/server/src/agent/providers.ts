@@ -1,6 +1,7 @@
 import { createAnthropic } from '@ai-sdk/anthropic'
 import { createOpenAICompatible } from '@ai-sdk/openai-compatible'
 import { APICallError, RetryError, generateText, type LanguageModel } from 'ai'
+import { extractModelContextWindows } from './contextWindow'
 
 /**
  * Dual-protocol LLM provider factory (OpenAI-compatible & Anthropic) via Vercel AI SDK.
@@ -132,6 +133,7 @@ export interface ConnectionTestResult {
 export interface ProviderModelsResult {
   ok: boolean
   models: string[]
+  modelContextWindows?: Record<string, number>
   errorCode?: string
   error?: string
 }
@@ -245,6 +247,7 @@ export async function fetchProviderModels(
 
     const payload = (await response.json().catch(() => null)) as unknown
     const models = extractModelIds(payload)
+    const modelContextWindows = extractModelContextWindows(payload)
     if (models.length === 0) {
       return {
         ok: false,
@@ -253,7 +256,11 @@ export async function fetchProviderModels(
         error: '服务端点未返回可识别的模型列表，请手动填写模型名称',
       }
     }
-    return { ok: true, models }
+    return {
+      ok: true,
+      models,
+      ...(Object.keys(modelContextWindows).length > 0 ? { modelContextWindows } : {}),
+    }
   } catch (error) {
     const classified = classifyProviderError(error)
     return { ok: false, models: [], errorCode: classified.code, error: classified.message }

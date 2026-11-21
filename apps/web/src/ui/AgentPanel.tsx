@@ -32,9 +32,12 @@ import {
   ApiError,
   api,
   type AgentApprovalMode,
+  type AgentCompactionNotice,
   type AgentMessageDto,
   type AgentProfileDto,
+  type AgentProposalStatus,
   type AgentThreadDto,
+  type AgentTimelineItem,
   type AgentToolCallDto,
 } from '../api/client'
 import { evaluateAutoApply } from '../state/agentProposal'
@@ -58,7 +61,7 @@ export interface ActiveReviewRef {
 
 export interface ProposalStatusSyncEvent {
   messageId: string
-  status: 'applied' | 'dismissed'
+  status: AgentProposalStatus
   seq: number
 }
 
@@ -68,6 +71,8 @@ interface AgentPanelProps {
   bookVersion: number
   activePath: string | null
   selectionText: string
+  selectionPath?: string | null
+  selectionRange?: { startLine: number; endLine: number } | null
   profiles: AgentProfileDto[]
   profilesLoading: boolean
   defaultApprovalMode?: AgentApprovalMode
@@ -99,10 +104,111 @@ interface AgentPanelProps {
 interface StreamingState {
   content: string
   reasoning: string
+  timeline: AgentTimelineItem[]
   toolCalls: AgentToolCallDto[]
   runningTool: { id: string; name: AgentToolName; argsSummary: string } | null
   proposal: AgentProposal | null
+  compactionNotice: AgentCompactionNotice | null
+  usage: { inputTokens: number; contextWindow: number } | null
   replacingMessageId?: string
+}
+
+type TimelineSegment =
+  | { kind: 'reasoning'; text: string }
+  | { kind: 'text'; text: string }
+  | {
+      kind: 'tools'
+      calls: AgentToolCallDto[]
+      running?: { id: string; name: AgentToolName; argsSummary: string } | null
+    }
+
+function appendTimelineDelta(
+  timeline: AgentTimelineItem[],
+  type: 'reasoning' | 'text',
+  delta: string,
+): AgentTimelineItem[] {
+  if (!delta) return timeline
+  const last = timeline[timeline.length - 1]
+  if (last && last.type === type) {
+    return [...timeline.slice(0, -1), { type, text: last.text + delta }]
+  }
+  return [...timeline, { type, text: delta }]
+}
+
+function groupTimelineSegments(
+  timeline: readonly AgentTimelineItem[],
+  runningTool?: { id: string; name: AgentToolName; argsSummary: string } | null,
+): TimelineSegment[] {
+  const segments: TimelineSegment[] = []
+  for (const item of timeline) {
+    if (item.type === 'reasoning') {
+      if (!item.text.trim()) continue
+      const prev = segments[segments.length - 1]
+      if (prev && prev.kind === 'reasoning') {
+        prev.text += item.text
+      } else {
+        segments.push({ kind: 'reasoning', text: item.text })
+      }
+    } else if (item.type === 'text') {
+      if (!item.text) continue
+      const prev = segments[segments.length - 1]
+      if (prev && prev.kind === 'text') {
+        prev.text += item.text
+      } else {
+        segments.push({ kind: 'text', text: item.text })
+      }
+    } else if (item.type === 'tool') {
+      const prev = segments[segments.length - 1]
+      const call: AgentToolCallDto = {
+        id: item.id,
+        name: item.name,
+        argsSummary: item.argsSummary,
+        ok: item.ok,
+        summary: item.summary,
+      }
+      if (prev && prev.kind === 'tools') {
+        prev.calls.push(call)
+      } else {
+        segments.push({ kind: 'tools', calls: [call] })
+      }
+    }
+  }
+  if (runningTool) {
+    const last = segments[segments.length - 1]
+    if (last && last.kind === 'tools' && !last.running) {
+      last.running = runningTool
+    } else {
+      segments.push({ kind: 'tools', calls: [], running: runningTool })
+    }
+  }
+  return segments
+}
+
+function buildMessageTimelineSegments(msg: AgentMessageDto): TimelineSegment[] {
+  if (Array.isArray(msg.timeline) && msg.timeline.length > 0) {
+    return groupTimelineSegments(msg.timeline)
+  }
+  const fallback: AgentTimelineItem[] = []
+  for (const call of msg.toolCalls) {
+    fallback.push({
+      type: 'tool',
+      id: call.id,
+      name: call.name,
+      argsSummary: call.argsSummary,
+      ok: call.ok,
+      summary: call.summary,
+    })
+  }
+  if (msg.reasoning) fallback.push({ type: 'reasoning', text: msg.reasoning })
+  if (msg.content) fallback.push({ type: 'text', text: msg.content })
+  return groupTimelineSegments(fallback)
+}
+
+function formatCompactTokens(tokens: number): string {
+  if (tokens >= 1_000_000) return `${(tokens / 1_000_000).toFixed(1).replace(/\.0$/, '')}M`
+  if (tokens >= 10_000) return `${Math.round(tokens / 1000)}K`
+  if (tokens >= 1_000) return `${(tokens / 1000).toFixed(1).replace(/\.0$/, '')}K`
+  return String(tokens)
 }
 
 const APPROVAL_META: Record<
@@ -217,6 +323,38 @@ function summarizeCalls(calls: AgentToolCallDto[]): string {
   const preview = uniqueLabels.slice(0, 2).join('、')
   const suffix = uniqueLabels.length > 2 ? ' 等' : ''
   return `已执行 ${calls.length} 步 · ${preview}${suffix}`
+}
+
+function CompactionDivider({ notice }: { notice: AgentCompactionNotice }) {
+  const [open, setOpen] = useState(false)
+  const label = notice.degraded
+    ? `已裁剪早期上下文（${notice.compactedMessageCount} 条）`
+    : `已自动压缩早期上下文（${notice.compactedMessageCount} 条）`
+
+  return (
+    <div className="agent-compaction-divider" data-testid="agent-compaction-divider">
+      <div className="agent-compaction-bar">
+        <span className="agent-compaction-line" aria-hidden="true" />
+        <button
+          type="button"
+          className="agent-compaction-toggle"
+          aria-expanded={open}
+          title={`压缩前约 ${formatCompactTokens(notice.beforeTokens)} tokens，压缩后约 ${formatCompactTokens(notice.afterTokens)} tokens`}
+          onClick={() => setOpen((v) => !v)}
+        >
+          <History size={11} strokeWidth={1.75} aria-hidden="true" />
+          <span>{label}</span>
+          {open ? (
+            <ChevronDown size={11} strokeWidth={1.75} aria-hidden="true" />
+          ) : (
+            <ChevronRight size={11} strokeWidth={1.75} aria-hidden="true" />
+          )}
+        </button>
+        <span className="agent-compaction-line" aria-hidden="true" />
+      </div>
+      {open ? <div className="agent-compaction-summary">{notice.summary}</div> : null}
+    </div>
+  )
 }
 
 function ReasoningBlock({
@@ -375,6 +513,8 @@ export function AgentPanel({
   bookVersion,
   activePath,
   selectionText,
+  selectionPath = null,
+  selectionRange = null,
   profiles,
   profilesLoading,
   defaultApprovalMode = 'review',
@@ -698,9 +838,11 @@ export function AgentPanel({
       content: draft.content,
       reasoning: draft.reasoning.trim() ? draft.reasoning : null,
       context: null,
+      timeline: draft.timeline,
       toolCalls: draft.toolCalls,
       proposal: draft.proposal,
       proposalStatus,
+      compactionNotice: draft.compactionNotice,
       error: streamError ? streamError.message : null,
       createdAt: new Date().toISOString(),
     }
@@ -740,9 +882,17 @@ export function AgentPanel({
       }
     }
 
+    const trimmedSel = selectionText.trim()
+    const includeSel = attachSelection && Boolean(trimmedSel)
     const context = {
-      activePath: attachFile ? activePath : null,
-      selection: attachSelection && selectionText.trim() ? selectionText.trim() : null,
+      activePath: attachFile ? (includeSel && selectionPath ? selectionPath : activePath) : null,
+      selection: includeSel ? trimmedSel : null,
+      ...(includeSel && selectionRange
+        ? {
+            selectionStartLine: selectionRange.startLine,
+            selectionEndLine: selectionRange.endLine,
+          }
+        : {}),
     }
 
     const optimisticUser: AgentMessageDto = {
@@ -768,9 +918,12 @@ export function AgentPanel({
     const draft: StreamingState = {
       content: '',
       reasoning: '',
+      timeline: [],
       toolCalls: [],
       runningTool: null,
       proposal: null,
+      compactionNotice: null,
+      usage: null,
     }
     setStreaming({ ...draft })
 
@@ -791,9 +944,11 @@ export function AgentPanel({
             content: draft.content || '已停止生成。',
             reasoning: draft.reasoning.trim() ? draft.reasoning : null,
             context: null,
+            timeline: draft.timeline,
             toolCalls: draft.toolCalls,
             proposal: null,
             proposalStatus: null,
+            compactionNotice: draft.compactionNotice,
             error: null,
             createdAt: new Date().toISOString(),
           },
@@ -818,11 +973,26 @@ export function AgentPanel({
         {
           signal: controller.signal,
           onEvent: (event) => {
-            if (event.type === 'reasoning_delta') {
+            if (event.type === 'compacted') {
+              draft.compactionNotice = event.notice
+              setStreaming({ ...draft })
+            } else if (event.type === 'usage') {
+              draft.usage = { inputTokens: event.inputTokens, contextWindow: event.contextWindow }
+              setStreaming({ ...draft })
+              setThreads((list) =>
+                list.map((t) =>
+                  t.id === threadId
+                    ? { ...t, lastInputTokens: event.inputTokens, lastContextWindow: event.contextWindow }
+                    : t,
+                ),
+              )
+            } else if (event.type === 'reasoning_delta') {
               draft.reasoning += event.text
+              draft.timeline = appendTimelineDelta(draft.timeline, 'reasoning', event.text)
               setStreaming({ ...draft })
             } else if (event.type === 'text_delta') {
               draft.content += event.text
+              draft.timeline = appendTimelineDelta(draft.timeline, 'text', event.text)
               setStreaming({ ...draft })
             } else if (event.type === 'tool_start') {
               draft.runningTool = { id: event.id, name: event.name, argsSummary: event.argsSummary }
@@ -831,10 +1001,15 @@ export function AgentPanel({
               const argsSummary =
                 draft.runningTool?.id === event.id ? draft.runningTool.argsSummary : event.name
               draft.runningTool = null
-              draft.toolCalls = [
-                ...draft.toolCalls,
-                { id: event.id, name: event.name, argsSummary, ok: event.ok, summary: event.summary },
-              ]
+              const callItem: AgentToolCallDto = {
+                id: event.id,
+                name: event.name,
+                argsSummary,
+                ok: event.ok,
+                summary: event.summary,
+              }
+              draft.toolCalls = [...draft.toolCalls, callItem]
+              draft.timeline = [...draft.timeline, { type: 'tool', ...callItem }]
               setStreaming({ ...draft })
             } else if (event.type === 'proposal') {
               draft.proposal = event.proposal
@@ -844,22 +1019,36 @@ export function AgentPanel({
             } else if (event.type === 'done') {
               finalMessageId = event.messageId
               streamStopped = Boolean(event.stopped)
-              if (event.threadTitle) {
-                setThreads((list) =>
-                  list.map((t) =>
-                    t.id === threadId
-                      ? {
-                          ...t,
-                          title: event.threadTitle!,
-                          approvalMode: event.approvalMode ?? t.approvalMode,
-                          model: event.model ?? t.model,
-                          profileId: event.profileId ?? t.profileId,
-                          updatedAt: new Date().toISOString(),
-                        }
-                      : t,
-                  ),
+              if (event.compactionNotice && !draft.compactionNotice) {
+                draft.compactionNotice = event.compactionNotice
+              }
+              if (event.supersededMessageId) {
+                const supersededId = event.supersededMessageId
+                onCloseProposalReview(supersededId)
+                setMessages((list) =>
+                  list.map((m) => (m.id === supersededId ? { ...m, proposalStatus: 'superseded' } : m)),
                 )
               }
+              setThreads((list) =>
+                list.map((t) =>
+                  t.id === threadId
+                    ? {
+                        ...t,
+                        ...(event.threadTitle ? { title: event.threadTitle } : {}),
+                        approvalMode: event.approvalMode ?? t.approvalMode,
+                        model: event.model ?? t.model,
+                        profileId: event.profileId ?? t.profileId,
+                        ...(event.usage
+                          ? {
+                              lastInputTokens: event.usage.inputTokens,
+                              lastContextWindow: event.usage.contextWindow,
+                            }
+                          : {}),
+                        updatedAt: new Date().toISOString(),
+                      }
+                    : t,
+                ),
+              )
             }
           },
         },
@@ -914,9 +1103,12 @@ export function AgentPanel({
     const draft: StreamingState = {
       content: '',
       reasoning: '',
+      timeline: [],
       toolCalls: [],
       runningTool: null,
       proposal: null,
+      compactionNotice: null,
+      usage: null,
       replacingMessageId: messageId,
     }
     setStreaming({ ...draft })
@@ -935,9 +1127,11 @@ export function AgentPanel({
                   ...m,
                   content: draft.content || '已停止生成。',
                   reasoning: draft.reasoning.trim() ? draft.reasoning : null,
+                  timeline: draft.timeline,
                   toolCalls: draft.toolCalls,
                   proposal: null,
                   proposalStatus: null,
+                  compactionNotice: draft.compactionNotice,
                   error: null,
                 }
               : m,
@@ -962,11 +1156,26 @@ export function AgentPanel({
         {
           signal: controller.signal,
           onEvent: (event) => {
-            if (event.type === 'reasoning_delta') {
+            if (event.type === 'compacted') {
+              draft.compactionNotice = event.notice
+              setStreaming({ ...draft })
+            } else if (event.type === 'usage') {
+              draft.usage = { inputTokens: event.inputTokens, contextWindow: event.contextWindow }
+              setStreaming({ ...draft })
+              setThreads((list) =>
+                list.map((t) =>
+                  t.id === activeThreadId
+                    ? { ...t, lastInputTokens: event.inputTokens, lastContextWindow: event.contextWindow }
+                    : t,
+                ),
+              )
+            } else if (event.type === 'reasoning_delta') {
               draft.reasoning += event.text
+              draft.timeline = appendTimelineDelta(draft.timeline, 'reasoning', event.text)
               setStreaming({ ...draft })
             } else if (event.type === 'text_delta') {
               draft.content += event.text
+              draft.timeline = appendTimelineDelta(draft.timeline, 'text', event.text)
               setStreaming({ ...draft })
             } else if (event.type === 'tool_start') {
               draft.runningTool = { id: event.id, name: event.name, argsSummary: event.argsSummary }
@@ -975,10 +1184,15 @@ export function AgentPanel({
               const argsSummary =
                 draft.runningTool?.id === event.id ? draft.runningTool.argsSummary : event.name
               draft.runningTool = null
-              draft.toolCalls = [
-                ...draft.toolCalls,
-                { id: event.id, name: event.name, argsSummary, ok: event.ok, summary: event.summary },
-              ]
+              const callItem: AgentToolCallDto = {
+                id: event.id,
+                name: event.name,
+                argsSummary,
+                ok: event.ok,
+                summary: event.summary,
+              }
+              draft.toolCalls = [...draft.toolCalls, callItem]
+              draft.timeline = [...draft.timeline, { type: 'tool', ...callItem }]
               setStreaming({ ...draft })
             } else if (event.type === 'proposal') {
               draft.proposal = event.proposal
@@ -988,6 +1202,16 @@ export function AgentPanel({
             } else if (event.type === 'done') {
               finalMessageId = event.messageId
               streamStopped = Boolean(event.stopped)
+              if (event.compactionNotice && !draft.compactionNotice) {
+                draft.compactionNotice = event.compactionNotice
+              }
+              if (event.supersededMessageId) {
+                const supersededId = event.supersededMessageId
+                onCloseProposalReview(supersededId)
+                setMessages((list) =>
+                  list.map((m) => (m.id === supersededId ? { ...m, proposalStatus: 'superseded' } : m)),
+                )
+              }
               setThreads((list) =>
                 list.map((t) =>
                   t.id === activeThreadId
@@ -996,6 +1220,12 @@ export function AgentPanel({
                         approvalMode: event.approvalMode ?? t.approvalMode,
                         model: event.model ?? t.model,
                         profileId: event.profileId ?? t.profileId,
+                        ...(event.usage
+                          ? {
+                              lastInputTokens: event.usage.inputTokens,
+                              lastContextWindow: event.usage.contextWindow,
+                            }
+                          : {}),
                         updatedAt: new Date().toISOString(),
                       }
                     : t,
@@ -1101,6 +1331,15 @@ export function AgentPanel({
   const ApprovalIcon = approvalMeta.icon
   const hasSelection = Boolean(selectionText.trim())
   const showContextStrip = Boolean(activePath || hasSelection)
+  const liveUsage =
+    streaming?.usage ??
+    (activeThread?.lastInputTokens && activeThread?.lastContextWindow
+      ? { inputTokens: activeThread.lastInputTokens, contextWindow: activeThread.lastContextWindow }
+      : null)
+  const contextUsagePct =
+    liveUsage && liveUsage.contextWindow > 0
+      ? Math.min(100, Math.max(1, Math.round((liveUsage.inputTokens / liveUsage.contextWindow) * 100)))
+      : null
 
   return (
     <div className="agent-panel">
@@ -1410,9 +1649,22 @@ export function AgentPanel({
                                 </span>
                               ) : null}
                               {msg.context.selection ? (
-                                <span className="agent-bubble-ctx">
+                                <span
+                                  className="agent-bubble-ctx"
+                                  title={msg.context.selection}
+                                >
                                   <Quote size={10} strokeWidth={1.8} aria-hidden="true" />
-                                  <span>选中 {msg.context.selection.length} 字</span>
+                                  <span>
+                                    选中 {msg.context.selection.length} 字
+                                    {msg.context.selectionStartLine
+                                      ? ` · L${msg.context.selectionStartLine}${
+                                          msg.context.selectionEndLine &&
+                                          msg.context.selectionEndLine > msg.context.selectionStartLine
+                                            ? `–${msg.context.selectionEndLine}`
+                                            : ''
+                                        }`
+                                      : ''}
+                                  </span>
                                 </span>
                               ) : null}
                             </div>
@@ -1424,50 +1676,95 @@ export function AgentPanel({
                     )
                   }
 
+                  const segments = buildMessageTimelineSegments(msg)
+                  const textSegmentIndices: number[] = []
+                  segments.forEach((seg, segIdx) => {
+                    if (seg.kind === 'text') textSegmentIndices.push(segIdx)
+                  })
+                  const firstTextIdx = textSegmentIndices[0] ?? -1
+                  const lastTextIdx = textSegmentIndices[textSegmentIndices.length - 1] ?? -1
+                  const renderAssistantMeta = (
+                    <div className="agent-assistant-meta">
+                      {clock ? <time className="agent-msg-time">{clock}</time> : null}
+                      {msg.content ? <CopyReplyButton text={msg.content} /> : null}
+                      {canShowRetry ? (
+                        <button
+                          type="button"
+                          className="agent-msg-action-btn"
+                          disabled={retryBlockedApplied}
+                          aria-label="重试此回复"
+                          title={
+                            retryBlockedApplied
+                              ? '该回复的提案已应用到工作区，请先撤销或继续追问'
+                              : '使用当前模型和模式重新生成此回复'
+                          }
+                          onClick={() => void handleRetryLastMessage(msg.id)}
+                        >
+                          <RotateCw size={11} strokeWidth={1.8} aria-hidden="true" />
+                          <span>重试</span>
+                        </button>
+                      ) : null}
+                    </div>
+                  )
+
                   return (
                     <article key={msg.id} className="agent-turn is-assistant">
-                      <ToolSteps calls={msg.toolCalls} />
-                      {msg.reasoning ? <ReasoningBlock text={msg.reasoning} /> : null}
+                      {msg.compactionNotice ? <CompactionDivider notice={msg.compactionNotice} /> : null}
 
-                      {msg.content || msg.error ? (
+                      {/* Render interleaved reasoning, tool groups, and assistant text in exact execution order.
+                          See ADR 2026-11-21-agent-session-continuity. */}
+                      {segments.map((seg, segIdx) => {
+                        if (seg.kind === 'tools') {
+                          return <ToolSteps key={`tools-${segIdx}`} calls={seg.calls} />
+                        }
+                        if (seg.kind === 'reasoning') {
+                          return <ReasoningBlock key={`reasoning-${segIdx}`} text={seg.text} />
+                        }
+                        const isFirstText = segIdx === firstTextIdx
+                        const isLastText = segIdx === lastTextIdx
+                        return (
+                          <div key={`text-${segIdx}`} className="agent-assistant-row">
+                            {isFirstText ? (
+                              <div className="agent-avatar" aria-hidden="true">
+                                <Sparkles size={13} strokeWidth={1.8} />
+                              </div>
+                            ) : (
+                              <div className="agent-avatar-spacer" aria-hidden="true" />
+                            )}
+                            <div className="agent-assistant-col">
+                              <div className="agent-bubble is-assistant">
+                                <AgentMarkdown content={seg.text} />
+                                {isLastText && msg.error ? (
+                                  <p className="banner banner-error agent-inline-banner" role="alert">
+                                    <AlertCircle size={13} strokeWidth={1.75} aria-hidden="true" />
+                                    <span>{msg.error}</span>
+                                  </p>
+                                ) : null}
+                              </div>
+                              {isLastText ? renderAssistantMeta : null}
+                            </div>
+                          </div>
+                        )
+                      })}
+
+                      {textSegmentIndices.length === 0 && msg.error ? (
                         <div className="agent-assistant-row">
                           <div className="agent-avatar" aria-hidden="true">
                             <Sparkles size={13} strokeWidth={1.8} />
                           </div>
                           <div className="agent-assistant-col">
                             <div className="agent-bubble is-assistant">
-                              {msg.content ? <AgentMarkdown content={msg.content} /> : null}
-                              {msg.error ? (
-                                <p className="banner banner-error agent-inline-banner" role="alert">
-                                  <AlertCircle size={13} strokeWidth={1.75} aria-hidden="true" />
-                                  <span>{msg.error}</span>
-                                </p>
-                              ) : null}
+                              <p className="banner banner-error agent-inline-banner" role="alert">
+                                <AlertCircle size={13} strokeWidth={1.75} aria-hidden="true" />
+                                <span>{msg.error}</span>
+                              </p>
                             </div>
-                            <div className="agent-assistant-meta">
-                              {clock ? <time className="agent-msg-time">{clock}</time> : null}
-                              {msg.content ? <CopyReplyButton text={msg.content} /> : null}
-                              {canShowRetry ? (
-                                <button
-                                  type="button"
-                                  className="agent-msg-action-btn"
-                                  disabled={retryBlockedApplied}
-                                  aria-label="重试此回复"
-                                  title={
-                                    retryBlockedApplied
-                                      ? '该回复的提案已应用到工作区，请先撤销或继续追问'
-                                      : '使用当前模型和模式重新生成此回复'
-                                  }
-                                  onClick={() => void handleRetryLastMessage(msg.id)}
-                                >
-                                  <RotateCw size={11} strokeWidth={1.8} aria-hidden="true" />
-                                  <span>重试</span>
-                                </button>
-                              ) : null}
-                            </div>
+                            {renderAssistantMeta}
                           </div>
                         </div>
                       ) : null}
+
+                      {textSegmentIndices.length === 0 && !msg.error && (clock || canShowRetry) ? renderAssistantMeta : null}
 
                       {/* Slimmed summary card navigates directly into the main-canvas ProposalReviewPane. See ADR 2026-11-21-in-canvas-agent-proposal-review. */}
                       {msg.proposal && msg.proposalStatus ? (() => {
@@ -1511,41 +1808,77 @@ export function AgentPanel({
                   )
                 })}
 
-                {streaming ? (
-                  <article className="agent-turn is-assistant is-streaming" aria-live="polite">
-                    <ToolSteps calls={streaming.toolCalls} running={streaming.runningTool} />
-                    {streaming.reasoning ? (
-                      <ReasoningBlock
-                        text={streaming.reasoning}
-                        streaming
-                        hasAnswer={Boolean(streaming.content)}
-                      />
-                    ) : null}
-                    <div className="agent-assistant-row">
-                      <div className="agent-avatar is-pulsing" aria-hidden="true">
-                        <Sparkles size={13} strokeWidth={1.8} />
-                      </div>
-                      <div className="agent-assistant-col">
-                        <div className="agent-bubble is-assistant">
-                          {streaming.content ? (
-                            <AgentMarkdown content={streaming.content} />
-                          ) : (
-                            <div className="agent-thinking">
-                              <Loader2 size={12} strokeWidth={1.8} className="spin" aria-hidden="true" />
-                              <span>
-                                {streaming.runningTool
-                                  ? '正在处理工具返回…'
-                                  : streaming.reasoning
-                                    ? '正在整理回复…'
-                                    : '正在思考…'}
-                              </span>
+                {streaming ? (() => {
+                  const streamSegments = groupTimelineSegments(streaming.timeline, streaming.runningTool)
+                  const firstStreamTextIdx = streamSegments.findIndex((s) => s.kind === 'text')
+                  const lastSeg = streamSegments[streamSegments.length - 1]
+                  const showThinkingTail = !lastSeg || lastSeg.kind !== 'text'
+                  return (
+                    <article className="agent-turn is-assistant is-streaming" aria-live="polite">
+                      {streaming.compactionNotice ? <CompactionDivider notice={streaming.compactionNotice} /> : null}
+                      {streamSegments.map((seg, segIdx) => {
+                        if (seg.kind === 'tools') {
+                          return <ToolSteps key={`st-tools-${segIdx}`} calls={seg.calls} running={seg.running} />
+                        }
+                        if (seg.kind === 'reasoning') {
+                          const hasTextAfter = streamSegments
+                            .slice(segIdx + 1)
+                            .some((later) => later.kind === 'text')
+                          return (
+                            <ReasoningBlock
+                              key={`st-reasoning-${segIdx}`}
+                              text={seg.text}
+                              streaming
+                              hasAnswer={hasTextAfter}
+                            />
+                          )
+                        }
+                        const isFirst = segIdx === firstStreamTextIdx
+                        return (
+                          <div key={`st-text-${segIdx}`} className="agent-assistant-row">
+                            {isFirst ? (
+                              <div className="agent-avatar is-pulsing" aria-hidden="true">
+                                <Sparkles size={13} strokeWidth={1.8} />
+                              </div>
+                            ) : (
+                              <div className="agent-avatar-spacer" aria-hidden="true" />
+                            )}
+                            <div className="agent-assistant-col">
+                              <div className="agent-bubble is-assistant">
+                                <AgentMarkdown content={seg.text} />
+                              </div>
                             </div>
+                          </div>
+                        )
+                      })}
+                      {showThinkingTail ? (
+                        <div className="agent-assistant-row">
+                          {firstStreamTextIdx < 0 ? (
+                            <div className="agent-avatar is-pulsing" aria-hidden="true">
+                              <Sparkles size={13} strokeWidth={1.8} />
+                            </div>
+                          ) : (
+                            <div className="agent-avatar-spacer" aria-hidden="true" />
                           )}
+                          <div className="agent-assistant-col">
+                            <div className="agent-bubble is-assistant">
+                              <div className="agent-thinking">
+                                <Loader2 size={12} strokeWidth={1.8} className="spin" aria-hidden="true" />
+                                <span>
+                                  {streaming.runningTool
+                                    ? '正在处理工具返回…'
+                                    : streaming.reasoning
+                                      ? '正在整理回复…'
+                                      : '正在思考…'}
+                                </span>
+                              </div>
+                            </div>
+                          </div>
                         </div>
-                      </div>
-                    </div>
-                  </article>
-                ) : null}
+                      ) : null}
+                    </article>
+                  )
+                })() : null}
               </div>
             )}
           </div>
@@ -1598,11 +1931,22 @@ export function AgentPanel({
                     )
                   ) : null}
 
-                  {hasSelection ? (
-                    attachSelection ? (
-                      <span className="agent-context-chip">
+                  {hasSelection ? (() => {
+                    const trimmedSel = selectionText.trim()
+                    const oneLine = trimmedSel.replace(/\s+/g, ' ')
+                    const preview = oneLine.length > 14 ? `${oneLine.slice(0, 14)}…` : oneLine
+                    const lineSuffix = selectionRange
+                      ? ` · L${selectionRange.startLine}${selectionRange.endLine > selectionRange.startLine ? `–${selectionRange.endLine}` : ''}`
+                      : ''
+                    const chipLabel = `「${preview}」· ${trimmedSel.length} 字${lineSuffix}`
+                    return attachSelection ? (
+                      <span
+                        className="agent-context-chip"
+                        data-testid="agent-selection-chip"
+                        title={trimmedSel}
+                      >
                         <Quote size={10} strokeWidth={1.8} aria-hidden="true" />
-                        <span>选中片段（{selectionText.trim().length} 字）</span>
+                        <span className="agent-context-chip-text">{chipLabel}</span>
                         <button
                           type="button"
                           aria-label="移除选中片段上下文"
@@ -1616,13 +1960,14 @@ export function AgentPanel({
                         type="button"
                         className="agent-context-restore"
                         aria-label="重新挂载选中片段上下文"
+                        title={trimmedSel}
                         onClick={() => setAttachSelection(true)}
                       >
                         <Plus size={11} strokeWidth={1.8} aria-hidden="true" />
-                        <span>选中片段（{selectionText.trim().length} 字）</span>
+                        <span>{chipLabel}</span>
                       </button>
                     )
-                  ) : null}
+                  })() : null}
                 </div>
               ) : null}
 
@@ -1632,19 +1977,20 @@ export function AgentPanel({
                 rows={2}
                 aria-label="向助手输入指令"
                 placeholder={
-                  approvalMode === 'ask'
-                    ? '当前为只读模式：输入咨询、排查或校对建议问题（Enter 发送）'
-                    : approvalMode === 'auto'
-                      ? '当前为自动模式：预检通过将自动应用到工作区（Enter 发送）'
-                      : '输入校对、样式、目录或结构修改指令（Enter 发送，Shift+Enter 换行）'
+                  streaming
+                    ? '助手生成中，可提前起草下一条消息（结束后按 Enter 发送）'
+                    : approvalMode === 'ask'
+                      ? '当前为只读模式：输入咨询、排查或校对建议问题（Enter 发送）'
+                      : approvalMode === 'auto'
+                        ? '当前为自动模式：预检通过将自动应用到工作区（Enter 发送）'
+                        : '输入校对、样式、目录或结构修改指令（Enter 发送，Shift+Enter 换行）'
                 }
                 value={input}
-                disabled={Boolean(streaming)}
                 onChange={(event) => setInput(event.target.value)}
                 onKeyDown={(event) => {
                   if (event.key === 'Enter' && !event.shiftKey && !event.nativeEvent.isComposing) {
                     event.preventDefault()
-                    void sendPrompt(input)
+                    if (!streaming) void sendPrompt(input)
                   }
                 }}
               />
@@ -1813,28 +2159,40 @@ export function AgentPanel({
                   </DropdownMenu.Root>
                 </div>
 
-                {streaming ? (
-                  <button
-                    type="button"
-                    className="agent-send-btn is-stop"
-                    aria-label="停止"
-                    title="停止生成"
-                    onClick={stopActiveTurn}
-                  >
-                    <Square size={11} strokeWidth={2.2} fill="currentColor" aria-hidden="true" />
-                  </button>
-                ) : (
-                  <button
-                    type="button"
-                    className="agent-send-btn"
-                    aria-label="发送"
-                    title="发送（Enter）"
-                    disabled={!input.trim()}
-                    onClick={() => void sendPrompt(input)}
-                  >
-                    <ArrowUp size={15} strokeWidth={2.1} aria-hidden="true" />
-                  </button>
-                )}
+                <div className="agent-composer-right">
+                  {contextUsagePct !== null && liveUsage ? (
+                    <span
+                      className={`agent-context-usage${contextUsagePct >= 70 ? ' is-warn' : ''}`}
+                      data-testid="agent-context-usage"
+                      title={`上下文已用约 ${formatCompactTokens(liveUsage.inputTokens)} / ${formatCompactTokens(liveUsage.contextWindow)} tokens（达到 80% 时自动压缩）`}
+                      aria-label={`上下文占用 ${contextUsagePct}%`}
+                    >
+                      {contextUsagePct}%
+                    </span>
+                  ) : null}
+                  {streaming ? (
+                    <button
+                      type="button"
+                      className="agent-send-btn is-stop"
+                      aria-label="停止"
+                      title="停止生成"
+                      onClick={stopActiveTurn}
+                    >
+                      <Square size={11} strokeWidth={2.2} fill="currentColor" aria-hidden="true" />
+                    </button>
+                  ) : (
+                    <button
+                      type="button"
+                      className="agent-send-btn"
+                      aria-label="发送"
+                      title="发送（Enter）"
+                      disabled={!input.trim()}
+                      onClick={() => void sendPrompt(input)}
+                    >
+                      <ArrowUp size={15} strokeWidth={2.1} aria-hidden="true" />
+                    </button>
+                  )}
+                </div>
               </div>
             </div>
           </div>
