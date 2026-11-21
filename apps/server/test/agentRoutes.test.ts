@@ -627,7 +627,7 @@ describe('agent REST & SSE routes', () => {
     expect(retryDone.model).toBe('mock-retry-ok')
     expect(retryDone.approvalMode).toBe('auto')
     expect(lastSeenModel).toBe('mock-retry-ok')
-    expect(lastSeenToolCount).toBe(16)
+    expect(lastSeenToolCount).toBe(21)
 
     // Still only 2 messages (no duplicate user bubble) and thread remembers new model + approvalMode
     const afterRetry = (await (

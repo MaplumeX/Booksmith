@@ -8,6 +8,7 @@ export interface AppSettings {
   theme: ThemeMode
   codeFontSize: number
   codeWordWrap: boolean
+  showCodeToolbar: boolean
   defaultEditorMode: DefaultEditorMode
   defaultPreviewOpen: boolean
 }
@@ -20,6 +21,7 @@ export const DEFAULT_SETTINGS: AppSettings = {
   theme: 'system',
   codeFontSize: 13,
   codeWordWrap: true,
+  showCodeToolbar: true,
   defaultEditorMode: 'code',
   defaultPreviewOpen: true,
 }
@@ -54,6 +56,9 @@ export function normalizeSettings(raw: unknown): AppSettings {
   const codeWordWrap =
     typeof obj.codeWordWrap === 'boolean' ? obj.codeWordWrap : DEFAULT_SETTINGS.codeWordWrap
 
+  const showCodeToolbar =
+    typeof obj.showCodeToolbar === 'boolean' ? obj.showCodeToolbar : DEFAULT_SETTINGS.showCodeToolbar
+
   const defaultEditorMode: DefaultEditorMode =
     obj.defaultEditorMode === 'code' || obj.defaultEditorMode === 'wysiwyg'
       ? obj.defaultEditorMode
@@ -68,6 +73,7 @@ export function normalizeSettings(raw: unknown): AppSettings {
     theme,
     codeFontSize,
     codeWordWrap,
+    showCodeToolbar,
     defaultEditorMode,
     defaultPreviewOpen,
   }
@@ -110,6 +116,7 @@ export function isDefaultSettings(settings: AppSettings): boolean {
     settings.theme === DEFAULT_SETTINGS.theme &&
     settings.codeFontSize === DEFAULT_SETTINGS.codeFontSize &&
     settings.codeWordWrap === DEFAULT_SETTINGS.codeWordWrap &&
+    settings.showCodeToolbar === DEFAULT_SETTINGS.showCodeToolbar &&
     settings.defaultEditorMode === DEFAULT_SETTINGS.defaultEditorMode &&
     settings.defaultPreviewOpen === DEFAULT_SETTINGS.defaultPreviewOpen
   )
@@ -133,6 +140,7 @@ export function updateSettings(patch: Partial<AppSettings>): AppSettings {
     next.theme === currentSettings.theme &&
     next.codeFontSize === currentSettings.codeFontSize &&
     next.codeWordWrap === currentSettings.codeWordWrap &&
+    next.showCodeToolbar === currentSettings.showCodeToolbar &&
     next.defaultEditorMode === currentSettings.defaultEditorMode &&
     next.defaultPreviewOpen === currentSettings.defaultPreviewOpen
   ) {

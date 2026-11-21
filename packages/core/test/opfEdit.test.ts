@@ -3,6 +3,7 @@ import { describe, expect, it } from 'vitest'
 import { createEmptyEpub, openEpub, parsePackage } from '../src'
 import {
   addSpineDocument,
+  insertSpineDocumentsAfter,
   removeManifestEntry,
   renameManifestEntry,
   reorderSpine,
@@ -159,5 +160,48 @@ describe('setManifestMediaType', () => {
     const next = setManifestMediaType(opf, 'EPUB/styles/stylesheet1.css', 'text/plain', baseDir, codec)
     expect(next).not.toBe(opf)
     expect(parsePackage(next, 'EPUB/content.opf', codec.parse).manifest.find((i) => i.path === 'EPUB/styles/stylesheet1.css')?.mediaType).toBe('text/plain')
+  })
+})
+
+describe('insertSpineDocumentsAfter', () => {
+  it('inserts new chapters immediately after the target chapter in spine order', () => {
+    const { opf, baseDir } = emptyBookOpf()
+    const withCh2 = addSpineDocument(opf, chapter('ch002', 'text/ch002.xhtml'), codec)
+    const next = insertSpineDocumentsAfter(
+      withCh2,
+      'EPUB/text/ch001.xhtml',
+      [chapter('ch001_0001', 'text/ch001_0001.xhtml'), chapter('ch001_0002', 'text/ch001_0002.xhtml')],
+      baseDir,
+      codec,
+    )
+    const pkg = parsePackage(next, 'EPUB/content.opf', codec.parse)
+    expect(pkg.spine).toEqual(['ch001', 'ch001_0001', 'ch001_0002', 'ch002'])
+    expect(pkg.manifest.map((item) => item.path)).toContain('EPUB/text/ch001_0001.xhtml')
+    expect(pkg.manifest.map((item) => item.path)).toContain('EPUB/text/ch001_0002.xhtml')
+  })
+
+  it('appends to the end when afterPath is not in the spine', () => {
+    const { opf, baseDir } = emptyBookOpf()
+    const next = insertSpineDocumentsAfter(
+      opf,
+      'EPUB/text/missing.xhtml',
+      [chapter('ch002', 'text/ch002.xhtml')],
+      baseDir,
+      codec,
+    )
+    expect(parsePackage(next, 'EPUB/content.opf', codec.parse).spine).toEqual(['ch001', 'ch002'])
+  })
+
+  it('disambiguates colliding manifest ids while preserving insertion position', () => {
+    const { opf, baseDir } = emptyBookOpf()
+    const withCh2 = addSpineDocument(opf, chapter('ch002', 'text/ch002.xhtml'), codec)
+    const next = insertSpineDocumentsAfter(
+      withCh2,
+      'EPUB/text/ch001.xhtml',
+      [chapter('ch001', 'text/ch001_split.xhtml')],
+      baseDir,
+      codec,
+    )
+    expect(parsePackage(next, 'EPUB/content.opf', codec.parse).spine).toEqual(['ch001', 'ch001_1', 'ch002'])
   })
 })

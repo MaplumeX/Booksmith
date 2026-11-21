@@ -41,6 +41,47 @@ export function addSpineDocument(xml: string, item: ManifestItemDraft, codec: Xm
   return codec.serialize(doc)
 }
 
+/**
+ * Adds one or more documents to `<manifest>` and inserts their `<itemref>` entries immediately
+ * after `afterPath` in `<spine>` (or at the end if `afterPath` is not in the spine).
+ * Keeps reading order aligned after chapter split or duplication.
+ * See ADR 2026-11-21-chapter-structure-and-resource-tools.
+ */
+export function insertSpineDocumentsAfter(
+  xml: string,
+  afterPath: string,
+  items: ManifestItemDraft[],
+  baseDir: string,
+  codec: XmlCodec,
+): string {
+  if (items.length === 0) return xml
+  let currentXml = xml
+  for (const item of items) {
+    currentXml = addManifestItem(currentXml, item, codec)
+  }
+
+  const doc = codec.parse(currentXml)
+  const manifest = manifestItems(doc)
+  const spine = spineElement(doc)
+  const existingRefs = itemrefs(doc)
+
+  const anchorItem = manifest.find((entry) => pathOf(entry, baseDir) === afterPath)
+  const anchorId = anchorItem?.getAttribute('id') ?? ''
+  const anchorRef = anchorId ? existingRefs.find((ref) => ref.getAttribute('idref') === anchorId) : undefined
+  const insertBeforeNode = anchorRef?.nextSibling ?? null
+
+  for (const item of items) {
+    const created = manifest.find((entry) => entry.getAttribute('href') === item.href)
+    if (!created) throw new Error(`manifest item was not added for ${item.href}`)
+    const ref = doc.createElementNS(OPF_NS, 'itemref')
+    ref.setAttribute('idref', created.getAttribute('id') ?? '')
+    if (insertBeforeNode) spine.insertBefore(ref, insertBeforeNode)
+    else spine.appendChild(ref)
+  }
+
+  return codec.serialize(doc)
+}
+
 /** Corrects the declared media type, e.g. after a resource was replaced with a differently encoded file. */
 export function setManifestMediaType(
   xml: string,

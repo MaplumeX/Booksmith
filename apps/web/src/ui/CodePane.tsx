@@ -1,12 +1,15 @@
-import { dirname, resolvePath, splitFragment } from '@booksmith/core'
-import { Annotation, Compartment, EditorState } from '@codemirror/state'
+import { dirname, resolvePath, SPLIT_MARKER_HTML, splitFragment } from '@booksmith/core'
+import { isolateHistory } from '@codemirror/commands'
+import { Annotation, Compartment, EditorState, Prec } from '@codemirror/state'
 import { EditorView, keymap } from '@codemirror/view'
 import { search, searchKeymap } from '@codemirror/search'
 import { basicSetup } from 'codemirror'
 import { useCallback, useEffect, useRef } from 'react'
-import { normalizeEol, restoreEol } from '../editor/eol'
+import type { CodeEditResult } from '../editor/codeActions'
+import { mapLfOffsetToSource, normalizeEol, restoreEol } from '../editor/eol'
 import { languageFor } from '../editor/languages'
 import { editorTheme } from '../editor/theme'
+import { ContextMenu, type ContextMenuEntry } from './ContextMenu'
 
 const externalSyncAnnotation = Annotation.define<boolean>()
 
@@ -21,6 +24,15 @@ export interface NavigateTarget {
   fragment: string
 }
 
+export interface CodePaneHandle {
+  getCursorOffset: () => number | null
+  getSelectionRange: () => { from: number; to: number; text: string } | null
+  insertAtCursor: (text: string) => boolean
+  applyTransform: (transform: (doc: string, from: number, to: number) => CodeEditResult | null) => boolean
+  replaceDocAsTransaction: (nextText: string) => boolean
+  focus: () => void
+}
+
 interface CodePaneProps {
   path: string
   content: string
@@ -28,6 +40,11 @@ interface CodePaneProps {
   reveal?: RevealTarget | null
   onNavigate?: (target: NavigateTarget) => void
   onSelectionChange?: (selection: string) => void
+  onSplitAtCursor?: (offset: number) => void
+  onInsertSplitMarker?: () => void
+  onFormatDocument?: () => void
+  contextMenuItems?: ContextMenuEntry[]
+  handleRef?: React.MutableRefObject<CodePaneHandle | null>
   visible?: boolean
   wordWrap?: boolean
   syncMode?: 'reset' | 'transaction'
@@ -68,6 +85,11 @@ export function CodePane({
   reveal,
   onNavigate,
   onSelectionChange,
+  onSplitAtCursor,
+  onInsertSplitMarker,
+  onFormatDocument,
+  contextMenuItems,
+  handleRef,
   visible = true,
   wordWrap = true,
   syncMode = 'reset',
@@ -88,11 +110,94 @@ export function CodePane({
   const onChangeRef = useRef(onChange)
   const onNavigateRef = useRef(onNavigate)
   const onSelectionRef = useRef(onSelectionChange)
+  const onSplitAtCursorRef = useRef(onSplitAtCursor)
+  const onInsertSplitMarkerRef = useRef(onInsertSplitMarker)
+  const onFormatDocumentRef = useRef(onFormatDocument)
   const latest = useRef({ path, content })
   onChangeRef.current = onChange
   onNavigateRef.current = onNavigate
   onSelectionRef.current = onSelectionChange
+  onSplitAtCursorRef.current = onSplitAtCursor
+  onInsertSplitMarkerRef.current = onInsertSplitMarker
+  onFormatDocumentRef.current = onFormatDocument
   latest.current = { path, content }
+
+  const computeSourceOffset = useCallback((instance: EditorView): number => {
+    const lfOffset = instance.state.selection.main.head
+    const currentPath = shownPath.current ?? latest.current.path
+    const seed = seedTexts.current.get(currentPath) ?? latest.current.content
+    const sourceText = restoreEol(instance.state.doc.toString(), seed)
+    return mapLfOffsetToSource(lfOffset, sourceText)
+  }, [])
+
+  useEffect(() => {
+    if (!handleRef) return
+    handleRef.current = {
+      getCursorOffset: () => {
+        const instance = view.current
+        if (!instance) return null
+        return computeSourceOffset(instance)
+      },
+      getSelectionRange: () => {
+        const instance = view.current
+        if (!instance) return null
+        const { from, to } = instance.state.selection.main
+        return { from, to, text: instance.state.sliceDoc(from, to) }
+      },
+      insertAtCursor: (text: string) => {
+        const instance = view.current
+        if (!instance) return false
+        const { from, to } = instance.state.selection.main
+        instance.dispatch({
+          changes: { from, to, insert: text },
+          selection: { anchor: from + text.length },
+          scrollIntoView: true,
+        })
+        instance.focus()
+        return true
+      },
+      applyTransform: (transform) => {
+        const instance = view.current
+        if (!instance) return false
+        const doc = instance.state.doc.toString()
+        const { from, to } = instance.state.selection.main
+        const edit = transform(doc, from, to)
+        if (!edit) return false
+        instance.dispatch({
+          changes: { from: edit.from, to: edit.to, insert: edit.insert },
+          selection:
+            edit.selection.head !== undefined
+              ? { anchor: edit.selection.anchor, head: edit.selection.head }
+              : { anchor: edit.selection.anchor },
+          annotations: isolateHistory.of('full'),
+          scrollIntoView: true,
+        })
+        instance.focus()
+        return true
+      },
+      replaceDocAsTransaction: (nextText: string) => {
+        const instance = view.current
+        if (!instance) return false
+        const normalized = normalizeEol(nextText)
+        const current = instance.state.doc.toString()
+        if (current === normalized) return false
+        // Single isolated undo transaction so one Cmd/Ctrl+Z reverts only the format pass even
+        // when triggered immediately after typing. See ADR 2026-11-21-code-productivity-and-command-palette.
+        instance.dispatch({
+          changes: { from: 0, to: instance.state.doc.length, insert: normalized },
+          annotations: isolateHistory.of('full'),
+        })
+        instance.focus()
+        return true
+      },
+      focus: () => {
+        view.current?.focus()
+      },
+    }
+    return () => {
+      handleRef.current = null
+    }
+  }, [handleRef, computeSourceOffset])
 
   const makeState = useCallback(
     (forPath: string, doc: string): EditorState => {
@@ -106,6 +211,44 @@ export function CodePane({
           wrapCompartment.current.of(wordWrapRef.current ? EditorView.lineWrapping : []),
           search({ top: true }),
           keymap.of(searchKeymap),
+          // High-precedence Sigil split bindings override CodeMirror's default Mod-Enter insertBlankLine.
+          // See ADR 2026-11-21-chapter-structure-and-resource-tools.
+          Prec.high(
+            keymap.of([
+              {
+                key: 'Mod-Enter',
+                run: (editor) => {
+                  if (!onSplitAtCursorRef.current) return false
+                  onSplitAtCursorRef.current(computeSourceOffset(editor))
+                  return true
+                },
+              },
+              {
+                key: 'Mod-Shift-Enter',
+                run: (editor) => {
+                  if (onInsertSplitMarkerRef.current) {
+                    onInsertSplitMarkerRef.current()
+                    return true
+                  }
+                  const { from, to } = editor.state.selection.main
+                  editor.dispatch({
+                    changes: { from, to, insert: `\n${SPLIT_MARKER_HTML}\n` },
+                    selection: { anchor: from + SPLIT_MARKER_HTML.length + 2 },
+                    scrollIntoView: true,
+                  })
+                  return true
+                },
+              },
+              {
+                key: 'Alt-Shift-f',
+                run: () => {
+                  if (!onFormatDocumentRef.current) return false
+                  onFormatDocumentRef.current()
+                  return true
+                },
+              },
+            ]),
+          ),
           EditorView.updateListener.of((update) => {
             if (update.docChanged) {
               // Ignore programmatic syncs from props so opening CRLF files or returning from
@@ -235,5 +378,13 @@ export function CodePane({
     instance.focus()
   }, [reveal?.key, visible])
 
-  return <div className="code-pane" ref={host} data-path={path} hidden={!visible} />
+  const pane = <div className="code-pane" ref={host} data-path={path} hidden={!visible} />
+  if (contextMenuItems && contextMenuItems.length > 0) {
+    return (
+      <ContextMenu ariaLabel="代码编辑器操作" items={contextMenuItems}>
+        {pane}
+      </ContextMenu>
+    )
+  }
+  return pane
 }

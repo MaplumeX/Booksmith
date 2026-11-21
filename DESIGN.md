@@ -39,12 +39,16 @@
 | `ContextMenu` | `src/ui/ContextMenu.tsx` | Radix ContextMenu；图标 + 分组 + danger / disabled / edge（视口回拉）/ 键盘导航 |
 | `Dialog` | `src/ui/Dialog.tsx` | Radix Dialog；default / wide / 自定义 `onCloseAutoFocus` / 右上角关闭 / 右下角动作 / Escape 与遮罩关闭 |
 | `FileTypeIcon` | `src/ui/FileTypeIcon.tsx` | 文本 / 样式代码 / 图片 / 容器四类统一线宽图标 |
-| `FileTree` | `src/ui/FileTree.tsx` | 左悬浮结构岛「文件」视图；default / empty（无图片组）/ loading / error / edge（长名截断）/ 接入 `ContextMenu` |
+| `FileTree` | `src/ui/FileTree.tsx` | 左悬浮结构岛「文件」视图；default / empty（无图片组）/ loading / error / edge（长名截断、待拆分徽标）/ Text 组多选批量栏（合并 / 样式表）/ Styles 新建样式表 / 接入 `ContextMenu` |
+| `LinkStylesheetsDialog` | `src/ui/LinkStylesheetsDialog.tsx` | `480px` 居中章节样式表关联弹窗；default（单/多章三态半选勾选、内嵌新建样式表）/ empty（无 CSS 引导创建）/ error（重名与非法路径提示）/ edge（长路径截断与滚动） |
+| `UnusedResourcesDialog` | `src/ui/UnusedResourcesDialog.tsx` | `560px` 居中未引用资源清理弹窗；default（图片/字体/未关联样式表分组勾选、缩略图与体积汇总）/ empty（零未引用绿标）/ edge（自动排除封面图、长列表滚动、缺图回退图标） |
 | `TocPanel` | `src/ui/TocPanel.tsx` | 左悬浮结构岛「目录」视图；default（单击跳转与高亮、折叠/按级展开、过滤、拖拽、多选批量栏、右键与 `···` 菜单、50 步撤销重做）/ empty（缺失目录初始化、空目录、过滤无命中）/ error（断链徽标点击直达修复、仅看断链）/ edge（177+ 项滚动、深层缩进钳制、长标题截断） |
 | `TocLinkDialog` | `src/ui/TocLinkDialog.tsx` | `480px` 居中目录链接弹窗；default（目标文件 + 章内 `#id` 自动扫描下拉 + 读取标题）/ error（缺失文件与断链实时警示）/ edge（自定义 `#fragment`、手贴完整 `path#id`） |
 | `TocGenerateDialog` | `src/ui/TocGenerateDialog.tsx` | `680px` 居中正文标题生成目录弹窗；default（`H1–H6` 独立勾选、补全/重建切换、自动补 `id` 章节计数、可交互预览树）/ empty（无匹配标题引导）/ edge（含 MathML 原书非破坏补全、`+id` 与 `已有` 状态标注、窄屏栈叠） |
 | `TabBar` | `src/ui/TabBar.tsx` | 中央文档白卡顶栏；default / active（胶囊高亮）/ dirty / overflow（滚轮与自动滚入可视）/ 右侧「对照预览」开关 +「代码 \| 可视化」模式切换 |
-| `CodePane` | `src/ui/CodePane.tsx` | default / loading / error（语法错误）/ edge（174KB 单章） |
+| `CodePane` | `src/ui/CodePane.tsx` | default / loading / error（语法错误）/ edge（174KB 单章）/ 接入右键 `ContextMenu` 与单事务格式化 |
+| `CodeToolbar` | `src/ui/CodeToolbar.tsx` | 代码区顶部 `34px` 单行可收起工具条（设置可控）；default（拆章/块行内包裹/列表/锚点·链接·插图·特殊字符 Radix Popover/格式化/`⌘K` 触发）/ empty（无图引导）/ error（非法 ID 与空链接校验）/ edge（CSS/XML 自适应精简、窄屏顺滑横滚） |
+| `CommandPalette` | `src/ui/CommandPalette.tsx` | `560px` 居中 Spotlight 全局命令面板（`⌘K` 跨代码与可视化唤起）；default（中英文关键词过滤、分组列表、键盘上下选择与 `<kbd>` 快捷键）/ empty（无命中引导重置）/ edge（不可用命令置灰并展示原因、长列表独立滚动） |
 | `WysiwygPane` | `src/ui/WysiwygPane.tsx` | default（760px 纸面 + 格式栏，跟随全局主题）/ empty（空章可聚焦）/ loading（骨架）/ error（非良构 XML 拦截切回代码）/ edge（`<math>` 保护岛、`<a>` 锚点与 `<img>` 浮条） |
 | `PreviewPane` | `src/ui/PreviewPane.tsx` | 代码模式右侧并排实时书页白卡（跟随全局主题）；default / empty / loading（骨架）/ error（带图标警示）/ edge（MathML、缺图） |
 | `MetadataPanel` | `src/ui/MetadataPanel.tsx` | 顶栏「元数据」触发的 `680px` 居中双栏书籍信息弹窗；default / dirty / error / meta 卡片行编辑 / edge（`<640px` 单列退化） |
