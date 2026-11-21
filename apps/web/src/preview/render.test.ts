@@ -195,5 +195,7 @@ describe('preview & editor theme CSS', () => {
     expect(dark).toContain('color-scheme: dark')
     expect(dark).toContain('background: #1a1b24')
     expect(dark).toContain('color: #ececf2')
+    expect(dark).toContain('hr.sigil_split_marker')
+    expect(light).toContain('hr.sigil_split_marker')
   })
 })

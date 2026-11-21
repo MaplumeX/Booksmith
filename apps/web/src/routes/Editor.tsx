@@ -1,6 +1,14 @@
 import {
   addManifestItem,
   addSpineDocument,
+  countSplitMarkers,
+  createBlankStylesheet,
+  deleteUnusedResourcesInBook,
+  duplicateChapterInBook,
+  findUnusedResources,
+  formatCss,
+  formatXhtml,
+  getLinkedStylesheets,
   hasPageHistory,
   browserXmlCodec,
   browserXmlParser,
@@ -8,7 +16,10 @@ import {
   dirname,
   findBrokenAnchors,
   initializeBookToc,
+  isTextEntry,
   lintBook,
+  listBookStylesheets,
+  mergeChaptersInBook,
   parsePackage,
   readNavToc,
   readNcxToc,
@@ -20,8 +31,12 @@ import {
   setManifestMediaType,
   resolvePath,
   rewriteReferences,
+  SPLIT_MARKER_HTML,
+  splitChapterAtMarkersInBook,
+  splitChapterInBook,
   splitFragment,
   touchOpfModified,
+  updateChaptersStylesheets,
   writeNavToc,
   writeNcxToc,
   writeOpfMeta,
@@ -29,6 +44,7 @@ import {
   type AgentProposal,
   type EpubArchive,
   type EpubIssue,
+  type EpubPackage,
   type OpfMetaRow,
   type SearchFile,
   type TocEntry,
@@ -36,24 +52,51 @@ import {
 import {
   AlertCircle,
   AlertTriangle,
+  AlignLeft,
   ArrowLeft,
+  Bold,
   Check,
+  Code2,
+  Columns2,
+  Copy,
   Download,
+  FileCode2,
+  FilePenLine,
+  FilePlus2,
   FolderTree,
   History,
   ImagePlus,
+  Italic,
   ListTree,
   Loader2,
+  Merge,
   Save,
+  Scissors,
   Search,
+  SeparatorHorizontal,
   Settings,
   ShieldCheck,
   Sparkles,
+  Split,
   Tags,
+  Trash2,
+  Undo2,
+  X,
 } from 'lucide-react'
 import { Popover } from 'radix-ui'
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { ApiError, api, downloadUrl, type AgentProfileDto, type AgentUserSettingsDto } from '../api/client'
+import {
+  insertAnchorId,
+  insertHorizontalRule,
+  insertImageTag,
+  insertLinkTag,
+  insertRawText,
+  wrapBlockTag,
+  wrapInlineTag,
+  wrapList,
+} from '../editor/codeActions'
+import { formatShortcut } from '../editor/shortcuts'
 import { mediaTypeFromExtension, mediaTypeOf } from '../preview/render'
 import { spinePaths } from '../diff/document'
 import { navigate } from '../router'
@@ -85,13 +128,22 @@ import {
 import type { ReplacePlan } from '../state/replacePlan'
 import { DRAFT_DEBOUNCE_MS, clearDraft, planDraftRestore, readDraft, writeDraft } from '../state/draftStore'
 import { getSettings, useSettings } from '../state/settingsStore'
+import {
+  popStructureHistory,
+  pushStructureHistory,
+  type StructureHistoryEntry,
+} from '../state/structureHistory'
 import { AgentPanel } from '../ui/AgentPanel'
 import { Button } from '../ui/Button'
 import { CheckPanel } from '../ui/CheckPanel'
-import { CodePane } from '../ui/CodePane'
+import { CodePane, type CodePaneHandle } from '../ui/CodePane'
+import { CodeToolbar, type CodeFileKind } from '../ui/CodeToolbar'
+import { CommandPalette, type CommandItem } from '../ui/CommandPalette'
+import type { ContextMenuEntry } from '../ui/ContextMenu'
 import { Dialog } from '../ui/Dialog'
 import { EmptyState } from '../ui/EmptyState'
 import { FileTree } from '../ui/FileTree'
+import { LinkStylesheetsDialog } from '../ui/LinkStylesheetsDialog'
 import { MediaPane } from '../ui/MediaPane'
 import { PreviewPane } from '../ui/PreviewPane'
 import { MetadataPanel } from '../ui/MetadataPanel'
@@ -101,6 +153,7 @@ import { TocPanel } from '../ui/TocPanel'
 import type { NavigateTarget, RevealTarget } from '../ui/CodePane'
 import { StatusBar } from '../ui/StatusBar'
 import { TabBar, type EditorViewMode } from '../ui/TabBar'
+import { UnusedResourcesDialog } from '../ui/UnusedResourcesDialog'
 import { VersionHistory } from '../ui/VersionHistory'
 import { WysiwygPane, type WysiwygShortcut } from '../ui/WysiwygPane'
 
@@ -128,6 +181,15 @@ function isPreviewable(path: string | null): boolean {
   if (!path) return false
   const extension = extensionOf(path)
   return extension === 'xhtml' || extension === 'html' || extension === 'htm'
+}
+
+function codeFileKindOf(path: string | null): CodeFileKind {
+  if (!path) return 'other'
+  const ext = extensionOf(path)
+  if (ext === 'xhtml' || ext === 'html' || ext === 'htm') return 'xhtml'
+  if (ext === 'css') return 'css'
+  if (ext === 'xml' || ext === 'opf' || ext === 'ncx' || ext === 'svg') return 'xml'
+  return 'other'
 }
 
 const encoder = new TextEncoder()
@@ -162,6 +224,53 @@ function refreshPackage(
   const pkg = parsePackage(texts.get(book.pkg.opfPath) ?? '', book.pkg.opfPath, browserXmlParser)
   const archive: EpubArchive = { order: archiveOrder(book.archive.order, entries), entries }
   return { ...book, archive, pkg, texts, groups: groupFiles(pkg, archive) }
+}
+
+/** Reconciles `LoadedBook` entry metadata & caches after a `@booksmith/core` structural operation. */
+function reconcileBookAfterStructure(
+  current: LoadedBook,
+  nextFiles: Map<string, string>,
+  nextArchive: EpubArchive,
+  nextPkg: EpubPackage,
+): LoadedBook {
+  const entryMeta = new Map(current.entryMeta)
+  const entryOrigins = new Map(current.entryOrigins)
+  const localBinaries = new Map(current.localBinaries)
+
+  for (const existing of Array.from(entryMeta.keys())) {
+    if (!nextArchive.entries.has(existing)) {
+      entryMeta.delete(existing)
+      entryOrigins.delete(existing)
+      localBinaries.delete(existing)
+    }
+  }
+  for (const [path, text] of nextFiles) {
+    if (!nextArchive.entries.has(path)) continue
+    const encoded = encoder.encode(text)
+    nextArchive.entries.set(path, encoded)
+    const prev = entryMeta.get(path)
+    entryMeta.set(path, {
+      path,
+      isText: isTextEntry(path),
+      mediaType:
+        nextPkg.manifest.find((item) => item.path === path)?.mediaType ??
+        prev?.mediaType ??
+        mediaTypeFromExtension(path),
+      byteSize: encoded.byteLength,
+      sha256: null,
+    })
+  }
+
+  return {
+    ...current,
+    archive: nextArchive,
+    pkg: nextPkg,
+    texts: nextFiles,
+    groups: groupFiles(nextPkg, nextArchive),
+    entryMeta,
+    entryOrigins,
+    localBinaries,
+  }
 }
 
 function chapterDirectory(book: LoadedBook): string {
@@ -277,6 +386,15 @@ export function Editor({ bookId }: { bookId: string }) {
   const [editorMode, setEditorMode] = useState<EditorViewMode>(() => getSettings().defaultEditorMode)
   const [externalResetVersion, setExternalResetVersion] = useState(0)
   const wysiwygFlushRef = useRef<(() => void) | null>(null)
+  const codePaneHandleRef = useRef<CodePaneHandle | null>(null)
+  const structureHistoryRef = useRef<StructureHistoryEntry[]>([])
+  const structureOpSeqRef = useRef(0)
+  const [structureToast, setStructureToast] = useState<{ id: number; message: string; canUndo: boolean } | null>(null)
+  const toastTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const [stylesheetTargets, setStylesheetTargets] = useState<string[] | null>(null)
+  const [unusedDialogOpen, setUnusedDialogOpen] = useState(false)
+  const [commandPaletteOpen, setCommandPaletteOpen] = useState(false)
+  const [searchSeedQuery, setSearchSeedQuery] = useState('')
   const [agentProfiles, setAgentProfiles] = useState<AgentProfileDto[]>([])
   const [agentProfilesLoading, setAgentProfilesLoading] = useState(true)
   const [agentUserSettings, setAgentUserSettings] = useState<AgentUserSettingsDto | null>(null)
@@ -564,6 +682,342 @@ export function Editor({ bookId }: { bookId: string }) {
     const summary = syncDirtyFromBaseline()
     syncDurability(summary)
   }, [syncDirtyFromBaseline, syncDurability])
+
+  const showToast = useCallback((message: string, canUndo: boolean) => {
+    if (toastTimerRef.current) clearTimeout(toastTimerRef.current)
+    const id = Date.now() + Math.random()
+    setStructureToast({ id, message, canUndo })
+    toastTimerRef.current = setTimeout(() => {
+      toastTimerRef.current = null
+      setStructureToast((cur) => (cur?.id === id ? null : cur))
+    }, 8000)
+  }, [])
+
+  useEffect(() => {
+    return () => {
+      if (toastTimerRef.current) clearTimeout(toastTimerRef.current)
+    }
+  }, [])
+
+  const pushStructureUndo = useCallback((label: string, current: LoadedBook) => {
+    const snapshot = createUndoSnapshot({
+      book: current,
+      texts: texts.current,
+      dirty: dirtyRef.current,
+      tabs: tabsRef.current,
+      active: activeRef.current,
+    })
+    structureOpSeqRef.current += 1
+    structureHistoryRef.current = pushStructureHistory(structureHistoryRef.current, {
+      id: structureOpSeqRef.current,
+      label,
+      snapshot,
+    })
+  }, [])
+
+  const applyStructureMutation = useCallback(
+    (
+      label: string,
+      nextBook: LoadedBook,
+      nextFiles: Map<string, string>,
+      options: { nextTabs?: string[]; nextActive?: string | null } = {},
+    ) => {
+      texts.current = nextFiles
+      bookRef.current = nextBook
+      setBook(nextBook)
+      if (options.nextTabs) setTabs(options.nextTabs)
+      if (options.nextActive !== undefined) setActive(options.nextActive)
+      setExternalResetVersion((v) => v + 1)
+      setRevision((v) => v + 1)
+      setSaveError(null)
+      const summary = syncDirtyFromBaseline(nextBook)
+      syncDurability(summary)
+      showToast(label, true)
+    },
+    [showToast, syncDirtyFromBaseline, syncDurability],
+  )
+
+  const undoStructure = useCallback(() => {
+    const { entry, rest } = popStructureHistory(structureHistoryRef.current)
+    if (!entry) return
+    structureHistoryRef.current = rest
+    const { snapshot } = entry
+    texts.current = new Map(snapshot.texts)
+    bookRef.current = snapshot.book
+    setBook(snapshot.book)
+    setTabs([...snapshot.tabs])
+    setActive(snapshot.active)
+    setExternalResetVersion((v) => v + 1)
+    setRevision((v) => v + 1)
+    setSaveError(null)
+    const summary = syncDirtyFromBaseline(snapshot.book)
+    syncDurability(summary)
+    showToast(`已撤销：${entry.label}`, rest.length > 0)
+  }, [showToast, syncDirtyFromBaseline, syncDurability])
+
+  const handleSplitAtCursor = useCallback(
+    (offset: number, preSyncedXhtml?: string) => {
+      const current = bookRef.current
+      const path = activeRef.current
+      if (!current || !path) return
+      const workingFiles = new Map(texts.current)
+      if (preSyncedXhtml !== undefined) {
+        workingFiles.set(path, preSyncedXhtml)
+      }
+      try {
+        const result = splitChapterInBook({
+          files: workingFiles,
+          pkg: current.pkg,
+          archive: current.archive,
+          path,
+          offset,
+          codec: browserXmlCodec,
+        })
+        const created = result.createdPaths[0]
+        const label = created ? `已拆分为 ${basename(created)}` : '已拆分章节'
+        pushStructureUndo(label, current)
+        const nextBook = reconcileBookAfterStructure(current, result.files, result.archive, result.pkg)
+        const curTabs = tabsRef.current
+        const idx = curTabs.indexOf(path)
+        const nextTabs = created
+          ? idx >= 0
+            ? [...curTabs.slice(0, idx + 1), created, ...curTabs.slice(idx + 1).filter((t) => t !== created)]
+            : [...curTabs, created]
+          : curTabs
+        applyStructureMutation(label, nextBook, result.files, {
+          nextTabs,
+          nextActive: created ?? path,
+        })
+      } catch (error) {
+        setSaveError(error instanceof Error ? error.message : '在光标处拆分章节失败')
+      }
+    },
+    [applyStructureMutation, pushStructureUndo],
+  )
+
+  const handleInsertSplitMarker = useCallback(() => {
+    const path = activeRef.current
+    if (!path || !isPreviewable(path)) return
+    codePaneHandleRef.current?.insertAtCursor(`\n${SPLIT_MARKER_HTML}\n`)
+  }, [])
+
+  const handleFormatDocument = useCallback(() => {
+    const path = activeRef.current
+    if (!path) return
+    const kind = codeFileKindOf(path)
+    if (kind === 'other') return
+    const currentText = texts.current.get(path)
+    if (currentText === undefined) return
+    try {
+      const formatted = kind === 'css' ? formatCss(currentText) : formatXhtml(currentText, browserXmlCodec)
+      if (formatted === currentText) {
+        showToast('当前文件已是规范格式', false)
+        return
+      }
+      setSaveError(null)
+      codePaneHandleRef.current?.replaceDocAsTransaction(formatted)
+      showToast(`已格式化 ${basename(path)}（${formatShortcut('Mod+Z')} 可撤回）`, false)
+    } catch (error) {
+      setSaveError(error instanceof Error ? error.message : '格式化失败')
+    }
+  }, [showToast])
+
+  const handleSplitAtMarkers = useCallback(
+    (path: string) => {
+      wysiwygFlushRef.current?.()
+      const current = bookRef.current
+      if (!current) return
+      try {
+        const result = splitChapterAtMarkersInBook({
+          files: texts.current,
+          pkg: current.pkg,
+          archive: current.archive,
+          path,
+          codec: browserXmlCodec,
+        })
+        const label = `已按标记拆出 ${result.createdPaths.length} 个章节`
+        pushStructureUndo(label, current)
+        const nextBook = reconcileBookAfterStructure(current, result.files, result.archive, result.pkg)
+        const curTabs = tabsRef.current
+        const idx = curTabs.indexOf(path)
+        const additions = result.createdPaths.filter((p) => !curTabs.includes(p))
+        const nextTabs =
+          idx >= 0 ? [...curTabs.slice(0, idx + 1), ...additions, ...curTabs.slice(idx + 1)] : [...curTabs, ...additions]
+        applyStructureMutation(label, nextBook, result.files, {
+          nextTabs,
+          nextActive: result.createdPaths[0] ?? path,
+        })
+      } catch (error) {
+        setSaveError(error instanceof Error ? error.message : '按拆分标记拆章失败')
+      }
+    },
+    [applyStructureMutation, pushStructureUndo],
+  )
+
+  const handleMergeChapters = useCallback(
+    (paths: string[]) => {
+      wysiwygFlushRef.current?.()
+      const current = bookRef.current
+      if (!current || paths.length < 2) return
+      const spine = spinePaths(current.pkg)
+      const ordered = [...paths].sort((a, b) => {
+        const ai = spine.indexOf(a)
+        const bi = spine.indexOf(b)
+        if (ai < 0 && bi < 0) return a.localeCompare(b, 'en')
+        if (ai < 0) return 1
+        if (bi < 0) return -1
+        return ai - bi
+      })
+      try {
+        const result = mergeChaptersInBook({
+          files: texts.current,
+          pkg: current.pkg,
+          archive: current.archive,
+          paths: ordered,
+          codec: browserXmlCodec,
+        })
+        const label = `已合并 ${result.removedPaths.length + 1} 章至 ${basename(result.primaryPath)}`
+        pushStructureUndo(label, current)
+        const nextBook = reconcileBookAfterStructure(current, result.files, result.archive, result.pkg)
+        const removedSet = new Set(result.removedPaths)
+        const filteredTabs = tabsRef.current.filter((t) => !removedSet.has(t))
+        const nextTabs = filteredTabs.includes(result.primaryPath)
+          ? filteredTabs
+          : [...filteredTabs, result.primaryPath]
+        applyStructureMutation(label, nextBook, result.files, {
+          nextTabs,
+          nextActive: result.primaryPath,
+        })
+      } catch (error) {
+        setSaveError(error instanceof Error ? error.message : '合并章节失败')
+      }
+    },
+    [applyStructureMutation, pushStructureUndo],
+  )
+
+  const handleMergeWithPrevious = useCallback(
+    (path: string) => {
+      const current = bookRef.current
+      if (!current) return
+      const spine = spinePaths(current.pkg)
+      const idx = spine.indexOf(path)
+      if (idx <= 0) return
+      const previous = spine[idx - 1]
+      if (!previous) return
+      handleMergeChapters([previous, path])
+    },
+    [handleMergeChapters],
+  )
+
+  const handleDuplicateChapter = useCallback(
+    (path: string) => {
+      wysiwygFlushRef.current?.()
+      const current = bookRef.current
+      if (!current) return
+      try {
+        const result = duplicateChapterInBook({
+          files: texts.current,
+          pkg: current.pkg,
+          archive: current.archive,
+          path,
+          codec: browserXmlCodec,
+        })
+        const label = `已复制章节 ${basename(result.createdPath)}`
+        pushStructureUndo(label, current)
+        const nextBook = reconcileBookAfterStructure(current, result.files, result.archive, result.pkg)
+        const curTabs = tabsRef.current
+        const nextTabs = curTabs.includes(result.createdPath) ? curTabs : [...curTabs, result.createdPath]
+        applyStructureMutation(label, nextBook, result.files, {
+          nextTabs,
+          nextActive: result.createdPath,
+        })
+      } catch (error) {
+        setSaveError(error instanceof Error ? error.message : '复制章节失败')
+      }
+    },
+    [applyStructureMutation, pushStructureUndo],
+  )
+
+  const handleCreateStylesheet = useCallback(
+    (filename?: string, openTab = true): { path: string } | { error: string } => {
+      const current = bookRef.current
+      if (!current) return { error: '书籍尚未就绪' }
+      try {
+        const result = createBlankStylesheet({
+          files: texts.current,
+          pkg: current.pkg,
+          archive: current.archive,
+          filename,
+          codec: browserXmlCodec,
+        })
+        const label = `已新建样式表 ${basename(result.createdPath)}`
+        pushStructureUndo(label, current)
+        const nextBook = reconcileBookAfterStructure(current, result.files, result.archive, result.pkg)
+        const curTabs = tabsRef.current
+        const nextTabs = openTab
+          ? curTabs.includes(result.createdPath)
+            ? curTabs
+            : [...curTabs, result.createdPath]
+          : curTabs
+        applyStructureMutation(label, nextBook, result.files, {
+          nextTabs,
+          ...(openTab ? { nextActive: result.createdPath } : {}),
+        })
+        return { path: result.createdPath }
+      } catch (error) {
+        return { error: error instanceof Error ? error.message : '新建样式表失败' }
+      }
+    },
+    [applyStructureMutation, pushStructureUndo],
+  )
+
+  const handleApplyStylesheets = useCallback(
+    (chapterPaths: string[], delta: { add: string[]; remove: string[] }) => {
+      wysiwygFlushRef.current?.()
+      const current = bookRef.current
+      if (!current) return
+      const result = updateChaptersStylesheets(texts.current, chapterPaths, {
+        add: delta.add,
+        remove: delta.remove,
+      })
+      if (result.changedPaths.length === 0) return
+      const label = `已更新 ${result.changedPaths.length} 个章节的样式表`
+      pushStructureUndo(label, current)
+      const nextEntries = new Map(current.archive.entries)
+      for (const changed of result.changedPaths) {
+        const text = result.files.get(changed)
+        if (text !== undefined) nextEntries.set(changed, encoder.encode(text))
+      }
+      const nextArchive: EpubArchive = { order: [...current.archive.order], entries: nextEntries }
+      const nextBook = reconcileBookAfterStructure(current, result.files, nextArchive, current.pkg)
+      applyStructureMutation(label, nextBook, result.files)
+    },
+    [applyStructureMutation, pushStructureUndo],
+  )
+
+  const handleCleanupUnusedResources = useCallback(
+    (paths: string[]) => {
+      const current = bookRef.current
+      if (!current || paths.length === 0) return
+      const result = deleteUnusedResourcesInBook({
+        files: texts.current,
+        pkg: current.pkg,
+        archive: current.archive,
+        paths,
+        codec: browserXmlCodec,
+      })
+      if (result.removedPaths.length === 0) return
+      const label = `已清理 ${result.removedPaths.length} 个未引用资源`
+      pushStructureUndo(label, current)
+      const nextBook = reconcileBookAfterStructure(current, result.files, result.archive, result.pkg)
+      const removedSet = new Set(result.removedPaths)
+      const nextTabs = tabsRef.current.filter((t) => !removedSet.has(t))
+      const fallback = spinePaths(nextBook.pkg)[0] ?? nextBook.groups[0]?.paths[0] ?? null
+      const nextActive = activeRef.current && removedSet.has(activeRef.current) ? fallback : activeRef.current
+      applyStructureMutation(label, nextBook, result.files, { nextTabs, nextActive })
+    },
+    [applyStructureMutation, pushStructureUndo],
+  )
 
   const createDocument = useCallback(() => {
     const current = bookRef.current
@@ -1261,7 +1715,12 @@ export function Editor({ bookId }: { bookId: string }) {
       }
       if (event.key.toLowerCase() === 'f' && event.shiftKey) {
         event.preventDefault()
+        setSearchSeedQuery('')
         setSearchOpen(true)
+      }
+      if (event.key.toLowerCase() === 'k' && !event.shiftKey) {
+        event.preventDefault()
+        setCommandPaletteOpen((openPalette) => !openPalette)
       }
       if (event.key.toLowerCase() === 'l' && event.shiftKey) {
         event.preventDefault()
@@ -1366,7 +1825,12 @@ export function Editor({ bookId }: { bookId: string }) {
       return
     }
     if (action === 'search') {
+      setSearchSeedQuery('')
       setSearchOpen(true)
+      return
+    }
+    if (action === 'command-palette') {
+      setCommandPaletteOpen((openPalette) => !openPalette)
       return
     }
     const list = tabsRef.current
@@ -1393,7 +1857,359 @@ export function Editor({ bookId }: { bookId: string }) {
   // Live book health status powers the topbar diagnostic pill and its Radix Popover card.
   // See ADR 2026-11-20-soft-craft-studio-ui.
   const issues = [...serverIssues, ...lintBook(texts.current, book.pkg, book.archive, browserXmlCodec)]
+  const entrySizes = new Map<string, number>()
+  for (const [entryPath, meta] of book.entryMeta) entrySizes.set(entryPath, meta.byteSize)
+  const unusedResources = findUnusedResources(texts.current, book.pkg, book.archive, entrySizes)
+  const bookStylesheets = listBookStylesheets(book.pkg, book.archive)
+  const linkedByChapter = new Map<string, string[]>()
+  if (stylesheetTargets) {
+    for (const chPath of stylesheetTargets) {
+      linkedByChapter.set(chPath, getLinkedStylesheets(texts.current.get(chPath) ?? '', chPath))
+    }
+  }
+  const markerCounts = new Map<string, number>()
+  for (const chPath of book.groups.find((g) => g.group === 'Text')?.paths ?? []) {
+    const count = countSplitMarkers(texts.current.get(chPath) ?? '')
+    if (count > 0) markerCounts.set(chPath, count)
+  }
   const showSplitPreview = Boolean(active && editable && previewable && !showWysiwyg && previewOpen)
+  const activeFileKind = codeFileKindOf(active)
+  const activeMarkerCount = active ? (markerCounts.get(active) ?? 0) : 0
+  const spineOrder = spinePaths(book.pkg)
+  const activeSpineIndex = active ? spineOrder.indexOf(active) : -1
+  const canFormatActive = editable && !showWysiwyg && activeFileKind !== 'other'
+
+  const triggerSplitFromCodeCursor = () => {
+    const offset = codePaneHandleRef.current?.getCursorOffset()
+    if (offset !== null && offset !== undefined) handleSplitAtCursor(offset)
+  }
+
+  const codeContextItems: ContextMenuEntry[] =
+    active && editable
+      ? [
+          ...(previewable
+            ? [
+                {
+                  id: 'ctx-split-cursor',
+                  label: `在光标处拆分章节 (${formatShortcut('Mod+Enter')})`,
+                  icon: <Scissors size={14} strokeWidth={1.65} />,
+                  onSelect: triggerSplitFromCodeCursor,
+                },
+                {
+                  id: 'ctx-insert-marker',
+                  label: `插入拆分标记 (${formatShortcut('Mod+Shift+Enter')})`,
+                  icon: <SeparatorHorizontal size={14} strokeWidth={1.65} />,
+                  onSelect: handleInsertSplitMarker,
+                },
+                {
+                  id: 'ctx-split-markers',
+                  label: activeMarkerCount > 0 ? `按标记拆分（${activeMarkerCount} 处）` : '按标记拆分',
+                  icon: <Split size={14} strokeWidth={1.65} />,
+                  disabled: activeMarkerCount === 0,
+                  onSelect: () => handleSplitAtMarkers(active),
+                },
+                {
+                  id: 'ctx-wrap-p',
+                  label: '包裹为正文 <p>',
+                  icon: <Code2 size={14} strokeWidth={1.65} />,
+                  separatorBefore: true,
+                  onSelect: () =>
+                    codePaneHandleRef.current?.applyTransform((doc, from, to) => wrapBlockTag(doc, from, to, 'p')),
+                },
+                {
+                  id: 'ctx-wrap-h2',
+                  label: '包裹为二级标题 <h2>',
+                  icon: <Code2 size={14} strokeWidth={1.65} />,
+                  onSelect: () =>
+                    codePaneHandleRef.current?.applyTransform((doc, from, to) => wrapBlockTag(doc, from, to, 'h2')),
+                },
+                {
+                  id: 'ctx-wrap-strong',
+                  label: '加粗 <strong>',
+                  icon: <Bold size={14} strokeWidth={1.65} />,
+                  onSelect: () =>
+                    codePaneHandleRef.current?.applyTransform((doc, from, to) => wrapInlineTag(doc, from, to, 'strong')),
+                },
+                {
+                  id: 'ctx-wrap-em',
+                  label: '斜体 <em>',
+                  icon: <Italic size={14} strokeWidth={1.65} />,
+                  onSelect: () =>
+                    codePaneHandleRef.current?.applyTransform((doc, from, to) => wrapInlineTag(doc, from, to, 'em')),
+                },
+                {
+                  id: 'ctx-link-css',
+                  label: '关联样式表…',
+                  icon: <FileCode2 size={14} strokeWidth={1.65} />,
+                  separatorBefore: true,
+                  opensDialog: true,
+                  onSelect: () => setStylesheetTargets([active]),
+                },
+              ]
+            : []),
+          ...(activeFileKind !== 'other'
+            ? [
+                {
+                  id: 'ctx-format',
+                  label: `美化格式化代码 (${formatShortcut('Alt+Shift+F')})`,
+                  icon: <AlignLeft size={14} strokeWidth={1.65} />,
+                  separatorBefore: !previewable,
+                  onSelect: handleFormatDocument,
+                },
+              ]
+            : []),
+          ...(selectionText.trim().length > 0
+            ? [
+                {
+                  id: 'ctx-search-selection',
+                  label: `全书查找「${selectionText.trim().slice(0, 18)}${selectionText.trim().length > 18 ? '…' : ''}」`,
+                  icon: <Search size={14} strokeWidth={1.65} />,
+                  separatorBefore: true,
+                  opensDialog: true,
+                  onSelect: () => {
+                    setSearchSeedQuery(selectionText.trim())
+                    setSearchOpen(true)
+                  },
+                },
+              ]
+            : []),
+        ]
+      : []
+
+  const paletteCommands: CommandItem[] = [
+    // 章节与结构
+    {
+      id: 'cmd-split-cursor',
+      group: '章节与结构',
+      label: '在光标处拆分章节',
+      keywords: 'split cursor 拆分 光标',
+      shortcut: formatShortcut('Mod+Enter'),
+      icon: <Scissors size={14} strokeWidth={1.7} />,
+      disabled: !active || !previewable || showWysiwyg,
+      disabledReason: showWysiwyg
+        ? `可视化模式请直接按 ${formatShortcut('Mod+Enter')} 或点工具栏拆分按钮`
+        : '仅 XHTML 章节支持拆分',
+      onSelect: triggerSplitFromCodeCursor,
+    },
+    {
+      id: 'cmd-insert-marker',
+      group: '章节与结构',
+      label: '插入拆分标记',
+      keywords: 'split marker sigil 拆分标记',
+      shortcut: formatShortcut('Mod+Shift+Enter'),
+      icon: <SeparatorHorizontal size={14} strokeWidth={1.7} />,
+      disabled: !active || !previewable || showWysiwyg,
+      disabledReason: showWysiwyg
+        ? `可视化模式请按 ${formatShortcut('Mod+Shift+Enter')} 或点工具栏插入标记`
+        : '仅 XHTML 章节支持',
+      onSelect: handleInsertSplitMarker,
+    },
+    {
+      id: 'cmd-split-markers',
+      group: '章节与结构',
+      label: activeMarkerCount > 0 ? `按标记批量拆分当前章（${activeMarkerCount} 处）` : '按标记批量拆分当前章',
+      keywords: 'split markers batch 批量拆分',
+      icon: <Split size={14} strokeWidth={1.7} />,
+      disabled: !active || !previewable || activeMarkerCount === 0,
+      disabledReason: '当前章节没有拆分标记',
+      onSelect: () => active && handleSplitAtMarkers(active),
+    },
+    {
+      id: 'cmd-merge-prev',
+      group: '章节与结构',
+      label: '将当前章与上一章合并',
+      keywords: 'merge previous 合并 上一章',
+      icon: <Merge size={14} strokeWidth={1.7} />,
+      disabled: !active || activeSpineIndex <= 0,
+      disabledReason: '仅阅读顺序中第 2 章及以后的章节可合并',
+      onSelect: () => active && handleMergeWithPrevious(active),
+    },
+    {
+      id: 'cmd-duplicate-chapter',
+      group: '章节与结构',
+      label: '复制当前章节',
+      keywords: 'duplicate clone 复制 克隆 章节',
+      icon: <Copy size={14} strokeWidth={1.7} />,
+      disabled: !active || !previewable,
+      disabledReason: '仅 XHTML 章节可复制',
+      onSelect: () => active && handleDuplicateChapter(active),
+    },
+    {
+      id: 'cmd-new-chapter',
+      group: '章节与结构',
+      label: '新建空白章节',
+      keywords: 'new create chapter 新建 章节',
+      icon: <FilePlus2 size={14} strokeWidth={1.7} />,
+      onSelect: createDocument,
+    },
+    {
+      id: 'cmd-new-css',
+      group: '章节与结构',
+      label: '新建空白 CSS 样式表',
+      keywords: 'new create css stylesheet 新建 样式表',
+      icon: <FileCode2 size={14} strokeWidth={1.7} />,
+      onSelect: () => {
+        const res = handleCreateStylesheet(undefined, true)
+        if ('error' in res) setSaveError(res.error)
+      },
+    },
+    {
+      id: 'cmd-link-css',
+      group: '章节与结构',
+      label: '为当前章关联样式表…',
+      keywords: 'link stylesheet css 关联 样式表',
+      icon: <FileCode2 size={14} strokeWidth={1.7} />,
+      disabled: !active || !previewable,
+      disabledReason: '仅 XHTML 章节可关联样式表',
+      onSelect: () => active && setStylesheetTargets([active]),
+    },
+    {
+      id: 'cmd-undo-structure',
+      group: '章节与结构',
+      label: '撤销上次结构操作',
+      keywords: 'undo structure 撤销 结构',
+      icon: <Undo2 size={14} strokeWidth={1.7} />,
+      disabled: structureHistoryRef.current.length === 0,
+      disabledReason: '暂无可撤销的结构操作',
+      onSelect: undoStructure,
+    },
+    // 代码编辑
+    {
+      id: 'cmd-format',
+      group: '代码编辑',
+      label: '美化格式化当前文件',
+      keywords: 'format prettify beautify 格式化 美化 缩进',
+      shortcut: formatShortcut('Alt+Shift+F'),
+      icon: <AlignLeft size={14} strokeWidth={1.7} />,
+      disabled: !canFormatActive,
+      disabledReason: showWysiwyg ? '请先切回代码模式再格式化' : '当前文件类型不支持格式化',
+      onSelect: handleFormatDocument,
+    },
+    {
+      id: 'cmd-wrap-strong',
+      group: '代码编辑',
+      label: '包裹加粗标签 <strong>',
+      keywords: 'bold strong 加粗',
+      icon: <Bold size={14} strokeWidth={1.7} />,
+      disabled: !active || !previewable || showWysiwyg,
+      disabledReason: '仅代码模式 XHTML 章节可用',
+      onSelect: () =>
+        codePaneHandleRef.current?.applyTransform((doc, from, to) => wrapInlineTag(doc, from, to, 'strong')),
+    },
+    {
+      id: 'cmd-wrap-em',
+      group: '代码编辑',
+      label: '包裹斜体标签 <em>',
+      keywords: 'italic em 斜体',
+      icon: <Italic size={14} strokeWidth={1.7} />,
+      disabled: !active || !previewable || showWysiwyg,
+      disabledReason: '仅代码模式 XHTML 章节可用',
+      onSelect: () =>
+        codePaneHandleRef.current?.applyTransform((doc, from, to) => wrapInlineTag(doc, from, to, 'em')),
+    },
+    // 视图与面板
+    {
+      id: 'cmd-toggle-mode',
+      group: '视图与面板',
+      label: showWysiwyg ? '切换到代码编辑模式' : '切换到可视化校对模式',
+      keywords: 'mode code wysiwyg 代码 可视化 切换',
+      icon: showWysiwyg ? <Code2 size={14} strokeWidth={1.7} /> : <FilePenLine size={14} strokeWidth={1.7} />,
+      disabled: !canWysiwyg,
+      disabledReason: '仅 XHTML 章节支持切换模式',
+      onSelect: () => switchMode(showWysiwyg ? 'code' : 'wysiwyg'),
+    },
+    {
+      id: 'cmd-toggle-preview',
+      group: '视图与面板',
+      label: previewOpen ? '收起右侧对照预览' : '展开右侧对照预览',
+      keywords: 'preview split 对照预览 预览',
+      icon: <Columns2 size={14} strokeWidth={1.7} />,
+      disabled: !previewable || showWysiwyg,
+      disabledReason: '仅代码模式 XHTML 章节支持对照预览',
+      onSelect: () => setPreviewOpen((v) => !v),
+    },
+    {
+      id: 'cmd-nav-files',
+      group: '视图与面板',
+      label: '切换到文件树视图',
+      keywords: 'files tree 文件树',
+      icon: <FolderTree size={14} strokeWidth={1.7} />,
+      onSelect: () => setNavTab('files'),
+    },
+    {
+      id: 'cmd-nav-toc',
+      group: '视图与面板',
+      label: '切换到目录大纲视图',
+      keywords: 'toc outline 目录 大纲',
+      icon: <ListTree size={14} strokeWidth={1.7} />,
+      onSelect: () => setNavTab('toc'),
+    },
+    {
+      id: 'cmd-toggle-agent',
+      group: '视图与面板',
+      label: agentOpen ? '收起 AI 编辑助手' : '打开 AI 编辑助手',
+      keywords: 'agent ai 助手',
+      shortcut: formatShortcut('Mod+Shift+L'),
+      icon: <Sparkles size={14} strokeWidth={1.7} />,
+      onSelect: () => toggleAgentSidebar(),
+    },
+    // 书籍工具
+    {
+      id: 'cmd-search-book',
+      group: '书籍工具',
+      label: '全书查找与替换',
+      keywords: 'search find replace 查找 替换 正则',
+      shortcut: formatShortcut('Mod+Shift+F'),
+      icon: <Search size={14} strokeWidth={1.7} />,
+      onSelect: () => {
+        setSearchSeedQuery('')
+        setSearchOpen(true)
+      },
+    },
+    {
+      id: 'cmd-cleanup-unused',
+      group: '书籍工具',
+      label: unusedResources.length > 0 ? `清理未引用资源（${unusedResources.length} 项）…` : '清理未引用资源…',
+      keywords: 'clean unused resources media 清理 未使用 未引用 资源',
+      icon: <Trash2 size={14} strokeWidth={1.7} />,
+      onSelect: () => setUnusedDialogOpen(true),
+    },
+    {
+      id: 'cmd-metadata',
+      group: '书籍工具',
+      label: '编辑书籍出版信息与元数据',
+      keywords: 'metadata opf 元数据 书名 作者',
+      icon: <Tags size={14} strokeWidth={1.7} />,
+      onSelect: () => setMetadataOpen(true),
+    },
+    {
+      id: 'cmd-check',
+      group: '书籍工具',
+      label: '打开全书结构检查',
+      keywords: 'check lint validate 检查 结构',
+      icon: <ShieldCheck size={14} strokeWidth={1.7} />,
+      onSelect: () => setCheckOpen(true),
+    },
+    {
+      id: 'cmd-settings',
+      group: '书籍工具',
+      label: '打开应用设置',
+      keywords: 'settings preferences theme 设置 主题 工具条',
+      icon: <Settings size={14} strokeWidth={1.7} />,
+      onSelect: () => setSettingsTab('general'),
+    },
+    {
+      id: 'cmd-save',
+      group: '书籍工具',
+      label: '保存当前修改',
+      keywords: 'save checkpoint 保存',
+      shortcut: formatShortcut('Mod+S'),
+      icon: <Save size={14} strokeWidth={1.7} />,
+      disabled: dirty.size === 0 || saving || conflict,
+      disabledReason: dirty.size === 0 ? '当前没有未保存修改' : '保存中或存在版本冲突',
+      onSelect: () => void save({ checkpoint: true }),
+    },
+  ]
 
   const applyDraft = () => {
     if (!draftPrompt) return
@@ -1484,13 +2300,13 @@ export function Editor({ bookId }: { bookId: string }) {
           type="button"
           className="appbar-search-trigger"
           aria-label="查找"
-          title="全书查找与替换（Ctrl/Cmd+Shift+F）"
+          title={`全书查找与替换（${formatShortcut('Mod+Shift+F')}）`}
           onClick={() => setSearchOpen(true)}
         >
           <Search size={13} strokeWidth={1.75} aria-hidden="true" />
           <span className="appbar-tool-label">查找</span>
           <kbd className="appbar-kbd" aria-hidden="true">
-            ⌘⇧F
+            {formatShortcut('Mod+Shift+F')}
           </kbd>
         </button>
         <Popover.Root open={checkOpen} onOpenChange={setCheckOpen}>
@@ -1521,6 +2337,7 @@ export function Editor({ bookId }: { bookId: string }) {
               <div className="check-popover-body">
                 <CheckPanel
                   issues={issues}
+                  unusedResourceCount={unusedResources.length}
                   onOpen={(path, line) => {
                     setCheckOpen(false)
                     open(path)
@@ -1528,6 +2345,10 @@ export function Editor({ bookId }: { bookId: string }) {
                       setEditorMode('code')
                       setReveal({ line, column: 1, key: Date.now() })
                     }
+                  }}
+                  onOpenUnusedCleanup={() => {
+                    setCheckOpen(false)
+                    setUnusedDialogOpen(true)
                   }}
                 />
               </div>
@@ -1540,7 +2361,7 @@ export function Editor({ bookId }: { bookId: string }) {
           className={`appbar-agent-toggle${agentOpen ? ' is-active' : ''}`}
           aria-label="助手"
           aria-pressed={agentOpen}
-          title="切换 AI 助手（Ctrl/Cmd+Shift+L）"
+          title={`切换 AI 助手（${formatShortcut('Mod+Shift+L')}）`}
           onClick={toggleAgentSidebar}
         >
           <Sparkles size={14} strokeWidth={1.7} aria-hidden="true" />
@@ -1656,6 +2477,7 @@ export function Editor({ bookId }: { bookId: string }) {
                 active={active}
                 dirty={dirty}
                 spinePaths={spinePaths(book.pkg)}
+                markerCounts={markerCounts}
                 onOpen={(path) => {
                   open(path)
                   setTreeOpen(false)
@@ -1666,6 +2488,31 @@ export function Editor({ bookId }: { bookId: string }) {
                 }}
                 onCreate={() => {
                   createDocument()
+                  setTreeOpen(false)
+                }}
+                onCreateStylesheet={() => {
+                  const res = handleCreateStylesheet(undefined, true)
+                  if ('error' in res) setSaveError(res.error)
+                  setTreeOpen(false)
+                }}
+                onDuplicate={(path) => {
+                  handleDuplicateChapter(path)
+                  setTreeOpen(false)
+                }}
+                onSplitAtMarkers={(path) => {
+                  handleSplitAtMarkers(path)
+                  setTreeOpen(false)
+                }}
+                onMergeWithPrevious={(path) => {
+                  handleMergeWithPrevious(path)
+                  setTreeOpen(false)
+                }}
+                onMergeSelected={(paths) => {
+                  handleMergeChapters(paths)
+                  setTreeOpen(false)
+                }}
+                onLinkStylesheets={(paths) => {
+                  setStylesheetTargets(paths)
                   setTreeOpen(false)
                 }}
                 onRename={(path) => {
@@ -1728,16 +2575,72 @@ export function Editor({ bookId }: { bookId: string }) {
             {active ? (
               editable ? (
                 <>
+                  {!showWysiwyg && settings.showCodeToolbar ? (
+                    <CodeToolbar
+                      path={active}
+                      fileKind={activeFileKind}
+                      archive={book.archive}
+                      pkg={book.pkg}
+                      resolveAsset={resolveAsset}
+                      markerCount={activeMarkerCount}
+                      onSplitAtCursor={triggerSplitFromCodeCursor}
+                      onInsertSplitMarker={handleInsertSplitMarker}
+                      onSplitAtMarkers={() => handleSplitAtMarkers(active)}
+                      onWrapBlock={(tag) =>
+                        codePaneHandleRef.current?.applyTransform((doc, from, to) => wrapBlockTag(doc, from, to, tag))
+                      }
+                      onWrapInline={(tag) =>
+                        codePaneHandleRef.current?.applyTransform((doc, from, to) => wrapInlineTag(doc, from, to, tag))
+                      }
+                      onWrapList={(tag) =>
+                        codePaneHandleRef.current?.applyTransform((doc, from, to) => wrapList(doc, from, to, tag))
+                      }
+                      onInsertAnchorId={(id) =>
+                        Boolean(
+                          codePaneHandleRef.current?.applyTransform((doc, from, to) =>
+                            insertAnchorId(doc, from, to, id),
+                          ),
+                        )
+                      }
+                      onInsertLink={(href, label) =>
+                        Boolean(
+                          codePaneHandleRef.current?.applyTransform((doc, from, to) =>
+                            insertLinkTag(doc, from, to, href, label),
+                          ),
+                        )
+                      }
+                      onInsertImage={(src, alt) =>
+                        Boolean(
+                          codePaneHandleRef.current?.applyTransform((doc, from, to) =>
+                            insertImageTag(doc, from, to, src, alt),
+                          ),
+                        )
+                      }
+                      onInsertHr={() =>
+                        codePaneHandleRef.current?.applyTransform((doc, from, to) => insertHorizontalRule(doc, from, to))
+                      }
+                      onInsertChar={(char) =>
+                        codePaneHandleRef.current?.applyTransform((doc, from, to) => insertRawText(doc, from, to, char))
+                      }
+                      onFormat={handleFormatDocument}
+                      onOpenCommandPalette={() => setCommandPaletteOpen(true)}
+                    />
+                  ) : null}
                   <CodePane
                     path={active}
                     content={content}
                     reveal={reveal}
+                    handleRef={codePaneHandleRef}
                     visible={!showWysiwyg}
                     wordWrap={settings.codeWordWrap}
                     syncMode={canWysiwyg ? 'transaction' : 'reset'}
                     resetVersion={externalResetVersion}
+                    contextMenuItems={codeContextItems}
                     onNavigate={navigateTo}
                     onSelectionChange={setSelectionText}
+                    onSplitAtCursor={previewable ? (offset) => handleSplitAtCursor(offset) : undefined}
+                    onInsertSplitMarker={previewable ? handleInsertSplitMarker : undefined}
+                    onFormatDocument={activeFileKind !== 'other' ? handleFormatDocument : undefined}
                     onChange={(value) => handleChange(active, value)}
                   />
                   {showWysiwyg ? (
@@ -1753,6 +2656,7 @@ export function Editor({ bookId }: { bookId: string }) {
                       onChange={(value) => handleChange(active, value, { rerender: true })}
                       onSwitchToCode={() => switchMode('code')}
                       onNavigateLink={navigateTo}
+                      onSplitAtCursor={(xhtml, offset) => handleSplitAtCursor(offset, xhtml)}
                       onShortcut={handleWysiwygShortcut}
                     />
                   ) : null}
@@ -1831,7 +2735,7 @@ export function Editor({ bookId }: { bookId: string }) {
         onOpenChange={setMetadataOpen}
         ariaLabel="书籍信息"
         title="书籍出版信息与元数据"
-        description="修改直接写入 OPF 并标脏，⌘S 保存后生效。"
+        description={`修改直接写入 OPF 并标脏，${formatShortcut('Mod+S')} 保存后生效。`}
         className="metadata-dialog"
       >
         <MetadataPanel
@@ -1864,6 +2768,7 @@ export function Editor({ bookId }: { bookId: string }) {
       >
         <SearchPanel
           files={searchFiles}
+          initialQuery={searchSeedQuery}
           onOpen={(path, line, column) => {
             setSearchOpen(false)
             open(path)
@@ -1980,6 +2885,71 @@ export function Editor({ bookId }: { bookId: string }) {
           }}
         />
       ) : null}
+
+      <LinkStylesheetsDialog
+        open={stylesheetTargets !== null}
+        onOpenChange={(openState) => {
+          if (!openState) setStylesheetTargets(null)
+        }}
+        chapterPaths={stylesheetTargets ?? []}
+        stylesheets={bookStylesheets}
+        linkedByChapter={linkedByChapter}
+        onApply={(delta) => {
+          if (stylesheetTargets) handleApplyStylesheets(stylesheetTargets, delta)
+        }}
+        onCreateStylesheet={(filename) => handleCreateStylesheet(filename, false)}
+      />
+
+      <UnusedResourcesDialog
+        open={unusedDialogOpen}
+        onOpenChange={setUnusedDialogOpen}
+        resources={unusedResources}
+        resolveAsset={resolveAsset}
+        onConfirmDelete={handleCleanupUnusedResources}
+      />
+
+      {structureToast ? (
+        <div
+          className="structure-toast"
+          role="status"
+          aria-live="polite"
+          onMouseEnter={() => {
+            if (toastTimerRef.current) {
+              clearTimeout(toastTimerRef.current)
+              toastTimerRef.current = null
+            }
+          }}
+          onMouseLeave={() => {
+            const currentId = structureToast.id
+            toastTimerRef.current = setTimeout(() => {
+              toastTimerRef.current = null
+              setStructureToast((cur) => (cur?.id === currentId ? null : cur))
+            }, 4000)
+          }}
+        >
+          <span className="structure-toast-msg">{structureToast.message}</span>
+          {structureToast.canUndo ? (
+            <button type="button" className="structure-toast-undo" onClick={undoStructure}>
+              <Undo2 size={13} strokeWidth={1.8} aria-hidden="true" />
+              <span>撤销</span>
+            </button>
+          ) : null}
+          <button
+            type="button"
+            className="structure-toast-close"
+            aria-label="关闭提示"
+            onClick={() => setStructureToast(null)}
+          >
+            <X size={13} strokeWidth={1.8} aria-hidden="true" />
+          </button>
+        </div>
+      ) : null}
+
+      <CommandPalette
+        open={commandPaletteOpen}
+        onOpenChange={setCommandPaletteOpen}
+        commands={paletteCommands}
+      />
 
       <SettingsDialog
         open={settingsTab !== null}

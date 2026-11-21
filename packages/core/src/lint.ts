@@ -1,3 +1,4 @@
+import { findSplitMarkerLines } from './chapterSplit'
 import { readNavToc } from './nav'
 import { collectBrokenReferences, collectReferences } from './references'
 import { findBrokenAnchors } from './toc'
@@ -81,6 +82,20 @@ export function lintBook(
   }
 
   issues.push(...unusedResources(files, pkg, archive))
+
+  // Flag leftover Sigil split markers so authors do not accidentally export unsplit chapters.
+  // See ADR 2026-11-21-chapter-structure-and-resource-tools.
+  for (const [path, text] of files) {
+    if (!/\.(?:xhtml|html|htm)$/i.test(path)) continue
+    for (const line of findSplitMarkerLines(text)) {
+      issues.push({
+        code: 'pending-split-marker',
+        message: '存在未执行的拆分标记（sigil_split_marker），导出前请执行按标记拆分或移除',
+        path,
+        line,
+      })
+    }
+  }
 
   if (pkg.navPath) {
     const navXml = files.get(pkg.navPath)

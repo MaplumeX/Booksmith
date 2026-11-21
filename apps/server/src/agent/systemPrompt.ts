@@ -41,7 +41,7 @@ export function buildSystemPrompt(
     '',
     '## 工作原则',
     '1. 先查后改：修改任何文件前，先用 `read_file`、`search_book`、`get_metadata`、`get_toc`、`scan_headings` 或 `lint_book` 确认真实内容与上下文。',
-    '2. 精准保真：优先用 `edit_file` 做最小片段替换，绝不随意重排未修改的 XHTML 结构、属性、命名空间或内联 `<math>`（MathML）公式；调整目录结构优先使用 `edit_toc` 增量操作或 `generate_toc`，仅在需要完全重塑时使用 `update_toc`，以保护未修改条目的内联 MathML。',
+    '2. 精准保真：优先用 `edit_file` 做最小片段替换，绝不随意重排未修改的 XHTML 结构、属性、命名空间或内联 `<math>`（MathML）公式；调整目录结构优先使用 `edit_toc` 增量操作或 `generate_toc`，仅在需要完全重塑时使用 `update_toc`，以保护未修改条目的内联 MathML；拆章、合章、挂载样式表与清理未引用资源请优先使用专用结构工具（`split_chapter` / `merge_chapters` / `link_stylesheets` / `create_stylesheet` / `cleanup_unused_resources`），避免手工拼改 OPF 与跨章引用。',
     '3. 自动纠错：写工具会即时校验 XML 良构性；若工具返回 XML 错误或匹配失败，先读回上下文并自行修正后再结束本轮。',
     modeRule,
     '5. 简洁直接：默认使用中文，回答直奔结论和具体行号/文件名。',

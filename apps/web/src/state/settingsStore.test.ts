@@ -17,6 +17,7 @@ describe('settingsStore', () => {
         theme: 'sepia',
         codeFontSize: 40,
         codeWordWrap: 'yes',
+        showCodeToolbar: 'no',
         defaultEditorMode: 'split',
         defaultPreviewOpen: 1,
       }),
@@ -24,6 +25,7 @@ describe('settingsStore', () => {
       theme: 'system',
       codeFontSize: MAX_CODE_FONT_SIZE,
       codeWordWrap: true,
+      showCodeToolbar: true,
       defaultEditorMode: 'code',
       defaultPreviewOpen: true,
     })
@@ -33,6 +35,7 @@ describe('settingsStore', () => {
         theme: 'dark',
         codeFontSize: 8.2,
         codeWordWrap: false,
+        showCodeToolbar: false,
         defaultEditorMode: 'wysiwyg',
         defaultPreviewOpen: false,
       }),
@@ -40,6 +43,7 @@ describe('settingsStore', () => {
       theme: 'dark',
       codeFontSize: MIN_CODE_FONT_SIZE,
       codeWordWrap: false,
+      showCodeToolbar: false,
       defaultEditorMode: 'wysiwyg',
       defaultPreviewOpen: false,
     })
@@ -57,6 +61,7 @@ describe('settingsStore', () => {
     expect(isDefaultSettings({ ...DEFAULT_SETTINGS, theme: 'dark' })).toBe(false)
     expect(isDefaultSettings({ ...DEFAULT_SETTINGS, codeFontSize: 15 })).toBe(false)
     expect(isDefaultSettings({ ...DEFAULT_SETTINGS, codeWordWrap: false })).toBe(false)
+    expect(isDefaultSettings({ ...DEFAULT_SETTINGS, showCodeToolbar: false })).toBe(false)
     expect(isDefaultSettings({ ...DEFAULT_SETTINGS, defaultEditorMode: 'wysiwyg' })).toBe(false)
     expect(isDefaultSettings({ ...DEFAULT_SETTINGS, defaultPreviewOpen: false })).toBe(false)
   })

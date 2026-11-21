@@ -229,6 +229,25 @@ export function SettingsDialog({
 
               <div className="settings-row">
                 <div className="settings-row-copy">
+                  <span id="settings-code-toolbar-label" className="settings-row-title">
+                    显示代码工具条
+                  </span>
+                  <span className="settings-row-desc">在代码区顶部显示单行快捷拆章、标签包裹、插图与格式化工具条</span>
+                </div>
+                <button
+                  type="button"
+                  role="switch"
+                  aria-labelledby="settings-code-toolbar-label"
+                  aria-checked={settings.showCodeToolbar}
+                  className={`settings-switch${settings.showCodeToolbar ? ' on' : ''}`}
+                  onClick={() => updateSettings({ showCodeToolbar: !settings.showCodeToolbar })}
+                >
+                  <span className="settings-switch-thumb" aria-hidden="true" />
+                </button>
+              </div>
+
+              <div className="settings-row">
+                <div className="settings-row-copy">
                   <span id="settings-mode-label" className="settings-row-title">
                     默认编辑模式
                   </span>

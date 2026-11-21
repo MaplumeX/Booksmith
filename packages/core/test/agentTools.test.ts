@@ -96,7 +96,7 @@ describe('AgentWorkspace read tools on real EPUB fixture', () => {
       'get_toc',
       'scan_headings',
     ])
-    expect(AGENT_TOOL_NAMES).toHaveLength(16)
+    expect(AGENT_TOOL_NAMES).toHaveLength(21)
     for (const name of AGENT_READ_ONLY_TOOL_NAMES) {
       expect(AGENT_TOOL_NAMES).toContain(name)
       expect(isReadOnlyAgentTool(name)).toBe(true)
@@ -112,6 +112,11 @@ describe('AgentWorkspace read tools on real EPUB fixture', () => {
       'create_chapter',
       'rename_file',
       'delete_file',
+      'split_chapter',
+      'merge_chapters',
+      'link_stylesheets',
+      'create_stylesheet',
+      'cleanup_unused_resources',
     ])
   })
 })
@@ -348,5 +353,60 @@ describe('AgentWorkspace structural tools (metadata, TOC, create, rename, delete
     const navAfter = fixtureWs.getText(fixtureWs.getPackage().navPath!)!
     expect(navAfter).toContain('<math')
     expect(fixtureWs.buildProposal('p-toc-inc')?.validationIssues).toEqual([])
+  })
+
+  it('supports split_chapter, merge_chapters, create_stylesheet, link_stylesheets, and cleanup_unused_resources', () => {
+    const ws = openEmptyWorkspace()
+    const ch1 = 'EPUB/text/ch001.xhtml'
+    expect(
+      ws.executeTool('edit_file', {
+        path: ch1,
+        oldText: '<p>从这里开始写。</p>',
+        newText: '<p>第一部分</p>\n<h2 id="part2">第二部分</h2>\n<p>第二部分正文</p>',
+      }).ok,
+    ).toBe(true)
+
+    // Split by headingLevel 2
+    const splitRes = ws.executeTool('split_chapter', { path: ch1, headingLevel: 2 })
+    expect(splitRes.ok).toBe(true)
+    const created = (splitRes.data as { createdPaths: string[] }).createdPaths
+    expect(created).toEqual(['EPUB/text/ch001_0001.xhtml'])
+
+    // Create a stylesheet and link it to the newly split chapter
+    const cssRes = ws.executeTool('create_stylesheet', {
+      filename: 'custom.css',
+      content: 'h2 { font-weight: 600; }\n',
+      linkToChapters: created,
+    })
+    expect(cssRes.ok).toBe(true)
+    const cssPath = (cssRes.data as { path: string }).path
+    expect(cssPath).toBe('EPUB/styles/custom.css')
+    expect(ws.getText(created[0]!)).toContain('../styles/custom.css')
+
+    // Unlink stylesheet from split chapter so it becomes unused, then clean it up
+    const unlinkRes = ws.executeTool('link_stylesheets', {
+      chapterPaths: created,
+      remove: [cssPath],
+    })
+    expect(unlinkRes.ok).toBe(true)
+    expect(ws.getText(created[0]!)).not.toContain('custom.css')
+
+    const dry = ws.executeTool('cleanup_unused_resources', { dryRun: true })
+    expect(dry.ok).toBe(true)
+    expect((dry.data as { unused: Array<{ path: string }> }).unused.map((u) => u.path)).toContain(cssPath)
+
+    const cleaned = ws.executeTool('cleanup_unused_resources', { paths: [cssPath] })
+    expect(cleaned.ok).toBe(true)
+    expect((cleaned.data as { removedPaths: string[] }).removedPaths).toEqual([cssPath])
+
+    // Merge split chapter back into ch001
+    const merged = ws.executeTool('merge_chapters', { paths: [ch1, created[0]!] })
+    expect(merged.ok).toBe(true)
+    expect(ws.getText(ch1)).toContain('第二部分正文')
+    expect(ws.getText(created[0]!)).toBeUndefined()
+
+    const proposal = ws.buildProposal('p-struct')!
+    expect(proposal.isStructural).toBe(true)
+    expect(proposal.validationIssues).toEqual([])
   })
 })

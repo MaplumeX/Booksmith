@@ -137,6 +137,25 @@ function summarizeArgs(name: AgentToolName, args: Record<string, unknown>): stri
       return `${String(args.path ?? '')} → ${String(args.newFilename ?? '')}`
     case 'delete_file':
       return String(args.path ?? '')
+    case 'split_chapter': {
+      const mode =
+        args.byMarkers === true
+          ? '按拆分标记'
+          : typeof args.headingLevel === 'number'
+            ? `按 h${args.headingLevel}`
+            : typeof args.line === 'number'
+              ? `第 ${args.line} 行`
+              : '按锚文本'
+      return `${String(args.path ?? '')}（${mode}）`
+    }
+    case 'merge_chapters':
+      return `合并 ${Array.isArray(args.paths) ? args.paths.length : 0} 个章节`
+    case 'link_stylesheets':
+      return `为 ${Array.isArray(args.chapterPaths) ? args.chapterPaths.length : 0} 个章节更新样式表`
+    case 'create_stylesheet':
+      return String(args.filename ?? '新建样式表')
+    case 'cleanup_unused_resources':
+      return args.dryRun === true ? '扫描未引用资源' : '清理未引用资源'
   }
 }
 
@@ -176,6 +195,24 @@ function summarizeResult(name: AgentToolName, ok: boolean, data: unknown, error?
       return `已暂存重命名（更新 ${record.referencesRewritten ?? 0} 处引用）`
     case 'delete_file':
       return `已暂存删除 ${String(record.deletedPath ?? '')}`
+    case 'split_chapter': {
+      const created = Array.isArray(record.createdPaths) ? record.createdPaths.length : 0
+      return `已拆出 ${created} 个新章（更新 ${record.referencesRewritten ?? 0} 处引用）`
+    }
+    case 'merge_chapters': {
+      const removed = Array.isArray(record.removedPaths) ? record.removedPaths.length : 0
+      return `已合并 ${removed + 1} 章至 ${String(record.primaryPath ?? '')}`
+    }
+    case 'link_stylesheets': {
+      const changed = Array.isArray(record.changedPaths) ? record.changedPaths.length : 0
+      return `已更新 ${changed} 个章节的样式表`
+    }
+    case 'create_stylesheet':
+      return `已暂存新建 ${String(record.path ?? '')}`
+    case 'cleanup_unused_resources': {
+      const removed = Array.isArray(record.removedPaths) ? record.removedPaths.length : 0
+      return removed > 0 ? `已清理 ${removed} 个未引用资源` : `扫描完成（共 ${Array.isArray(record.unused) ? record.unused.length : 0} 个未引用资源）`
+    }
   }
 }
 
@@ -391,6 +428,57 @@ function buildSdkTools(
         path: z.string().describe('待删除的文件路径'),
       }),
       execute: async (input) => run('delete_file', input),
+    }),
+    split_chapter: tool({
+      description:
+        '按行号、唯一锚文本、Sigil 拆分标记（byMarkers）或标题层级（headingLevel）拆分章节，自动闭合/重开嵌套标签、紧插 spine 并迁移全书与目录的 #id 锚点链接。',
+      inputSchema: z.object({
+        path: z.string().describe('待拆分的章节路径'),
+        line: z.number().int().min(1).optional().describe('按 1-based 行号在该行前拆分'),
+        beforeText: z.string().min(1).optional().describe('按文件内唯一匹配的文本片段前拆分'),
+        byMarkers: z.boolean().optional().describe('按章节中的 <hr class="sigil_split_marker" /> 标记批量拆分'),
+        headingLevel: z.number().int().min(1).max(6).optional().describe('按 h1–h6 标题层级自动拆分为多章'),
+      }),
+      execute: async (input) => run('split_chapter', input),
+    }),
+    merge_chapters: tool({
+      description: '将多个章节按顺序合并至第一个章节，补齐缺失样式表、重写全书与目录引用并从 OPF 移除被合并文件。',
+      inputSchema: z.object({
+        paths: z.array(z.string().min(1)).min(2).describe('按阅读顺序排列的待合并章节路径，首项保留为主章节'),
+      }),
+      execute: async (input) => run('merge_chapters', input),
+    }),
+    link_stylesheets: tool({
+      description: '为一个或多个章节设置、追加或移除 <head> 中的 CSS 样式表 <link> 引用。',
+      inputSchema: z.object({
+        chapterPaths: z.array(z.string().min(1)).min(1).describe('目标章节路径数组'),
+        set: z.array(z.string()).optional().describe('直接设为该样式表路径集合'),
+        add: z.array(z.string()).optional().describe('追加挂载的样式表路径'),
+        remove: z.array(z.string()).optional().describe('取消挂载的样式表路径'),
+      }),
+      execute: async (input) => run('link_stylesheets', input),
+    }),
+    create_stylesheet: tool({
+      description: '新建空白或带初始内容的 CSS 样式表并注册到 OPF manifest，可选同时关联到指定章节。',
+      inputSchema: z.object({
+        filename: z.string().optional().describe('可选文件名，如 custom.css'),
+        content: z.string().optional().describe('可选初始 CSS 内容'),
+        linkToChapters: z.array(z.string()).optional().describe('可选：创建后自动关联到这些章节'),
+      }),
+      execute: async (input) => run('create_stylesheet', input),
+    }),
+    cleanup_unused_resources: tool({
+      description:
+        '扫描或清理未被引用且非封面的图片、字体与未关联样式表；传入 dryRun: true 可仅预览清单不删除。',
+      inputSchema: z.object({
+        paths: z.array(z.string()).optional().describe('仅删除指定的未引用资源路径'),
+        categories: z
+          .array(z.enum(['image', 'font', 'stylesheet']))
+          .optional()
+          .describe('按分类清理（image / font / stylesheet）'),
+        dryRun: z.boolean().optional().describe('true 时仅返回未引用清单不执行删除'),
+      }),
+      execute: async (input) => run('cleanup_unused_resources', input),
     }),
   }
 

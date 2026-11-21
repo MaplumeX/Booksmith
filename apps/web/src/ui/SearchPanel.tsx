@@ -7,6 +7,7 @@ import { Button } from './Button'
 
 interface SearchPanelProps {
   files: SearchFile[]
+  initialQuery?: string
   onOpen: (path: string, line: number, column: number) => void
   onReplace: (plan: ReplacePlan) => void
   onReplaceUndo: () => void
@@ -14,8 +15,8 @@ interface SearchPanelProps {
 
 const DEBOUNCE_MS = 200
 
-export function SearchPanel({ files, onOpen, onReplace, onReplaceUndo }: SearchPanelProps) {
-  const [query, setQuery] = useState('')
+export function SearchPanel({ files, initialQuery = '', onOpen, onReplace, onReplaceUndo }: SearchPanelProps) {
+  const [query, setQuery] = useState(initialQuery)
   const [replacement, setReplacement] = useState('')
   const [regex, setRegex] = useState(false)
   const [caseSensitive, setCaseSensitive] = useState(false)
@@ -23,6 +24,10 @@ export function SearchPanel({ files, onOpen, onReplace, onReplaceUndo }: SearchP
   const [pending, setPending] = useState(false)
   const [confirming, setConfirming] = useState<ReplacePlan | null>(null)
   const [applied, setApplied] = useState<number | null>(null)
+
+  useEffect(() => {
+    if (initialQuery) setQuery(initialQuery)
+  }, [initialQuery])
 
   useEffect(() => {
     if (!query.trim()) {

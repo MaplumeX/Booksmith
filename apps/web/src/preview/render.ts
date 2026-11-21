@@ -182,6 +182,29 @@ blockquote {
   font-size: 12px;
   color: ${muted};
 }
+hr.sigil_split_marker {
+  position: relative;
+  height: 0;
+  margin: 20px 0;
+  border: 0;
+  border-top: 2px dashed ${link};
+  overflow: visible;
+}
+hr.sigil_split_marker::after {
+  content: "✂ 拆分点";
+  position: absolute;
+  top: -10px;
+  right: 8px;
+  padding: 1px 8px;
+  border-radius: 999px;
+  background: ${bg};
+  border: 1px solid ${link};
+  color: ${link};
+  font-family: system-ui, -apple-system, sans-serif;
+  font-size: 11px;
+  font-weight: 500;
+  line-height: 16px;
+}
 `
 }
 
@@ -267,6 +290,29 @@ body img[data-missing="true"] {
 }
 body p:empty::before {
   content: "\\200B";
+}
+body hr.sigil_split_marker {
+  position: relative;
+  height: 0;
+  margin: 20px 0;
+  border: 0;
+  border-top: 2px dashed ${accent};
+  overflow: visible;
+}
+body hr.sigil_split_marker::after {
+  content: "✂ 拆分点";
+  position: absolute;
+  top: -10px;
+  right: 8px;
+  padding: 1px 8px;
+  border-radius: 999px;
+  background: ${paperBg};
+  border: 1px solid ${accent};
+  color: ${accent};
+  font-family: system-ui, -apple-system, sans-serif;
+  font-size: 11px;
+  font-weight: 500;
+  line-height: 16px;
 }
 `
 }

@@ -138,3 +138,164 @@ export function collectBrokenReferences(
 ): BookReference[] {
   return collectReferences(files).filter((reference) => !knownPaths.has(reference.targetPath))
 }
+
+function skipCommentOrCdata(text: string, index: number): number {
+  if (text.startsWith('<!--', index)) {
+    const end = text.indexOf('-->', index + 4)
+    return end >= 0 ? end + 3 : text.length
+  }
+  if (text.startsWith('<![CDATA[', index)) {
+    const end = text.indexOf(']]>', index + 9)
+    return end >= 0 ? end + 3 : text.length
+  }
+  return index
+}
+
+/** Collects every `id` / `name` attribute value declared inside element start tags of an XHTML/XML file. */
+export function collectDocumentIds(xhtml: string): Set<string> {
+  const ids = new Set<string>()
+  const attrPattern = /\b(?:id|name)\s*=\s*(?:"([^"]*)"|'([^']*)')/g
+  let index = 0
+
+  while (index < xhtml.length) {
+    const skipped = skipCommentOrCdata(xhtml, index)
+    if (skipped !== index) {
+      index = skipped
+      continue
+    }
+    if (xhtml[index] !== '<') {
+      index += 1
+      continue
+    }
+    const nextChar = xhtml[index + 1]
+    if (!nextChar || nextChar === '/' || nextChar === '?' || nextChar === '!') {
+      const close = xhtml.indexOf('>', index + 1)
+      index = close >= 0 ? close + 1 : xhtml.length
+      continue
+    }
+
+    // Scan to the end of this start tag while respecting quoted attribute values.
+    let end = index + 1
+    while (end < xhtml.length) {
+      const ch = xhtml[end]
+      if (ch === '"' || ch === "'") {
+        end += 1
+        while (end < xhtml.length && xhtml[end] !== ch) end += 1
+        if (end < xhtml.length) end += 1
+        continue
+      }
+      if (ch === '>') {
+        end += 1
+        break
+      }
+      end += 1
+    }
+
+    const tagText = xhtml.slice(index, end)
+    for (const match of tagText.matchAll(attrPattern)) {
+      const value = (match[1] ?? match[2] ?? '').trim()
+      if (value) ids.add(value)
+    }
+    index = end
+  }
+
+  return ids
+}
+
+export interface WholeFileMove {
+  path: string
+  /** Optional fragment appended when an incoming reference had no fragment of its own. */
+  defaultFragment?: string
+}
+
+export interface AnchorRewriteOptions {
+  /** Maps `sourcePath -> (anchorId -> destinationPath)` for IDs moved during a chapter split. */
+  anchorMoves?: Map<string, Map<string, string>>
+  /** Maps `absorbedPath -> { path, defaultFragment? }` for chapters absorbed during a merge. */
+  wholeFileMoves?: Map<string, WholeFileMove>
+  /** Archive paths to skip completely (e.g. `content.opf`, whose manifest is updated separately). */
+  skipPaths?: Set<string>
+}
+
+function decodeFragmentSafe(fragment: string): string {
+  try {
+    return decodeURIComponent(fragment)
+  } catch {
+    return fragment
+  }
+}
+
+/**
+ * Rewrites book-wide text references when anchors move across chapters (split) or entire chapters
+ * merge into another document. Keeps untouched bytes verbatim so prose files are never reformatted.
+ * See ADR 2026-11-21-chapter-structure-and-resource-tools.
+ */
+export function rewriteAnchorReferences(
+  files: Map<string, string>,
+  options: AnchorRewriteOptions,
+): { files: Map<string, string>; touched: BookReference[] } {
+  const next = new Map(files)
+  const touched: BookReference[] = []
+  const anchorMoves = options.anchorMoves
+  const wholeFileMoves = options.wholeFileMoves
+  const skipPaths = options.skipPaths
+
+  if ((!anchorMoves || anchorMoves.size === 0) && (!wholeFileMoves || wholeFileMoves.size === 0)) {
+    return { files: next, touched }
+  }
+
+  for (const [path, text] of files) {
+    if (skipPaths?.has(path)) continue
+    const edits: Array<{ start: number; end: number; value: string }> = []
+
+    for (const match of rawMatches(path, text)) {
+      const targetPath = targetOf(path, match.raw)
+      if (!targetPath) continue
+      const { fragment } = splitFragment(match.raw)
+
+      let nextPath: string | null = null
+      let nextFragment = fragment
+
+      if (fragment && anchorMoves) {
+        const moveMap = anchorMoves.get(targetPath)
+        const mapped = moveMap?.get(fragment) ?? moveMap?.get(decodeFragmentSafe(fragment))
+        if (mapped && mapped !== targetPath) {
+          nextPath = mapped
+        }
+      }
+
+      if (!nextPath && wholeFileMoves) {
+        const whole = wholeFileMoves.get(targetPath)
+        if (whole) {
+          nextPath = whole.path
+          if (!nextFragment && whole.defaultFragment) {
+            nextFragment = whole.defaultFragment
+          }
+        }
+      }
+
+      if (!nextPath) continue
+
+      const value =
+        nextPath === path && nextFragment
+          ? `#${nextFragment}`
+          : relativePath(dirname(path), nextPath) + (nextFragment ? `#${nextFragment}` : '')
+
+      if (value === match.raw) continue
+
+      const start = match.valueStart
+      edits.push({ start, end: start + match.raw.length, value })
+      touched.push({ from: path, raw: match.raw, offset: start, targetPath, fragment })
+    }
+
+    if (edits.length === 0) continue
+
+    let rewritten = text
+    for (const edit of edits.sort((a, b) => b.start - a.start)) {
+      rewritten = rewritten.slice(0, edit.start) + edit.value + rewritten.slice(edit.end)
+    }
+    next.set(path, rewritten)
+  }
+
+  return { files: next, touched }
+}

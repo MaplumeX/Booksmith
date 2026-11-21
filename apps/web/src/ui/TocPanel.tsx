@@ -23,6 +23,7 @@ import {
   type TocInsertPosition,
   type TocPath,
 } from '@booksmith/core'
+import { formatShortcut } from '../editor/shortcuts'
 import {
   AlertTriangle,
   ArrowDown,
@@ -712,7 +713,7 @@ export function TocPanel({
               type="button"
               className="toc-icon-btn"
               aria-label="撤销目录操作"
-              title="撤销目录操作 (⌘Z)"
+              title={`撤销目录操作 (${formatShortcut('Mod+Z')})`}
               disabled={!canUndo}
               onClick={onUndo}
             >
@@ -722,7 +723,7 @@ export function TocPanel({
               type="button"
               className="toc-icon-btn"
               aria-label="重做目录操作"
-              title="重做目录操作 (⌘⇧Z)"
+              title={`重做目录操作 (${formatShortcut('Mod+Shift+Z')})`}
               disabled={!canRedo}
               onClick={onRedo}
             >

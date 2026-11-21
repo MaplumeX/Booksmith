@@ -441,7 +441,7 @@ test('multi-model provider fetch, approval modes (ask/review/auto), reasoning, c
   await expect(page.getByText('已自动应用到工作区（1 个文件）')).toBeVisible()
   await expect(page.locator('.cm-content')).toContainText('自动模式修正文本')
   expect(lastModelSeen).toBe('mock-pro')
-  expect(lastToolCountSeen).toBe(16)
+  expect(lastToolCountSeen).toBe(21)
 
   // Retry button is disabled on applied proposal turn
   await expect(page.getByRole('button', { name: '重试此回复' })).toBeDisabled()

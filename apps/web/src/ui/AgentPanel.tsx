@@ -111,6 +111,11 @@ const TOOL_LABELS: Record<AgentToolName, string> = {
   create_chapter: '新建章节',
   rename_file: '重命名文件',
   delete_file: '删除文件',
+  split_chapter: '拆分章节',
+  merge_chapters: '合并章节',
+  link_stylesheets: '关联样式表',
+  create_stylesheet: '新建样式表',
+  cleanup_unused_resources: '清理未引用资源',
 }
 
 const STARTER_PROMPTS: Array<{ icon: typeof ShieldCheck; title: string; prompt: string }> = [

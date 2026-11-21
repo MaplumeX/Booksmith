@@ -30,3 +30,18 @@ export function restoreEol(lfText: string, seedText: string): string {
   if (lfText === normalizeEol(seedText)) return seedText
   return applyEol(lfText, detectEol(seedText))
 }
+
+/** Maps a character offset in LF-normalized CodeMirror text back to the exact offset in `sourceText`. */
+export function mapLfOffsetToSource(lfOffset: number, sourceText: string): number {
+  let lfPos = 0
+  let srcPos = 0
+  while (srcPos < sourceText.length && lfPos < lfOffset) {
+    if (sourceText[srcPos] === '\r' && sourceText[srcPos + 1] === '\n') {
+      srcPos += 2
+    } else {
+      srcPos += 1
+    }
+    lfPos += 1
+  }
+  return srcPos
+}

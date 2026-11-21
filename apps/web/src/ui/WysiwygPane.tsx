@@ -3,6 +3,7 @@ import {
   dirname,
   relativePath,
   resolvePath,
+  SPLIT_MARKER_CLASS,
   splitFragment,
   type EpubArchive,
   type EpubPackage,
@@ -18,6 +19,8 @@ import {
   Link2,
   Redo2,
   RemoveFormatting,
+  Scissors,
+  SeparatorHorizontal,
   Subscript,
   Superscript,
   Trash2,
@@ -41,6 +44,7 @@ import {
   type InlineTag,
 } from '../editor/wysiwygDom'
 import { checkXmlWellFormed, replaceBodyInXhtml, serializeEditableBody } from '../editor/wysiwygXhtml'
+import { formatShortcut } from '../editor/shortcuts'
 import { patchDocument, patchHead } from '../preview/patchDocument'
 import {
   buildEditorStyleCss,
@@ -56,7 +60,7 @@ import { basename } from '../state/bookStore'
 import { useResolvedTheme } from '../state/settingsStore'
 import { Button } from './Button'
 
-export type WysiwygShortcut = 'save' | 'close-tab' | 'next-tab' | 'prev-tab' | 'search'
+export type WysiwygShortcut = 'save' | 'close-tab' | 'next-tab' | 'prev-tab' | 'search' | 'command-palette'
 
 export interface WysiwygPaneProps {
   path: string
@@ -71,6 +75,7 @@ export interface WysiwygPaneProps {
   onSwitchToCode: () => void
   onShortcut?: (action: WysiwygShortcut) => void
   onNavigateLink?: (target: { path: string; fragment: string }) => void
+  onSplitAtCursor?: (xhtml: string, offset: number) => void
 }
 
 type SelectionContext =
@@ -149,6 +154,7 @@ export function WysiwygPane({
   onSwitchToCode,
   onShortcut,
   onNavigateLink,
+  onSplitAtCursor,
 }: WysiwygPaneProps) {
   const [xmlError, setXmlError] = useState<string | null>(() => {
     const check = checkXmlWellFormed(content, browserXmlParser)
@@ -195,8 +201,10 @@ export function WysiwygPane({
 
   const onChangeRef = useRef(onChange)
   const onShortcutRef = useRef(onShortcut)
+  const onSplitAtCursorRef = useRef(onSplitAtCursor)
   onChangeRef.current = onChange
   onShortcutRef.current = onShortcut
+  onSplitAtCursorRef.current = onSplitAtCursor
 
   const clearTimers = useCallback(() => {
     if (syncTimer.current !== null) {
@@ -391,6 +399,73 @@ export function WysiwygPane({
     }
   }, [commitDomMutation, restoreRange])
 
+  const handleInsertSplitMarker = useCallback(() => {
+    const doc = frame.current?.contentDocument
+    if (!doc?.body) return
+    const sel = restoreRange(doc)
+    if (!sel || sel.rangeCount === 0) return
+    const range = sel.getRangeAt(0).cloneRange()
+    const island = findIslandAncestor(range.startContainer, doc.body)
+    if (island) {
+      range.setStartBefore(island)
+      range.collapse(true)
+    } else {
+      range.collapse(true)
+    }
+    const marker = doc.createElement('hr')
+    marker.setAttribute('class', SPLIT_MARKER_CLASS)
+    range.insertNode(marker)
+    const after = doc.createRange()
+    after.setStartAfter(marker)
+    after.collapse(true)
+    sel.removeAllRanges()
+    sel.addRange(after)
+    commitDomMutation(doc)
+  }, [commitDomMutation, restoreRange])
+
+  const handleSplitAtCursor = useCallback(() => {
+    if (!onSplitAtCursorRef.current) return
+    const doc = frame.current?.contentDocument
+    if (!doc?.body) return
+    const sel = restoreRange(doc)
+    if (!sel || sel.rangeCount === 0) return
+
+    const range = sel.getRangeAt(0).cloneRange()
+    const island = findIslandAncestor(range.startContainer, doc.body)
+    if (island) {
+      range.setStartBefore(island)
+      range.collapse(true)
+    } else {
+      range.collapse(true)
+    }
+
+    // Insert a temporary sentinel so WYSIWYG shares the exact `@booksmith/core` XML split engine.
+    // See ADR 2026-11-21-chapter-structure-and-resource-tools.
+    const sentinelClass = 'booksmith-cursor-split-sentinel'
+    const sentinel = doc.createElement('hr')
+    sentinel.setAttribute('class', sentinelClass)
+    range.insertNode(sentinel)
+
+    const session = liveSession.current
+    const serializedBody = serializeEditableBody(doc.body, session.xhtml, session.islands)
+    const withSentinel = replaceBodyInXhtml(session.xhtml, serializedBody)
+    sentinel.remove()
+
+    const sentinelTag = `<hr class="${sentinelClass}" />`
+    const offset = withSentinel.indexOf(sentinelTag)
+    if (offset < 0) return
+    const cleanXhtml = withSentinel.slice(0, offset) + withSentinel.slice(offset + sentinelTag.length)
+
+    // Sync any pending visual edits before delegating the split to the workspace handler.
+    if (hasPendingEdit.current && cleanXhtml !== session.xhtml) {
+      hasPendingEdit.current = false
+      session.xhtml = cleanXhtml
+      lastSyncedXhtml.current = cleanXhtml
+      onChangeRef.current(cleanXhtml)
+    }
+    onSplitAtCursorRef.current(cleanXhtml, offset)
+  }, [restoreRange])
+
   const frameListenersCleanup = useRef<(() => void) | null>(null)
 
   const isDocReady = useCallback((): boolean => {
@@ -482,6 +557,11 @@ export function WysiwygPane({
             onShortcutRef.current?.('search')
             return
           }
+          if (key === 'k' && !event.shiftKey) {
+            event.preventDefault()
+            onShortcutRef.current?.('command-palette')
+            return
+          }
           if (key === 'b' && !event.shiftKey) {
             event.preventDefault()
             applyInline('strong')
@@ -501,6 +581,12 @@ export function WysiwygPane({
           if (key === 'y' && event.ctrlKey && !event.metaKey) {
             event.preventDefault()
             redo()
+            return
+          }
+          if (event.key === 'Enter') {
+            event.preventDefault()
+            if (event.shiftKey) handleInsertSplitMarker()
+            else handleSplitAtCursor()
             return
           }
         }
@@ -536,6 +622,8 @@ export function WysiwygPane({
       applyInline,
       commitDomMutation,
       emitNow,
+      handleInsertSplitMarker,
+      handleSplitAtCursor,
       redo,
       refreshToolbar,
       scheduleSync,
@@ -969,7 +1057,7 @@ export function WysiwygPane({
           className={`wysiwyg-tool${toolbar.strong ? ' on' : ''}`}
           aria-pressed={toolbar.strong}
           aria-label="加粗"
-          title="加粗 (⌘B)"
+          title={`加粗 (${formatShortcut('Mod+B')})`}
           onClick={() => applyInline('strong')}
         >
           <Bold size={14} strokeWidth={1.85} aria-hidden="true" />
@@ -979,7 +1067,7 @@ export function WysiwygPane({
           className={`wysiwyg-tool${toolbar.em ? ' on' : ''}`}
           aria-pressed={toolbar.em}
           aria-label="斜体"
-          title="斜体 (⌘I)"
+          title={`斜体 (${formatShortcut('Mod+I')})`}
           onClick={() => applyInline('em')}
         >
           <Italic size={14} strokeWidth={1.85} aria-hidden="true" />
@@ -1047,6 +1135,30 @@ export function WysiwygPane({
           <ImagePlus size={14} strokeWidth={1.75} aria-hidden="true" />
         </button>
 
+        {onSplitAtCursor ? (
+          <>
+            <span className="wysiwyg-sep" aria-hidden="true" />
+            <button
+              type="button"
+              className="wysiwyg-tool"
+              aria-label="在光标处拆分章节"
+              title={`在光标处拆分章节 (${formatShortcut('Mod+Enter')})`}
+              onClick={handleSplitAtCursor}
+            >
+              <Scissors size={14} strokeWidth={1.75} aria-hidden="true" />
+            </button>
+            <button
+              type="button"
+              className="wysiwyg-tool"
+              aria-label="插入拆分标记"
+              title={`插入拆分标记 (${formatShortcut('Mod+Shift+Enter')})`}
+              onClick={handleInsertSplitMarker}
+            >
+              <SeparatorHorizontal size={14} strokeWidth={1.75} aria-hidden="true" />
+            </button>
+          </>
+        ) : null}
+
         <span className="wysiwyg-sep" aria-hidden="true" />
 
         <button
@@ -1054,7 +1166,7 @@ export function WysiwygPane({
           className="wysiwyg-tool"
           disabled={!canUndo}
           aria-label="撤销"
-          title="撤销 (⌘Z)"
+          title={`撤销 (${formatShortcut('Mod+Z')})`}
           onClick={undo}
         >
           <Undo2 size={14} strokeWidth={1.75} aria-hidden="true" />
@@ -1064,7 +1176,7 @@ export function WysiwygPane({
           className="wysiwyg-tool"
           disabled={!canRedo}
           aria-label="重做"
-          title="重做 (⌘⇧Z)"
+          title={`重做 (${formatShortcut('Mod+Shift+Z')})`}
           onClick={redo}
         >
           <Redo2 size={14} strokeWidth={1.75} aria-hidden="true" />

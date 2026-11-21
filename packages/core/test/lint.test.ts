@@ -137,4 +137,21 @@ describe('lintBook', () => {
 
     expect(lintBook(fixture.files, fixture.pkg, fixture.archive, codec)).toEqual([])
   })
+
+  it('warns when a chapter still contains an unsplit sigil_split_marker', () => {
+    const fixture = open()
+    const chapter = 'EPUB/text/ch001.xhtml'
+    fixture.files.set(
+      chapter,
+      (fixture.files.get(chapter) ?? '').replace(
+        '<p>从这里开始写。</p>',
+        '<p>前</p>\n<hr class="sigil_split_marker" />\n<p>后</p>',
+      ),
+    )
+
+    const issues = lintBook(fixture.files, fixture.pkg, fixture.archive, codec)
+    expect(codes(issues)).toEqual(['pending-split-marker'])
+    expect(issues[0]?.path).toBe(chapter)
+    expect(issues[0]?.line).toBeGreaterThan(1)
+  })
 })

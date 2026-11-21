@@ -1,6 +1,12 @@
 import { describe, expect, it } from 'vitest'
 import { relativePath, resolvePath } from '../src/path'
-import { collectBrokenReferences, collectReferences, rewriteReferences } from '../src/references'
+import {
+  collectBrokenReferences,
+  collectDocumentIds,
+  collectReferences,
+  rewriteAnchorReferences,
+  rewriteReferences,
+} from '../src/references'
 
 function book(files: Record<string, string>): Map<string, string> {
   return new Map(Object.entries(files))
@@ -146,5 +152,58 @@ describe('collectBrokenReferences', () => {
       new Set(['EPUB/text/ch001.xhtml', 'EPUB/images/here.png']),
     )
     expect(broken.map((ref) => ref.raw)).toEqual(['../images/missing.png'])
+  })
+})
+
+describe('collectDocumentIds', () => {
+  it('collects id and name attributes from start tags while ignoring comments and prose text', () => {
+    const xhtml = `<body>
+      <!-- <h2 id="commented">ignored</h2> -->
+      <section id="sec1"><a name="fn1">note</a><p>text id="not-an-attr"</p></section>
+      <p id='sec2'>more</p>
+    </body>`
+    expect([...collectDocumentIds(xhtml)].sort()).toEqual(['fn1', 'sec1', 'sec2'])
+  })
+})
+
+describe('rewriteAnchorReferences', () => {
+  it('rewrites external, TOC, and same-file fragment links when an anchor moves on split', () => {
+    const files = book({
+      'EPUB/nav.xhtml': '<a href="text/ch001.xhtml#keep">A</a><a href="text/ch001.xhtml#moved">B</a>',
+      'EPUB/text/ch001.xhtml': '<a href="#moved">jump</a><a href="#keep">stay</a>',
+      'EPUB/text/ch001_0001.xhtml': '<a href="#keep">back</a><a href="ch001.xhtml#moved">self</a>',
+      'EPUB/text/ch002.xhtml': '<a href="ch001.xhtml#moved">ext</a>',
+    })
+
+    const anchorMoves = new Map([
+      ['EPUB/text/ch001.xhtml', new Map([['moved', 'EPUB/text/ch001_0001.xhtml']])],
+      ['EPUB/text/ch001_0001.xhtml', new Map([['keep', 'EPUB/text/ch001.xhtml']])],
+    ])
+
+    const { files: next, touched } = rewriteAnchorReferences(files, { anchorMoves })
+    expect(next.get('EPUB/nav.xhtml')).toBe(
+      '<a href="text/ch001.xhtml#keep">A</a><a href="text/ch001_0001.xhtml#moved">B</a>',
+    )
+    expect(next.get('EPUB/text/ch001.xhtml')).toBe('<a href="ch001_0001.xhtml#moved">jump</a><a href="#keep">stay</a>')
+    expect(next.get('EPUB/text/ch001_0001.xhtml')).toBe('<a href="ch001.xhtml#keep">back</a><a href="#moved">self</a>')
+    expect(next.get('EPUB/text/ch002.xhtml')).toBe('<a href="ch001_0001.xhtml#moved">ext</a>')
+    expect(touched).toHaveLength(5)
+  })
+
+  it('rewrites whole-file links on merge and appends defaultFragment only for bare links', () => {
+    const files = book({
+      'EPUB/nav.xhtml': '<a href="text/ch002.xhtml">Ch2</a><a href="text/ch002.xhtml#sub">Sub</a>',
+      'EPUB/text/ch001.xhtml': '<a href="ch002.xhtml">next</a><a href="ch002.xhtml#sub">sub</a>',
+    })
+
+    const wholeFileMoves = new Map([
+      ['EPUB/text/ch002.xhtml', { path: 'EPUB/text/ch001.xhtml', defaultFragment: 'merge_ch002' }],
+    ])
+
+    const { files: next } = rewriteAnchorReferences(files, { wholeFileMoves })
+    expect(next.get('EPUB/nav.xhtml')).toBe(
+      '<a href="text/ch001.xhtml#merge_ch002">Ch2</a><a href="text/ch001.xhtml#sub">Sub</a>',
+    )
+    expect(next.get('EPUB/text/ch001.xhtml')).toBe('<a href="#merge_ch002">next</a><a href="#sub">sub</a>')
   })
 })

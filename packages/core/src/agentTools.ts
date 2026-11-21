@@ -1,3 +1,9 @@
+import { mergeChaptersInBook } from './chapterMerge'
+import {
+  splitChapterAtMarkersInBook,
+  splitChapterByHeadingLevelInBook,
+  splitChapterInBook,
+} from './chapterSplit'
 import { lintBook } from './lint'
 import { readNavToc, writeNavToc } from './nav'
 import { readNcxToc, writeNcxToc } from './ncx'
@@ -13,6 +19,13 @@ import {
 import { dirname, relativePath, resolvePath, splitFragment } from './path'
 import { collectReferences, rewriteReferences } from './references'
 import { searchBook, type SearchFile } from './search'
+import {
+  createBlankStylesheet,
+  deleteUnusedResourcesInBook,
+  findUnusedResources,
+  updateChaptersStylesheets,
+  type UnusedResourceCategory,
+} from './stylesheets'
 import { isTextEntry } from './text'
 import {
   countTocEntries,
@@ -65,6 +78,11 @@ export type AgentToolName =
   | 'create_chapter'
   | 'rename_file'
   | 'delete_file'
+  | 'split_chapter'
+  | 'merge_chapters'
+  | 'link_stylesheets'
+  | 'create_stylesheet'
+  | 'cleanup_unused_resources'
 
 export const AGENT_READ_ONLY_TOOL_NAMES: readonly AgentToolName[] = [
   'list_files',
@@ -95,6 +113,11 @@ export const AGENT_TOOL_NAMES: readonly AgentToolName[] = [
   'create_chapter',
   'rename_file',
   'delete_file',
+  'split_chapter',
+  'merge_chapters',
+  'link_stylesheets',
+  'create_stylesheet',
+  'cleanup_unused_resources',
 ] as const
 
 export interface AgentWorkspaceOverlay {
@@ -451,6 +474,16 @@ export class AgentWorkspace {
         return this.toolRenameFile(args)
       case 'delete_file':
         return this.toolDeleteFile(args)
+      case 'split_chapter':
+        return this.toolSplitChapter(args)
+      case 'merge_chapters':
+        return this.toolMergeChapters(args)
+      case 'link_stylesheets':
+        return this.toolLinkStylesheets(args)
+      case 'create_stylesheet':
+        return this.toolCreateStylesheet(args)
+      case 'cleanup_unused_resources':
+        return this.toolCleanupUnusedResources(args)
     }
   }
 
@@ -1291,6 +1324,267 @@ export class AgentWorkspace {
       data: {
         deletedPath: path,
         brokenReferencesCreated: affected,
+      },
+    }
+  }
+
+  private applyWorkspaceResult(nextFiles: Map<string, string>, nextArchive: EpubArchive, nextPkg: EpubPackage): void {
+    const opfPath = nextPkg.opfPath
+    const opfXml = nextFiles.get(opfPath)
+    if (opfXml) {
+      const touchedOpf = touchOpfModified(opfXml, isoModified(this.nowFn()), this.codec)
+      nextFiles.set(opfPath, touchedOpf)
+      nextArchive.entries.set(opfPath, encoder.encode(touchedOpf))
+      nextPkg = parsePackage(touchedOpf, opfPath, this.codec.parse)
+    }
+    this.texts = nextFiles
+    this.archive = nextArchive
+    this.pkg = nextPkg
+    this.structuralTouched = true
+  }
+
+  private toolSplitChapter(args: Record<string, unknown>): AgentToolResult {
+    const path = typeof args.path === 'string' ? args.path.trim() : ''
+    if (!path) return { ok: false, error: 'path is required' }
+    const text = this.texts.get(path)
+    if (text === undefined) return { ok: false, error: `chapter not found: ${path}` }
+
+    try {
+      let result
+      if (args.byMarkers === true) {
+        result = splitChapterAtMarkersInBook({
+          files: this.texts,
+          pkg: this.pkg,
+          archive: this.archive,
+          path,
+          codec: this.codec,
+        })
+      } else if (typeof args.headingLevel === 'number') {
+        result = splitChapterByHeadingLevelInBook({
+          files: this.texts,
+          pkg: this.pkg,
+          archive: this.archive,
+          path,
+          level: Math.floor(args.headingLevel),
+          codec: this.codec,
+        })
+      } else {
+        let offset = -1
+        if (typeof args.beforeText === 'string' && args.beforeText.length > 0) {
+          const first = text.indexOf(args.beforeText)
+          if (first < 0) return { ok: false, error: `beforeText not found in ${path}` }
+          if (text.indexOf(args.beforeText, first + 1) >= 0) {
+            return { ok: false, error: `beforeText matched multiple times in ${path}; provide more context` }
+          }
+          offset = first
+        } else if (typeof args.line === 'number' && Number.isInteger(args.line) && args.line >= 1) {
+          const lines = text.split('\n')
+          if (args.line > lines.length) {
+            return { ok: false, error: `line ${args.line} exceeds file length (${lines.length})` }
+          }
+          let acc = 0
+          for (let i = 0; i < args.line - 1; i += 1) acc += (lines[i]?.length ?? 0) + 1
+          offset = acc
+        } else {
+          return { ok: false, error: 'provide one of: line, beforeText, byMarkers: true, or headingLevel (1-6)' }
+        }
+        result = splitChapterInBook({
+          files: this.texts,
+          pkg: this.pkg,
+          archive: this.archive,
+          path,
+          offset,
+          codec: this.codec,
+        })
+      }
+
+      this.applyWorkspaceResult(result.files, result.archive, result.pkg)
+      return {
+        ok: true,
+        data: {
+          sourcePath: result.sourcePath,
+          createdPaths: result.createdPaths,
+          referencesRewritten: result.referencesRewritten,
+        },
+      }
+    } catch (error) {
+      return { ok: false, error: error instanceof Error ? error.message : String(error) }
+    }
+  }
+
+  private toolMergeChapters(args: Record<string, unknown>): AgentToolResult {
+    const rawPaths = Array.isArray(args.paths)
+      ? args.paths.filter((p): p is string => typeof p === 'string' && p.trim().length > 0).map((p) => p.trim())
+      : []
+    if (rawPaths.length < 2) {
+      return { ok: false, error: 'paths must contain at least 2 chapter paths' }
+    }
+    for (const p of rawPaths) {
+      if (isProtectedPath(p) || p === this.pkg.opfPath || p === this.pkg.navPath) {
+        return { ok: false, error: `cannot merge protected or navigation file: ${p}` }
+      }
+    }
+
+    try {
+      const result = mergeChaptersInBook({
+        files: this.texts,
+        pkg: this.pkg,
+        archive: this.archive,
+        paths: rawPaths,
+        codec: this.codec,
+      })
+      for (const removed of result.removedPaths) {
+        this.originByCurrent.delete(removed)
+      }
+      this.applyWorkspaceResult(result.files, result.archive, result.pkg)
+      return {
+        ok: true,
+        data: {
+          primaryPath: result.primaryPath,
+          removedPaths: result.removedPaths,
+          referencesRewritten: result.referencesRewritten,
+        },
+      }
+    } catch (error) {
+      return { ok: false, error: error instanceof Error ? error.message : String(error) }
+    }
+  }
+
+  private toolLinkStylesheets(args: Record<string, unknown>): AgentToolResult {
+    const chapterPaths = Array.isArray(args.chapterPaths)
+      ? args.chapterPaths.filter((p): p is string => typeof p === 'string' && p.trim().length > 0).map((p) => p.trim())
+      : []
+    if (chapterPaths.length === 0) return { ok: false, error: 'chapterPaths must be a non-empty array' }
+
+    const toArray = (v: unknown) =>
+      Array.isArray(v)
+        ? v.filter((p): p is string => typeof p === 'string' && p.trim().length > 0).map((p) => p.trim())
+        : undefined
+    const set = toArray(args.set)
+    const add = toArray(args.add)
+    const remove = toArray(args.remove)
+    if (!set && !add && !remove) {
+      return { ok: false, error: 'provide set, add, or remove stylesheet paths' }
+    }
+
+    for (const cssPath of [...(set ?? []), ...(add ?? [])]) {
+      if (!this.archive.entries.has(cssPath)) {
+        return { ok: false, error: `stylesheet not found in archive: ${cssPath}` }
+      }
+    }
+    for (const chPath of chapterPaths) {
+      if (!this.texts.has(chPath)) {
+        return { ok: false, error: `chapter not found: ${chPath}` }
+      }
+    }
+
+    const updated = updateChaptersStylesheets(this.texts, chapterPaths, { set, add, remove })
+    for (const changed of updated.changedPaths) {
+      const nextText = updated.files.get(changed)
+      if (nextText !== undefined) this.setTextEntry(changed, nextText)
+    }
+
+    return {
+      ok: true,
+      data: {
+        changedPaths: updated.changedPaths,
+        chapterCount: chapterPaths.length,
+      },
+    }
+  }
+
+  private toolCreateStylesheet(args: Record<string, unknown>): AgentToolResult {
+    const filename = typeof args.filename === 'string' ? args.filename.trim() : undefined
+    const content = typeof args.content === 'string' ? args.content : undefined
+    const linkToChapters = Array.isArray(args.linkToChapters)
+      ? args.linkToChapters.filter((p): p is string => typeof p === 'string' && p.trim().length > 0).map((p) => p.trim())
+      : []
+
+    try {
+      const created = createBlankStylesheet({
+        files: this.texts,
+        pkg: this.pkg,
+        archive: this.archive,
+        filename,
+        content,
+        codec: this.codec,
+      })
+      let nextFiles = created.files
+      let linkedChapters: string[] = []
+      if (linkToChapters.length > 0) {
+        const linked = updateChaptersStylesheets(nextFiles, linkToChapters, { add: [created.createdPath] })
+        nextFiles = linked.files
+        linkedChapters = linked.changedPaths
+        for (const ch of linkedChapters) {
+          const val = nextFiles.get(ch)
+          if (val !== undefined) created.archive.entries.set(ch, encoder.encode(val))
+        }
+      }
+      this.applyWorkspaceResult(nextFiles, created.archive, created.pkg)
+      return {
+        ok: true,
+        data: {
+          path: created.createdPath,
+          linkedChapters,
+        },
+      }
+    } catch (error) {
+      return { ok: false, error: error instanceof Error ? error.message : String(error) }
+    }
+  }
+
+  private toolCleanupUnusedResources(args: Record<string, unknown>): AgentToolResult {
+    const unused = findUnusedResources(this.texts, this.pkg, this.archive)
+    if (args.dryRun === true) {
+      return { ok: true, data: { unused, removedPaths: [] } }
+    }
+
+    const unusedSet = new Set(unused.map((item) => item.path))
+    let targets: string[]
+    if (Array.isArray(args.paths) && args.paths.length > 0) {
+      const requested = args.paths
+        .filter((p): p is string => typeof p === 'string' && p.trim().length > 0)
+        .map((p) => p.trim())
+      const notUnused = requested.filter((p) => !unusedSet.has(p))
+      if (notUnused.length > 0) {
+        return {
+          ok: false,
+          error: `refused to delete referenced or protected resource(s): ${notUnused.join(', ')}`,
+        }
+      }
+      targets = requested
+    } else {
+      const allowedCategories = new Set<UnusedResourceCategory>(
+        Array.isArray(args.categories) && args.categories.length > 0
+          ? args.categories.filter(
+              (c): c is UnusedResourceCategory => c === 'image' || c === 'font' || c === 'stylesheet',
+            )
+          : ['image', 'font', 'stylesheet'],
+      )
+      targets = unused.filter((item) => allowedCategories.has(item.category)).map((item) => item.path)
+    }
+
+    if (targets.length === 0) {
+      return { ok: true, data: { removedPaths: [], remainingUnusedCount: unused.length } }
+    }
+
+    const cleaned = deleteUnusedResourcesInBook({
+      files: this.texts,
+      pkg: this.pkg,
+      archive: this.archive,
+      paths: targets,
+      codec: this.codec,
+    })
+    for (const removed of cleaned.removedPaths) {
+      this.originByCurrent.delete(removed)
+    }
+    this.applyWorkspaceResult(cleaned.files, cleaned.archive, cleaned.pkg)
+    const remaining = findUnusedResources(this.texts, this.pkg, this.archive)
+    return {
+      ok: true,
+      data: {
+        removedPaths: cleaned.removedPaths,
+        remainingUnusedCount: remaining.length,
       },
     }
   }

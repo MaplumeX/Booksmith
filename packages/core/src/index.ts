@@ -35,14 +35,56 @@ export {
 export type { ManifestItemDraft, MetadataDraft, OpfMetaRow } from './opfWrite'
 export {
   addSpineDocument,
+  insertSpineDocumentsAfter,
   removeManifestEntry,
   renameManifestEntry,
   reorderSpine,
   setManifestMediaType,
   setSpineToc,
 } from './opfEdit'
-export { collectBrokenReferences, collectReferences, rewriteReferences } from './references'
-export type { BookReference } from './references'
+export {
+  collectBrokenReferences,
+  collectDocumentIds,
+  collectReferences,
+  rewriteAnchorReferences,
+  rewriteReferences,
+} from './references'
+export type { AnchorRewriteOptions, BookReference, WholeFileMove } from './references'
+export {
+  SPLIT_MARKER_CLASS,
+  SPLIT_MARKER_HTML,
+  countSplitMarkers,
+  detectDominantEol,
+  extractBodyBounds,
+  findSplitMarkerLines,
+  nextSplitChapterPath,
+  splitChapterAtMarkersInBook,
+  splitChapterByHeadingLevelInBook,
+  splitChapterInBook,
+  splitXhtmlAtMarkers,
+  splitXhtmlAtOffset,
+  splitXhtmlByHeadingLevel,
+} from './chapterSplit'
+export type { BodyBounds, SplitChapterResult } from './chapterSplit'
+export { duplicateChapterInBook, mergeChaptersInBook } from './chapterMerge'
+export type { DuplicateChapterResult, MergeChaptersResult } from './chapterMerge'
+export {
+  createBlankStylesheet,
+  deleteUnusedResourcesInBook,
+  findUnusedResources,
+  getLinkedStylesheets,
+  listBookStylesheets,
+  setChapterStylesheets,
+  updateChaptersStylesheets,
+} from './stylesheets'
+export type {
+  CreateStylesheetResult,
+  DeleteUnusedResourcesResult,
+  UnusedResource,
+  UnusedResourceCategory,
+  UpdateChaptersStylesheetsOptions,
+} from './stylesheets'
+export { formatCss, formatXhtml } from './formatCode'
 export { createEmptyEpub } from './create'
 export type { NewBookOptions } from './create'
 export {
