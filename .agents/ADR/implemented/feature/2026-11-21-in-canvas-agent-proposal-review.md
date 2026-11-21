@@ -64,3 +64,4 @@ Status: implemented
 - **未提交 Hunk 草稿仅限当前会话内存**：刷新页面或重新加载书籍后未应用的跳过选择不跨刷新保留，有意避免引入额外的本地存储同步状态。
 - **审批闭环与累计草稿协同（2026-11-21）**：[continuous multi-turn Agent sessions](2026-11-21-agent-session-continuity.md) 在完整保留本记录主画布三态审阅与逐 Hunk 审批的基础上，补齐了部分跳过 Hunk 摘要与 `reverted` 撤销状态回流、以及未过时待审阅提案自动承接与 `superseded` 卡片态。
 - **实时流式审阅与三态逐处审批演进（2026-11-22）**：本文档中「回合落定后才进入主画布审阅」「二态跳过开关」与「顶栏应用/放弃操作位」条款已由 [real-time streaming Agent review with Cursor-style 3-state hunk approval](2026-11-22-live-streaming-agent-review.md) 部分替代，升级为写工具成功即实时增量流式切入、内容指纹防漂移、智能自动跟随、三态 `保留 / 拒绝`（接受即视觉收起）与底部紧凑审阅推进条；仿真书页三态视角、保护岛对照、CSS 对比、XML 校验、过时提醒与零污染隔离约束均保持有效。
+- **章节跨行 Hunk 归并与分层结构修订演进（2026-11-22）**：本文档中「复杂嵌套/跨行标签回退为通用对照块或跳转徽标」条款已由 [contiguous blockquote rendering and structure-aware book-page revision preview](2026-11-22-contiguous-quote-and-structural-revision-preview.md) 局部演进，新增 40 行跨度护栏内的章节结构感知 Hunk 归并、容器递归原位修订、行内格式原位高亮、语义化结构对照与块内就地展开微型源码 Diff；超跨度跨行标签仍保留拆分并继续受本文档 XML 良构校验保护。

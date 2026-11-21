@@ -47,7 +47,8 @@ let mode:
   | 'continuity-t2'
   | 'continuity-t3'
   | 'live-stream'
-  | 'live-soft-stop' = 'proofread'
+  | 'live-soft-stop'
+  | 'quote-review' = 'proofread'
 let turnStep = 0
 let releaseSecondReasoning: (() => void) | null = null
 let secondReasoningFlushed: (() => void) | null = null
@@ -475,6 +476,81 @@ test.beforeAll(async () => {
               {
                 index: 0,
                 delta: { role: 'assistant', content: `已通过 ${lastModelSeen} 重试成功。` },
+                finish_reason: 'stop',
+              },
+            ],
+          },
+        ])
+        return
+      }
+
+      if (mode === 'quote-review') {
+        turnStep += 1
+        if (turnStep === 1) {
+          writeOpenAiSse(res, [
+            {
+              id: 'qr-1',
+              object: 'chat.completion.chunk',
+              created: 1,
+              model: lastModelSeen || 'mock-fast',
+              choices: [
+                {
+                  index: 0,
+                  delta: {
+                    role: 'assistant',
+                    tool_calls: [
+                      {
+                        index: 0,
+                        id: 'call_qr_wrap',
+                        type: 'function',
+                        function: {
+                          name: 'edit_file',
+                          arguments: JSON.stringify({
+                            path: 'EPUB/text/ch001.xhtml',
+                            oldText: '<p>待包裹引文一</p>\n<p>待包裹引文二</p>',
+                            newText: '<blockquote>\n<p>待包裹引文一</p>\n<p>待包裹引文二</p>\n</blockquote>',
+                          }),
+                        },
+                      },
+                      {
+                        index: 1,
+                        id: 'call_qr_typo',
+                        type: 'function',
+                        function: {
+                          name: 'edit_file',
+                          arguments: JSON.stringify({
+                            path: 'EPUB/text/ch001.xhtml',
+                            oldText: '<blockquote><p>已有引文错字示例</p></blockquote>',
+                            newText: '<blockquote><p>已有引文正字示例</p></blockquote>',
+                          }),
+                        },
+                      },
+                    ],
+                  },
+                  finish_reason: null,
+                },
+              ],
+            },
+            {
+              id: 'qr-1',
+              object: 'chat.completion.chunk',
+              created: 1,
+              model: lastModelSeen || 'mock-fast',
+              choices: [{ index: 0, delta: {}, finish_reason: 'tool_calls' }],
+            },
+          ])
+          return
+        }
+        writeOpenAiSse(res, [
+          {
+            id: 'qr-2',
+            object: 'chat.completion.chunk',
+            created: 1,
+            model: lastModelSeen || 'mock-fast',
+            choices: [
+              {
+                index: 0,
+                delta: { role: 'assistant', content: '已将两段引文包裹为引用块，并修正已有引用中的错字。' },
                 finish_reason: 'stop',
               },
             ],
@@ -1497,4 +1573,80 @@ test('real-time streaming review: live tool updates, fingerprint-preserved pre-d
   await expect(reviewPane).toBeHidden()
   await page.getByRole('button', { name: 'ch001.xhtml', exact: true }).click()
   await expect(page.locator('.cm-content')).toContainText('停止前已完成的修改')
+})
+
+test('structure-aware quote review coalesces wrappers, renders inline quote typo diff, and toggles mini source diff', async ({
+  page,
+}) => {
+  const bookId = await seedBook()
+  await resetAgentState()
+
+  await login(page)
+  await expectLoggedIn(page)
+  await page.goto(`/books/${bookId}`)
+  await page.waitForSelector('.cm-content')
+
+  await page.getByRole('button', { name: '助手' }).click()
+  await page.getByRole('button', { name: '配置模型预设' }).click()
+  const dialog = page.getByRole('dialog', { name: '应用设置' })
+  await dialog.getByLabel('预设名称').fill('引用审阅测试')
+  await dialog.getByLabel('Base URL').fill(`${mockUrl}/v1`)
+  await dialog.getByLabel('模型名称').fill('mock-fast')
+  await dialog.getByRole('button', { name: '添加预设' }).click()
+  await expect(dialog.getByText('预设已保存')).toBeVisible()
+  await dialog.getByRole('button', { name: '关闭', exact: true }).click()
+
+  await page.getByRole('button', { name: 'ch001.xhtml', exact: true }).click()
+  const chapterXhtml = [
+    '<?xml version="1.0" encoding="UTF-8"?>',
+    '<!DOCTYPE html>',
+    '<html xmlns="http://www.w3.org/1999/xhtml">',
+    '<head><title>第一章</title><link rel="stylesheet" type="text/css" href="../styles/stylesheet1.css" /></head>',
+    '<body>',
+    '<p>待包裹引文一</p>',
+    '<p>待包裹引文二</p>',
+    '<p>正文分隔段落</p>',
+    '<blockquote><p>已有引文错字示例</p></blockquote>',
+    '</body>',
+    '</html>',
+  ].join('\n')
+  await page.locator('.cm-content').click()
+  await page.keyboard.press('Control+a')
+  await page.keyboard.insertText(chapterXhtml)
+  await expect(page.locator('.cm-content')).toContainText('已有引文错字示例')
+
+  mode = 'quote-review'
+  turnStep = 0
+  await page.getByLabel('向助手输入指令').fill('整理引文并修正已有引文中的错字')
+  await page.getByRole('button', { name: '发送' }).click()
+
+  const reviewPane = page.locator('.review-pane')
+  await expect(reviewPane).toBeVisible()
+  await expect(page.getByText('已将两段引文包裹为引用块，并修正已有引用中的错字。')).toBeVisible()
+
+  // Coalesced blockquote wrapper + nested quote typo produce exactly 2 hunks (not 3 unbalanced hunks).
+  await expect(reviewPane.locator('.review-nav-counter')).toHaveText(/\/2$/)
+  const frame = reviewPane.frameLocator('.review-book-frame')
+  await expect(frame.locator('[data-bs-hunk="hunk-0"]')).toContainText('包裹为引用 (p×2 → blockquote)')
+  await expect(frame.locator('[data-bs-hunk="hunk-0"]')).toContainText('文字未变 · 仅结构/标签调整')
+  await expect(frame.locator('body')).not.toContainText('跨行标签变更')
+  await expect(frame.locator('body')).not.toContainText('段落结构变更')
+
+  // Expand inline mini-source diff right inside hunk-0 without leaving the book page.
+  await frame.locator('[data-bs-action="toggle-diff"][data-bs-target-hunk="hunk-0"]').click()
+  await expect(frame.locator('[data-bs-minidiff="hunk-0"]')).toContainText('<blockquote>')
+  await frame.locator('[data-bs-action="toggle-diff"][data-bs-target-hunk="hunk-0"]').click()
+  await expect(frame.locator('[data-bs-minidiff="hunk-0"]')).toHaveCount(0)
+
+  // Nested blockquote typo renders in-place red/green char diff inside the real blockquote!
+  await expect(frame.locator('[data-bs-hunk="hunk-1"] .bs-rev-del')).toHaveText('错')
+  await expect(frame.locator('[data-bs-hunk="hunk-1"] .bs-rev-ins')).toHaveText('正')
+
+  // Rejecting the coalesced wrapper hunk alone produces valid XML (no XML validation error!) and applies the typo fix cleanly.
+  await frame.locator('[data-bs-action="reject-hunk"][data-bs-target-hunk="hunk-0"]').click()
+  await expect(reviewPane.getByRole('button', { name: '应用已选（1/2 处）' })).toBeEnabled()
+  await reviewPane.getByRole('button', { name: '应用已选（1/2 处）' }).click()
+  await expect(reviewPane).toBeHidden()
+  await expect(page.locator('.cm-content')).toContainText('已有引文正字示例')
+  await expect(page.locator('.cm-content')).not.toContainText('<blockquote>\n<p>待包裹引文一</p>')
 })

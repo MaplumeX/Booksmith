@@ -26,6 +26,223 @@ import { extensionOf, type LoadedBook } from './bookStore'
 
 const encoder = new TextEncoder()
 
+/** Maximum intervening unchanged lines absorbed when pairing unbalanced open/close chapter tags.
+ * Exceeding this cap keeps chapter-wide wrappers granular while `validateComposedProposal` guards XML.
+ * See ADR 2026-11-22-contiguous-quote-and-structural-revision-preview. */
+const MAX_STRUCTURAL_COALESCE_GAP = 40
+
+const HTML_VOID_TAGS = new Set([
+  'area',
+  'base',
+  'br',
+  'col',
+  'embed',
+  'hr',
+  'img',
+  'input',
+  'link',
+  'meta',
+  'param',
+  'source',
+  'track',
+  'wbr',
+])
+
+const BODY_BOUNDARY_RE = /<\/?body(?:\s[^<>]*?)?>/i
+
+interface FragmentTagBalance {
+  unmatchedOpens: string[]
+  unmatchedCloses: string[]
+}
+
+function analyzeFragmentTagBalance(fragment: string): FragmentTagBalance {
+  const unmatchedOpens: string[] = []
+  const unmatchedCloses: string[] = []
+  const tokenRe =
+    /<!--[\s\S]*?-->|<\?[\s\S]*?\?>|<!\[CDATA\[[\s\S]*?\]\]>|<!DOCTYPE\b[^>]*>|<\/?([a-zA-Z][\w:-]*)(?:\s[^<>]*?)?(\/?)>/gi
+  for (const match of fragment.matchAll(tokenRe)) {
+    const full = match[0]!
+    const rawName = match[1]
+    if (!rawName) continue
+    const name = rawName.toLowerCase()
+    const selfClosing = match[2] === '/' || HTML_VOID_TAGS.has(name)
+    if (full.startsWith('</')) {
+      if (unmatchedOpens.length > 0 && unmatchedOpens[unmatchedOpens.length - 1] === name) {
+        unmatchedOpens.pop()
+      } else {
+        unmatchedCloses.push(name)
+      }
+    } else if (!selfClosing) {
+      unmatchedOpens.push(name)
+    }
+  }
+  return { unmatchedOpens, unmatchedCloses }
+}
+
+/**
+ * Coalesces paired unbalanced open/close XHTML tag hunks (e.g. wrapping or unwrapping
+ * `<blockquote>...</blockquote>` across unchanged `<p>` lines) into a single atomic hunk
+ * so per-hunk reject cannot break XML well-formedness and book-page revision preview sees
+ * balanced before/after structure. See ADR 2026-11-22-contiguous-quote-and-structural-revision-preview.
+ */
+function coalesceStructuralChapterHunks(
+  allLines: NumberedDiffLine[],
+  rawHunks: ProposalHunk[],
+): ProposalHunk[] {
+  if (rawHunks.length < 2) return rawHunks
+
+  const ranges = new Map<string, { start: number; end: number }>()
+  for (let i = 0; i < allLines.length; i += 1) {
+    const hunkId = allLines[i]!.hunkId
+    if (!hunkId) continue
+    const existing = ranges.get(hunkId)
+    if (existing) existing.end = i
+    else ranges.set(hunkId, { start: i, end: i })
+  }
+
+  const groups: Array<{ startRow: number; endRow: number; firstHunk: ProposalHunk }> = []
+  let hIdx = 0
+  let didCoalesce = false
+
+  while (hIdx < rawHunks.length) {
+    const startHunk = rawHunks[hIdx]!
+    const startRange = ranges.get(startHunk.id)
+    if (!startRange) {
+      hIdx += 1
+      continue
+    }
+
+    const beforeBal = analyzeFragmentTagBalance(startHunk.beforeLines.join('\n'))
+    const afterBal = analyzeFragmentTagBalance(startHunk.afterLines.join('\n'))
+    const hasUnmatchedClose = beforeBal.unmatchedCloses.length > 0 || afterBal.unmatchedCloses.length > 0
+    const needsForwardClose =
+      !hasUnmatchedClose && (beforeBal.unmatchedOpens.length > 0 || afterBal.unmatchedOpens.length > 0)
+
+    let coalescedEndIdx: number | null = null
+
+    if (needsForwardClose) {
+      const beforeAcc = [...startHunk.beforeLines]
+      const afterAcc = [...startHunk.afterLines]
+      let sameGap = 0
+      let prevEndRow = startRange.end
+
+      for (let scanIdx = hIdx + 1; scanIdx < rawHunks.length; scanIdx += 1) {
+        const nextHunk = rawHunks[scanIdx]!
+        const nextRange = ranges.get(nextHunk.id)
+        if (!nextRange) break
+
+        let crossedBody = false
+        for (let rowIdx = prevEndRow + 1; rowIdx < nextRange.start; rowIdx += 1) {
+          const row = allLines[rowIdx]!
+          if (row.diff.kind === 'same') {
+            if (BODY_BOUNDARY_RE.test(row.diff.text)) {
+              crossedBody = true
+              break
+            }
+            sameGap += 1
+            if (sameGap > MAX_STRUCTURAL_COALESCE_GAP) break
+            beforeAcc.push(row.diff.text)
+            afterAcc.push(row.diff.text)
+          }
+        }
+        if (crossedBody || sameGap > MAX_STRUCTURAL_COALESCE_GAP) break
+
+        beforeAcc.push(...nextHunk.beforeLines)
+        afterAcc.push(...nextHunk.afterLines)
+        prevEndRow = nextRange.end
+
+        const mergedBeforeBal = analyzeFragmentTagBalance(beforeAcc.join('\n'))
+        const mergedAfterBal = analyzeFragmentTagBalance(afterAcc.join('\n'))
+        if (mergedBeforeBal.unmatchedCloses.length > 0 || mergedAfterBal.unmatchedCloses.length > 0) {
+          break
+        }
+        if (mergedBeforeBal.unmatchedOpens.length === 0 && mergedAfterBal.unmatchedOpens.length === 0) {
+          coalescedEndIdx = scanIdx
+          break
+        }
+      }
+    }
+
+    if (coalescedEndIdx !== null) {
+      const endRange = ranges.get(rawHunks[coalescedEndIdx]!.id)!
+      groups.push({ startRow: startRange.start, endRow: endRange.end, firstHunk: startHunk })
+      didCoalesce = true
+      hIdx = coalescedEndIdx + 1
+    } else {
+      groups.push({ startRow: startRange.start, endRow: startRange.end, firstHunk: startHunk })
+      hIdx += 1
+    }
+  }
+
+  if (!didCoalesce) return rawHunks
+
+  const sigCounts = new Map<string, number>()
+  const nextHunks: ProposalHunk[] = []
+
+  for (let gIdx = 0; gIdx < groups.length; gIdx += 1) {
+    const { startRow, endRow, firstHunk } = groups[gIdx]!
+    const hunkId = `hunk-${gIdx}`
+    const beforeLines: string[] = []
+    const afterLines: string[] = []
+    const lines: LineDiff[] = []
+    let addedCount = 0
+    let removedCount = 0
+    let beforeStart: number | null = null
+    let afterStart: number | null = null
+
+    for (let rowIdx = startRow; rowIdx <= endRow; rowIdx += 1) {
+      const row = allLines[rowIdx]!
+      row.hunkId = hunkId
+      lines.push(row.diff)
+      if (beforeStart === null && row.beforeLine !== null) beforeStart = row.beforeLine
+      if (afterStart === null && row.afterLine !== null) afterStart = row.afterLine
+
+      if (row.diff.kind === 'same') {
+        beforeLines.push(row.diff.text)
+        afterLines.push(row.diff.text)
+      } else if (row.diff.kind === 'removed') {
+        beforeLines.push(row.diff.text)
+        removedCount += 1
+      } else if (row.diff.kind === 'added') {
+        afterLines.push(row.diff.text)
+        addedCount += 1
+      } else if (row.diff.kind === 'changed') {
+        beforeLines.push(
+          row.diff.segments
+            .filter((seg) => seg.kind !== 'added')
+            .map((seg) => seg.text)
+            .join(''),
+        )
+        afterLines.push(
+          row.diff.segments
+            .filter((seg) => seg.kind !== 'removed')
+            .map((seg) => seg.text)
+            .join(''),
+        )
+        addedCount += 1
+        removedCount += 1
+      }
+    }
+
+    nextHunks.push({
+      id: hunkId,
+      index: gIdx,
+      fingerprint: makeHunkFingerprint(beforeLines, afterLines, sigCounts),
+      beforeStart: beforeStart ?? firstHunk.beforeStart,
+      beforeCount: beforeLines.length,
+      afterStart: afterStart ?? firstHunk.afterStart,
+      afterCount: afterLines.length,
+      beforeLines,
+      afterLines,
+      lines,
+      addedCount,
+      removedCount,
+    })
+  }
+
+  return nextHunks
+}
+
 export type HunkDecision = 'pending' | 'accepted' | 'rejected'
 export type FileHunkDecisions = Readonly<Record<string, HunkDecision>>
 export type ProposalHunkDecisions = Readonly<Record<string, FileHunkDecisions>>
@@ -337,14 +554,16 @@ export function buildFileHunks(file: AgentProposalFile): FileDiffModel {
     })
   }
 
+  const finalHunks = isChapterPath(file.path) ? coalesceStructuralChapterHunks(allLines, hunks) : hunks
+
   return {
     file,
     eol,
     allLines,
-    hunks,
+    hunks: finalHunks,
     added: totalAdded,
     removed: totalRemoved,
-    isNoopText: hunks.length === 0,
+    isNoopText: finalHunks.length === 0,
   }
 }
 
