@@ -30,6 +30,8 @@ export interface ApplyProposalInput extends WorkspaceSnapshot {
   proposal: AgentProposal
   /** Only honored when `proposal.isStructural === false`. */
   selectedPaths?: Set<string>
+  /** Optional per-file recomposed text for partial hunk acceptance (pure-text proposals only). */
+  composedTexts?: ReadonlyMap<string, string>
   parseXml?: XmlDocumentParser
 }
 
@@ -215,11 +217,15 @@ export function applyProposalToBook(input: ApplyProposalInput): ApplyProposalRes
   // 3. Apply creates and text updates.
   for (const file of targetFiles) {
     if (file.kind !== 'create' && file.kind !== 'update') continue
-    if (file.afterText === undefined) continue
-    const encoded = encoder.encode(file.afterText)
+    const finalText =
+      !proposal.isStructural && input.composedTexts?.has(file.path)
+        ? input.composedTexts.get(file.path)
+        : file.afterText
+    if (finalText === undefined) continue
+    const encoded = encoder.encode(finalText)
     nextEntries.set(file.path, encoded)
     if (!nextOrder.includes(file.path)) nextOrder.push(file.path)
-    nextTexts.set(file.path, file.afterText)
+    nextTexts.set(file.path, finalText)
     const prevMeta = nextMeta.get(file.path)
     nextMeta.set(file.path, {
       path: file.path,

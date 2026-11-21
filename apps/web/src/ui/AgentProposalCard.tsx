@@ -2,17 +2,25 @@ import type { AgentProposal, AgentProposalFile } from '@booksmith/core'
 import {
   AlertCircle,
   AlertTriangle,
+  BookOpen,
   CheckCircle2,
-  ChevronDown,
   ChevronRight,
+  Eye,
   FileDiff,
   RotateCcw,
   XCircle,
 } from 'lucide-react'
-import { useMemo, useState } from 'react'
-import { diffLines, type LineDiff } from '../diff/document'
+import { useMemo } from 'react'
 import { basename } from '../state/bookStore'
+import { buildComposedProposalPlan, buildFileHunks, type FileDiffModel } from '../state/proposalReview'
 import { Button } from './Button'
+
+/**
+ * Slimmed sidebar summary & navigation card for an Agent proposal.
+ * Full book-page revision, final preview, and source diffs live in the main canvas `ProposalReviewPane`
+ * rather than squeezing code diffs into the narrow sidebar.
+ * See ADR 2026-11-21-in-canvas-agent-proposal-review.
+ */
 
 interface AgentProposalCardProps {
   proposal: AgentProposal
@@ -21,157 +29,21 @@ interface AgentProposalCardProps {
   busy?: boolean
   autoApplied?: boolean
   autoDowngradeReason?: string | null
+  isReviewing?: boolean
+  activeReviewPath?: string | null
+  skippedByPath?: Readonly<Record<string, ReadonlySet<string>>>
+  xmlBlocked?: boolean
+  onOpenReview?: (path?: string) => void
   onApply: (selectedPaths?: Set<string>) => void
   onDismiss: () => void
   onUndo: () => void
 }
-
-const CONTEXT_RADIUS = 2
-const MAX_COMPACT_ROWS = 80
 
 const KIND_LABELS: Record<AgentProposalFile['kind'], string> = {
   create: '新增',
   update: '修改',
   rename: '重命名',
   delete: '删除',
-}
-
-interface RenderRow {
-  kind: 'line' | 'gap'
-  line?: LineDiff
-  skipped?: number
-}
-
-function compactDiff(lines: LineDiff[], showAll: boolean): { rows: RenderRow[]; truncated: boolean } {
-  if (showAll) {
-    return { rows: lines.map((line) => ({ kind: 'line', line })), truncated: false }
-  }
-
-  const changedIndices: number[] = []
-  lines.forEach((line, index) => {
-    if (line.kind !== 'same') changedIndices.push(index)
-  })
-
-  if (changedIndices.length === 0) {
-    return { rows: [], truncated: false }
-  }
-
-  const keep = new Set<number>()
-  for (const idx of changedIndices) {
-    for (
-      let cursor = Math.max(0, idx - CONTEXT_RADIUS);
-      cursor <= Math.min(lines.length - 1, idx + CONTEXT_RADIUS);
-      cursor += 1
-    ) {
-      keep.add(cursor)
-    }
-  }
-
-  const rows: RenderRow[] = []
-  let skipped = 0
-  let truncated = false
-  for (let index = 0; index < lines.length; index += 1) {
-    if (keep.has(index)) {
-      if (skipped > 0) {
-        rows.push({ kind: 'gap', skipped })
-        skipped = 0
-      }
-      if (rows.length >= MAX_COMPACT_ROWS) {
-        truncated = true
-        break
-      }
-      rows.push({ kind: 'line', line: lines[index] })
-    } else {
-      skipped += 1
-    }
-  }
-  if (!truncated && skipped > 0) rows.push({ kind: 'gap', skipped })
-  return { rows, truncated }
-}
-
-function countDiffStats(lines: LineDiff[]): { added: number; removed: number } {
-  let added = 0
-  let removed = 0
-  for (const line of lines) {
-    if (line.kind === 'added') added += 1
-    else if (line.kind === 'removed') removed += 1
-    else if (line.kind === 'changed') {
-      added += 1
-      removed += 1
-    }
-  }
-  return { added, removed }
-}
-
-function FileDiffPreview({ file, lines }: { file: AgentProposalFile; lines: LineDiff[] }) {
-  const [showAll, setShowAll] = useState(false)
-  const computed = useMemo(() => compactDiff(lines, showAll), [lines, showAll])
-
-  if (file.kind === 'rename' && file.beforeText === file.afterText) {
-    return (
-      <p className="agent-proposal-note">
-        仅重命名路径：{file.previousPath} → {file.path}（内容未变）。
-      </p>
-    )
-  }
-
-  return (
-    <div className="agent-proposal-diff">
-      {computed.rows.length === 0 ? (
-        <p className="agent-proposal-note">文本内容无差异。</p>
-      ) : (
-        <div className="agent-diff-lines">
-          {computed.rows.map((row, index) => {
-            if (row.kind === 'gap') {
-              return (
-                <div className="agent-diff-gap" key={`gap-${index}`}>
-                  … 省略 {row.skipped} 行未修改内容 …
-                </div>
-              )
-            }
-            const entry = row.line!
-            if (entry.kind === 'changed') {
-              return (
-                <div className="diff-row diff-changed" key={index}>
-                  <span className="diff-sign">~</span>
-                  <span className="diff-code">
-                    {entry.segments.map((seg, sIdx) => (
-                      <span
-                        key={sIdx}
-                        className={
-                          seg.kind === 'removed'
-                            ? 'diff-inline-removed'
-                            : seg.kind === 'added'
-                              ? 'diff-inline-added'
-                              : undefined
-                        }
-                      >
-                        {seg.text}
-                      </span>
-                    ))}
-                  </span>
-                </div>
-              )
-            }
-            const sign = entry.kind === 'added' ? '+' : entry.kind === 'removed' ? '-' : ' '
-            const cls =
-              entry.kind === 'added' ? 'diff-added' : entry.kind === 'removed' ? 'diff-removed' : 'diff-same'
-            return (
-              <div className={`diff-row ${cls}`} key={index}>
-                <span className="diff-sign">{sign}</span>
-                <span className="diff-code">{entry.text || ' '}</span>
-              </div>
-            )
-          })}
-        </div>
-      )}
-      {computed.truncated && !showAll ? (
-        <button type="button" className="agent-link-btn" onClick={() => setShowAll(true)}>
-          展开全部变更行
-        </button>
-      ) : null}
-    </div>
-  )
 }
 
 export function AgentProposalCard({
@@ -181,56 +53,39 @@ export function AgentProposalCard({
   busy = false,
   autoApplied = false,
   autoDowngradeReason = null,
+  isReviewing = false,
+  activeReviewPath = null,
+  skippedByPath = {},
+  xmlBlocked = false,
+  onOpenReview,
   onApply,
   onDismiss,
   onUndo,
 }: AgentProposalCardProps) {
-  const [selected, setSelected] = useState<Set<string>>(() => new Set(proposal.files.map((f) => f.path)))
-  const [expanded, setExpanded] = useState<Set<string>>(() =>
-    proposal.files.length === 1 ? new Set([proposal.files[0]!.path]) : new Set(),
-  )
+  const modelsByPath = useMemo(() => {
+    const map = new Map<string, FileDiffModel>()
+    for (const file of proposal.files) {
+      map.set(file.path, buildFileHunks(file))
+    }
+    return map
+  }, [proposal.files])
 
-  const fileDiffs = useMemo(
-    () =>
-      proposal.files.map((file) => {
-        const lines = diffLines(file.beforeText ?? '', file.afterText ?? '')
-        return { file, lines, stats: countDiffStats(lines) }
-      }),
-    [proposal.files],
-  )
+  const totalStats = useMemo(() => {
+    let added = 0
+    let removed = 0
+    for (const model of modelsByPath.values()) {
+      added += model.added
+      removed += model.removed
+    }
+    return { added, removed }
+  }, [modelsByPath])
 
-  const totalStats = useMemo(
-    () =>
-      fileDiffs.reduce(
-        (acc, item) => ({
-          added: acc.added + item.stats.added,
-          removed: acc.removed + item.stats.removed,
-        }),
-        { added: 0, removed: 0 },
-      ),
-    [fileDiffs],
+  const plan = useMemo(
+    () => buildComposedProposalPlan(proposal, modelsByPath, skippedByPath),
+    [proposal, modelsByPath, skippedByPath],
   )
 
   const hasIssues = proposal.validationIssues.length > 0
-  const selectedCount = proposal.isStructural ? proposal.files.length : selected.size
-
-  const toggleExpanded = (path: string) => {
-    setExpanded((current) => {
-      const next = new Set(current)
-      if (next.has(path)) next.delete(path)
-      else next.add(path)
-      return next
-    })
-  }
-
-  const toggleSelected = (path: string) => {
-    setSelected((current) => {
-      const next = new Set(current)
-      if (next.has(path)) next.delete(path)
-      else next.add(path)
-      return next
-    })
-  }
 
   if (status === 'dismissed') {
     return (
@@ -245,41 +100,71 @@ export function AgentProposalCard({
 
   if (status === 'applied') {
     return (
-      <div className="agent-proposal-card is-applied">
+      <div className={`agent-proposal-card is-applied${isReviewing ? ' is-reviewing' : ''}`}>
         <div className="agent-proposal-compact">
           <CheckCircle2 size={14} strokeWidth={1.75} className="agent-icon-ok" aria-hidden="true" />
-          <span>
+          <span className="agent-proposal-compact-label">
             {autoApplied
               ? `已自动应用到工作区（${proposal.files.length} 个文件）`
               : `已应用变更到工作区（${proposal.files.length} 个文件）`}
           </span>
-          {canUndo ? (
-            <Button variant="secondary" size="sm" type="button" onClick={onUndo}>
-              <RotateCcw size={12} strokeWidth={1.75} aria-hidden="true" />
-              <span>撤销本次应用</span>
-            </Button>
-          ) : null}
+          <div className="agent-proposal-compact-actions">
+            {onOpenReview ? (
+              <Button variant="ghost" size="sm" type="button" onClick={() => onOpenReview()}>
+                <Eye size={12} strokeWidth={1.8} aria-hidden="true" />
+                <span>{isReviewing ? '回看中' : '查看改动'}</span>
+              </Button>
+            ) : null}
+            {canUndo ? (
+              <Button variant="secondary" size="sm" type="button" onClick={onUndo}>
+                <RotateCcw size={12} strokeWidth={1.75} aria-hidden="true" />
+                <span>撤销本次应用</span>
+              </Button>
+            ) : null}
+          </div>
         </div>
       </div>
     )
   }
 
+  const applyDisabled =
+    busy ||
+    hasIssues ||
+    xmlBlocked ||
+    (!proposal.isStructural && plan.selectedPaths.size === 0)
+
+  const applyText = proposal.isStructural
+    ? '应用全部变更'
+    : plan.totalHunks > 0 && plan.keptHunks < plan.totalHunks
+      ? `应用已选（${plan.keptHunks}/${plan.totalHunks} 处）`
+      : '应用变更'
+
   return (
-    <section className="agent-proposal-card" aria-label="变更提案">
+    <section
+      className={`agent-proposal-card${isReviewing ? ' is-reviewing' : ''}`}
+      aria-label="变更提案"
+    >
       <header className="agent-proposal-head">
         <div className="agent-proposal-title">
           <FileDiff size={13} strokeWidth={1.75} aria-hidden="true" />
           <span>变更提案 · {proposal.files.length} 个文件</span>
           {totalStats.added > 0 || totalStats.removed > 0 ? (
-            <span className="agent-diff-stats" aria-label={`新增 ${totalStats.added} 行，删除 ${totalStats.removed} 行`}>
+            <span
+              className="agent-diff-stats"
+              aria-label={`新增 ${totalStats.added} 行，删除 ${totalStats.removed} 行`}
+            >
               {totalStats.added > 0 ? <span className="is-add">+{totalStats.added}</span> : null}
               {totalStats.removed > 0 ? <span className="is-del">-{totalStats.removed}</span> : null}
             </span>
           ) : null}
         </div>
-        <span className={`agent-proposal-mode${proposal.isStructural ? ' is-structural' : ''}`}>
-          {proposal.isStructural ? '结构变更 · 整批应用' : '纯文本 · 可勾选'}
-        </span>
+        {isReviewing ? (
+          <span className="agent-proposal-reviewing-pill">审阅中</span>
+        ) : (
+          <span className={`agent-proposal-mode${proposal.isStructural ? ' is-structural' : ''}`}>
+            {proposal.isStructural ? '结构变更 · 整批应用' : '逐处可审阅'}
+          </span>
+        )}
       </header>
 
       {autoDowngradeReason ? (
@@ -303,48 +188,49 @@ export function AgentProposalCard({
         </div>
       ) : null}
 
+      {xmlBlocked ? (
+        <div className="banner banner-error agent-proposal-issues" role="alert">
+          <AlertCircle size={14} strokeWidth={1.75} aria-hidden="true" />
+          <span>部分跳过改动导致 XML 未闭合，请在主区恢复或切源码核对。</span>
+        </div>
+      ) : null}
+
       <ul className="agent-proposal-files">
-        {fileDiffs.map(({ file, lines, stats }) => {
-          const isOpen = expanded.has(file.path)
-          const isChecked = proposal.isStructural || selected.has(file.path)
+        {proposal.files.map((file) => {
+          const model = modelsByPath.get(file.path)
+          const state = plan.fileStates.get(file.path)
+          const isCurrentFile = isReviewing && activeReviewPath === file.path
           const label =
             file.kind === 'rename' && file.previousPath
               ? `${basename(file.previousPath)} → ${basename(file.path)}`
               : basename(file.path)
           return (
-            <li key={`${file.kind}:${file.path}`} className="agent-proposal-file">
-              <div className="agent-proposal-file-row">
-                {!proposal.isStructural ? (
-                  <input
-                    type="checkbox"
-                    aria-label={`选择 ${file.path}`}
-                    checked={isChecked}
-                    onChange={() => toggleSelected(file.path)}
-                  />
-                ) : null}
-                <button
-                  type="button"
-                  className="agent-proposal-file-toggle"
-                  aria-expanded={isOpen}
-                  onClick={() => toggleExpanded(file.path)}
-                >
-                  {isOpen ? (
-                    <ChevronDown size={13} strokeWidth={1.75} aria-hidden="true" />
-                  ) : (
-                    <ChevronRight size={13} strokeWidth={1.75} aria-hidden="true" />
-                  )}
-                  <span className={`agent-kind-tag is-${file.kind}`}>{KIND_LABELS[file.kind]}</span>
-                  <span className="agent-proposal-path" title={file.path}>
-                    {label}
+            <li
+              key={`${file.kind}:${file.path}`}
+              className={`agent-proposal-file${isCurrentFile ? ' is-active' : ''}`}
+            >
+              <button
+                type="button"
+                className="agent-proposal-file-nav"
+                aria-current={isCurrentFile ? 'true' : undefined}
+                title={`在主区审阅 ${file.path}`}
+                onClick={() => onOpenReview?.(file.path)}
+              >
+                <span className={`agent-kind-tag is-${file.kind}`}>{KIND_LABELS[file.kind]}</span>
+                <span className="agent-proposal-path">{label}</span>
+                {!proposal.isStructural && state && state.total > 0 && state.kept < state.total ? (
+                  <span className="agent-proposal-kept-badge" title={`保留 ${state.kept}/${state.total} 处变更`}>
+                    {state.kept}/{state.total}
                   </span>
-                  {stats.added > 0 || stats.removed > 0 ? (
-                    <span className="agent-diff-stats">
-                      {stats.added > 0 ? <span className="is-add">+{stats.added}</span> : null}
-                      {stats.removed > 0 ? <span className="is-del">-{stats.removed}</span> : null}
-                    </span>
-                  ) : null}
-                </button>
-              </div>
+                ) : null}
+                {model && (model.added > 0 || model.removed > 0) ? (
+                  <span className="agent-diff-stats">
+                    {model.added > 0 ? <span className="is-add">+{model.added}</span> : null}
+                    {model.removed > 0 ? <span className="is-del">-{model.removed}</span> : null}
+                  </span>
+                ) : null}
+                <ChevronRight size={12} strokeWidth={1.75} className="agent-proposal-chevron" aria-hidden="true" />
+              </button>
 
               {file.referencesAffected && file.referencesAffected.length > 0 ? (
                 <p className="agent-proposal-ref-warn">
@@ -358,14 +244,24 @@ export function AgentProposalCard({
                   </span>
                 </p>
               ) : null}
-
-              {isOpen ? <FileDiffPreview file={file} lines={lines} /> : null}
             </li>
           )
         })}
       </ul>
 
       <footer className="agent-proposal-actions">
+        {onOpenReview ? (
+          <Button
+            variant="secondary"
+            size="sm"
+            type="button"
+            className="agent-proposal-review-btn"
+            onClick={() => onOpenReview()}
+          >
+            <BookOpen size={12} strokeWidth={1.8} aria-hidden="true" />
+            <span>{isReviewing ? '定位审阅' : '审阅变更'}</span>
+          </Button>
+        ) : null}
         <Button variant="ghost" size="sm" type="button" disabled={busy} onClick={onDismiss}>
           放弃
         </Button>
@@ -373,14 +269,10 @@ export function AgentProposalCard({
           variant="primary"
           size="sm"
           type="button"
-          disabled={busy || hasIssues || selectedCount === 0}
-          onClick={() => onApply(proposal.isStructural ? undefined : selected)}
+          disabled={applyDisabled}
+          onClick={() => onApply()}
         >
-          {proposal.isStructural
-            ? '应用全部变更'
-            : selectedCount === proposal.files.length
-              ? '应用变更'
-              : `应用已选（${selectedCount}/${proposal.files.length}）`}
+          {applyText}
         </Button>
       </footer>
     </section>

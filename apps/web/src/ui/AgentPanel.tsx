@@ -39,10 +39,28 @@ import {
 } from '../api/client'
 import { evaluateAutoApply } from '../state/agentProposal'
 import { basename } from '../state/bookStore'
+import {
+  buildComposedProposalPlan,
+  buildFileHunks,
+  validateComposedProposal,
+  type FileDiffModel,
+} from '../state/proposalReview'
 import { AgentMarkdown } from './AgentMarkdown'
 import { AgentProposalCard } from './AgentProposalCard'
 import { Button } from './Button'
 import { EmptyState } from './EmptyState'
+
+export interface ActiveReviewRef {
+  messageId: string
+  selectedPath: string
+  readOnly: boolean
+}
+
+export interface ProposalStatusSyncEvent {
+  messageId: string
+  status: 'applied' | 'dismissed'
+  seq: number
+}
 
 interface AgentPanelProps {
   bookId: string
@@ -54,11 +72,27 @@ interface AgentPanelProps {
   profilesLoading: boolean
   defaultApprovalMode?: AgentApprovalMode
   undoMessageId: string | null
+  activeReview: ActiveReviewRef | null
+  skippedHunksByMessage: Readonly<Record<string, Readonly<Record<string, ReadonlySet<string>>>>>
+  proposalStatusSync?: ProposalStatusSyncEvent | null
   getOverlay: () => { dirtyTexts: Record<string, string>; deletedPaths: string[] }
   onOpenSettings: () => void
   onClose?: () => void
   onReloadBook: () => void
-  onApplyProposal: (messageId: string, proposal: AgentProposal, selectedPaths?: Set<string>) => Promise<boolean>
+  onOpenProposalReview: (args: {
+    messageId: string
+    proposal: AgentProposal
+    path?: string
+    readOnly?: boolean
+    autoDowngradeReason?: string | null
+  }) => void
+  onCloseProposalReview: (messageId?: string) => void
+  onApplyProposal: (
+    messageId: string,
+    proposal: AgentProposal,
+    options?: { rawAutoApply?: boolean },
+  ) => Promise<boolean>
+  onDismissProposal: (messageId: string) => Promise<boolean>
   onUndoProposal: (messageId: string) => void
 }
 
@@ -345,11 +379,17 @@ export function AgentPanel({
   profilesLoading,
   defaultApprovalMode = 'review',
   undoMessageId,
+  activeReview,
+  skippedHunksByMessage,
+  proposalStatusSync,
   getOverlay,
   onOpenSettings,
   onClose,
   onReloadBook,
+  onOpenProposalReview,
+  onCloseProposalReview,
   onApplyProposal,
+  onDismissProposal,
   onUndoProposal,
 }: AgentPanelProps) {
   const [threads, setThreads] = useState<AgentThreadDto[]>([])
@@ -499,12 +539,33 @@ export function AgentPanel({
     streaming?.runningTool?.id,
   ])
 
+  // Sync proposal status changes triggered from the main-canvas ProposalReviewPane.
+  useEffect(() => {
+    if (!proposalStatusSync) return
+    setMessages((list) =>
+      list.map((msg) =>
+        msg.id === proposalStatusSync.messageId
+          ? { ...msg, proposalStatus: proposalStatusSync.status }
+          : msg,
+      ),
+    )
+    if (proposalStatusSync.status === 'applied') {
+      setDowngradeReasons((prev) => {
+        if (!(proposalStatusSync.messageId in prev)) return prev
+        const next = { ...prev }
+        delete next[proposalStatusSync.messageId]
+        return next
+      })
+    }
+  }, [proposalStatusSync])
+
   const handleSelectThread = (threadId: string) => {
     if (streaming) return
     setHistoryOpen(false)
     setRenamingId(null)
     setConfirmDeleteId(null)
     if (threadId === activeThreadId) return
+    onCloseProposalReview()
     setActiveThreadId(threadId)
     void loadMessages(threadId)
   }
@@ -515,6 +576,7 @@ export function AgentPanel({
     setHistoryOpen(false)
     setRenamingId(null)
     setConfirmDeleteId(null)
+    onCloseProposalReview()
     try {
       const res = await api.createAgentThread(bookId, {
         ...(selectedProfileId ? { profileId: selectedProfileId } : {}),
@@ -556,6 +618,7 @@ export function AgentPanel({
       const remaining = threads.filter((t) => t.id !== threadId)
       setThreads(remaining)
       if (activeThreadId === threadId) {
+        onCloseProposalReview()
         const next = remaining[0] ?? null
         setActiveThreadId(next?.id ?? null)
         if (next) await loadMessages(next.id)
@@ -612,16 +675,18 @@ export function AgentPanel({
   }) => {
     const { threadId, messageId, draft, streamError, effectiveMode, replacingMessageId } = options
     let proposalStatus: 'pending' | 'applied' | 'dismissed' | null = draft.proposal ? 'pending' : null
+    let downgradeReason: string | null = null
 
     if (draft.proposal && !streamError && effectiveMode === 'auto') {
       const check = evaluateAutoApply(draft.proposal)
       if (check.eligible) {
-        const appliedOk = await onApplyProposal(messageId, draft.proposal)
+        const appliedOk = await onApplyProposal(messageId, draft.proposal, { rawAutoApply: true })
         if (appliedOk) {
           proposalStatus = 'applied'
           setAutoAppliedIds((prev) => new Set(prev).add(messageId))
         }
       } else if (check.reason) {
+        downgradeReason = check.reason
         setDowngradeReasons((prev) => ({ ...prev, [messageId]: check.reason! }))
       }
     }
@@ -646,6 +711,17 @@ export function AgentPanel({
       }
       return [...current, finalized]
     })
+
+    // Automatically open the main-canvas book-page review when a new pending proposal arrives
+    // (including auto-mode proposals downgraded for manual review). See ADR 2026-11-21-in-canvas-agent-proposal-review.
+    if (draft.proposal && !streamError && proposalStatus === 'pending') {
+      onOpenProposalReview({
+        messageId,
+        proposal: draft.proposal,
+        readOnly: false,
+        autoDowngradeReason: downgradeReason,
+      })
+    }
   }
 
   const sendPrompt = async (promptText: string) => {
@@ -823,6 +899,7 @@ export function AgentPanel({
   const handleRetryLastMessage = async (messageId: string) => {
     if (streaming || !activeThreadId || profiles.length === 0) return
     setPanelError(null)
+    onCloseProposalReview(messageId)
     setDowngradeReasons((prev) => {
       if (!(messageId in prev)) return prev
       const next = { ...prev }
@@ -959,14 +1036,10 @@ export function AgentPanel({
     }
   }
 
-  const handleProposalApply = async (
-    messageId: string,
-    proposal: AgentProposal,
-    selectedPaths?: Set<string>,
-  ) => {
+  const handleProposalApply = async (messageId: string, proposal: AgentProposal) => {
     setBusyProposalId(messageId)
     try {
-      const ok = await onApplyProposal(messageId, proposal, selectedPaths)
+      const ok = await onApplyProposal(messageId, proposal)
       if (ok) {
         setMessages((list) =>
           list.map((msg) => (msg.id === messageId ? { ...msg, proposalStatus: 'applied' } : msg)),
@@ -986,12 +1059,14 @@ export function AgentPanel({
   const handleProposalDismiss = async (messageId: string) => {
     setBusyProposalId(messageId)
     try {
-      await api.updateProposalStatus(bookId, messageId, 'dismissed')
-      setMessages((list) =>
-        list.map((msg) => (msg.id === messageId ? { ...msg, proposalStatus: 'dismissed' } : msg)),
-      )
-    } catch {
-      setPanelError({ code: 'dismiss_failed', message: '更新提案状态失败，请重试。' })
+      const ok = await onDismissProposal(messageId)
+      if (ok) {
+        setMessages((list) =>
+          list.map((msg) => (msg.id === messageId ? { ...msg, proposalStatus: 'dismissed' } : msg)),
+        )
+      } else {
+        setPanelError({ code: 'dismiss_failed', message: '更新提案状态失败，请重试。' })
+      }
     } finally {
       setBusyProposalId(null)
     }
@@ -1394,20 +1469,44 @@ export function AgentPanel({
                         </div>
                       ) : null}
 
-                      {/* Proposal card stays full-width outside the bubble so narrow-sidebar diff lines stay legible. See ADR 2026-11-20-agent-sidebar-chat-ui. */}
-                      {msg.proposal && msg.proposalStatus ? (
-                        <AgentProposalCard
-                          proposal={msg.proposal}
-                          status={msg.proposalStatus}
-                          canUndo={undoMessageId === msg.id}
-                          busy={busyProposalId === msg.id}
-                          autoApplied={autoAppliedIds.has(msg.id)}
-                          autoDowngradeReason={downgradeReasons[msg.id] ?? null}
-                          onApply={(paths) => void handleProposalApply(msg.id, msg.proposal!, paths)}
-                          onDismiss={() => void handleProposalDismiss(msg.id)}
-                          onUndo={() => onUndoProposal(msg.id)}
-                        />
-                      ) : null}
+                      {/* Slimmed summary card navigates directly into the main-canvas ProposalReviewPane. See ADR 2026-11-21-in-canvas-agent-proposal-review. */}
+                      {msg.proposal && msg.proposalStatus ? (() => {
+                        const msgSkipped = skippedHunksByMessage[msg.id] ?? {}
+                        let xmlBlocked = false
+                        if (msg.proposalStatus === 'pending' && !msg.proposal.isStructural && Object.keys(msgSkipped).length > 0) {
+                          const models = new Map<string, FileDiffModel>()
+                          for (const file of msg.proposal.files) models.set(file.path, buildFileHunks(file))
+                          const plan = buildComposedProposalPlan(msg.proposal, models, msgSkipped)
+                          xmlBlocked = validateComposedProposal(msg.proposal, plan).length > 0
+                        }
+                        const isReviewingThis = activeReview?.messageId === msg.id
+                        return (
+                          <AgentProposalCard
+                            proposal={msg.proposal}
+                            status={msg.proposalStatus}
+                            canUndo={undoMessageId === msg.id}
+                            busy={busyProposalId === msg.id}
+                            autoApplied={autoAppliedIds.has(msg.id)}
+                            autoDowngradeReason={downgradeReasons[msg.id] ?? null}
+                            isReviewing={isReviewingThis}
+                            activeReviewPath={isReviewingThis ? activeReview.selectedPath : null}
+                            skippedByPath={msgSkipped}
+                            xmlBlocked={xmlBlocked}
+                            onOpenReview={(targetPath) =>
+                              onOpenProposalReview({
+                                messageId: msg.id,
+                                proposal: msg.proposal!,
+                                path: targetPath,
+                                readOnly: msg.proposalStatus === 'applied',
+                                autoDowngradeReason: downgradeReasons[msg.id] ?? null,
+                              })
+                            }
+                            onApply={() => void handleProposalApply(msg.id, msg.proposal!)}
+                            onDismiss={() => void handleProposalDismiss(msg.id)}
+                            onUndo={() => onUndoProposal(msg.id)}
+                          />
+                        )
+                      })() : null}
                     </article>
                   )
                 })}

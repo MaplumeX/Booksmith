@@ -1,4 +1,4 @@
-import { hasPageHistory } from '@booksmith/core'
+import { hasPageHistory, type AgentProposalFile } from '@booksmith/core'
 import {
   ArrowDown,
   ArrowUp,
@@ -28,6 +28,8 @@ interface FileTreeProps {
   spinePaths: string[]
   /** Number of pending `<hr class="sigil_split_marker" />` markers per chapter path. */
   markerCounts?: ReadonlyMap<string, number>
+  /** Pending Agent proposal change kinds by file path while a proposal is under review. */
+  reviewMarks?: ReadonlyMap<string, AgentProposalFile['kind']>
   onOpen: (path: string) => void
   onHistory: (path: string) => void
   onCreate: () => void
@@ -48,6 +50,7 @@ export function FileTree({
   dirty,
   spinePaths,
   markerCounts,
+  reviewMarks,
   onOpen,
   onHistory,
   onCreate,
@@ -381,6 +384,20 @@ export function FileTree({
                   >
                     <FileTypeIcon path={path} group={group.group} size={14} className="tree-icon" />
                     <span className="tree-name">{basename(path)}</span>
+                    {reviewMarks?.has(path) ? (
+                      <span
+                        className={`tree-review-badge is-${reviewMarks.get(path)!}`}
+                        title="待审阅变更"
+                      >
+                        {reviewMarks.get(path) === 'create'
+                          ? '增'
+                          : reviewMarks.get(path) === 'delete'
+                            ? '删'
+                            : reviewMarks.get(path) === 'rename'
+                              ? '移'
+                              : '改'}
+                      </span>
+                    ) : null}
                     {markerCount > 0 ? (
                       <span className="tree-marker-badge" title={`${markerCount} 处待拆分标记`}>
                         ✂{markerCount}

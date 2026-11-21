@@ -42,6 +42,7 @@ import {
   writeOpfMeta,
   writeOpfMetadata,
   type AgentProposal,
+  type AgentProposalFile,
   type EpubArchive,
   type EpubIssue,
   type EpubPackage,
@@ -84,7 +85,7 @@ import {
   X,
 } from 'lucide-react'
 import { Popover } from 'radix-ui'
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { ApiError, api, downloadUrl, type AgentProfileDto, type AgentUserSettingsDto } from '../api/client'
 import {
   insertAnchorId,
@@ -107,6 +108,13 @@ import {
   createUndoSnapshot,
   type WorkspaceSnapshot,
 } from '../state/agentProposal'
+import {
+  buildComposedProposalPlan,
+  buildFileHunks,
+  detectProposalStaleness,
+  validateComposedProposal,
+  type FileDiffModel,
+} from '../state/proposalReview'
 import {
   basename,
   extensionOf,
@@ -133,7 +141,7 @@ import {
   pushStructureHistory,
   type StructureHistoryEntry,
 } from '../state/structureHistory'
-import { AgentPanel } from '../ui/AgentPanel'
+import { AgentPanel, type ProposalStatusSyncEvent } from '../ui/AgentPanel'
 import { Button } from '../ui/Button'
 import { CheckPanel } from '../ui/CheckPanel'
 import { CodePane, type CodePaneHandle } from '../ui/CodePane'
@@ -146,6 +154,7 @@ import { FileTree } from '../ui/FileTree'
 import { LinkStylesheetsDialog } from '../ui/LinkStylesheetsDialog'
 import { MediaPane } from '../ui/MediaPane'
 import { PreviewPane } from '../ui/PreviewPane'
+import { ProposalReviewPane } from '../ui/ProposalReviewPane'
 import { MetadataPanel } from '../ui/MetadataPanel'
 import { SearchPanel } from '../ui/SearchPanel'
 import { SettingsDialog, type SettingsTab } from '../ui/SettingsDialog'
@@ -159,6 +168,14 @@ import { WysiwygPane, type WysiwygShortcut } from '../ui/WysiwygPane'
 
 type LoadState = { status: 'loading' } | { status: 'error'; message: string } | { status: 'ready' }
 type NavIslandTab = 'files' | 'toc'
+
+interface ActiveProposalReview {
+  messageId: string
+  proposal: AgentProposal
+  selectedPath: string
+  readOnly: boolean
+  autoDowngradeReason?: string | null
+}
 
 const SIDEBAR_MIN = 400
 const SIDEBAR_MAX = 560
@@ -401,6 +418,21 @@ export function Editor({ bookId }: { bookId: string }) {
   const [selectionText, setSelectionText] = useState('')
   const agentUndoRef = useRef<{ messageId: string; snapshot: WorkspaceSnapshot } | null>(null)
   const [agentUndoMessageId, setAgentUndoMessageId] = useState<string | null>(null)
+  // In-canvas Agent proposal review state & per-message skipped-hunk memory draft.
+  // See ADR 2026-11-21-in-canvas-agent-proposal-review.
+  const [activeReview, setActiveReview] = useState<ActiveProposalReview | null>(null)
+  const [reviewBusy, setReviewBusy] = useState(false)
+  const [skippedHunksByMessage, setSkippedHunksByMessage] = useState<
+    Record<string, Record<string, Set<string>>>
+  >({})
+  const skippedHunksRef = useRef(skippedHunksByMessage)
+  skippedHunksRef.current = skippedHunksByMessage
+  const [proposalStatusSync, setProposalStatusSync] = useState<ProposalStatusSyncEvent | null>(null)
+  const [staleApplyConfirm, setStaleApplyConfirm] = useState<{
+    messageId: string
+    proposal: AgentProposal
+    driftedPaths: string[]
+  } | null>(null)
   const activeRef = useRef<string | null>(null)
   activeRef.current = active
   const textListeners = useRef(new Set<(path: string, value: string) => void>())
@@ -432,6 +464,9 @@ export function Editor({ bookId }: { bookId: string }) {
     const initial = first ?? loaded.groups[0]?.paths[0] ?? null
     setTabs(initial ? [initial] : [])
     setActive(initial)
+    setActiveReview(null)
+    setSkippedHunksByMessage({})
+    setStaleApplyConfirm(null)
   }, [])
 
   useEffect(() => {
@@ -584,11 +619,108 @@ export function Editor({ bookId }: { bookId: string }) {
     [syncDirtyFromBaseline, syncDurability],
   )
 
+  const openProposalReview = useCallback(
+    (args: {
+      messageId: string
+      proposal: AgentProposal
+      path?: string
+      readOnly?: boolean
+      autoDowngradeReason?: string | null
+    }) => {
+      const targetPath =
+        (args.path && args.proposal.files.some((f) => f.path === args.path) ? args.path : null) ??
+        args.proposal.files[0]?.path
+      if (!targetPath) return
+      setActiveReview({
+        messageId: args.messageId,
+        proposal: args.proposal,
+        selectedPath: targetPath,
+        readOnly: Boolean(args.readOnly),
+        autoDowngradeReason: args.autoDowngradeReason ?? null,
+      })
+    },
+    [],
+  )
+
+  const closeProposalReview = useCallback((messageId?: string) => {
+    setActiveReview((current) => {
+      if (!current) return null
+      if (messageId && current.messageId !== messageId) return current
+      return null
+    })
+  }, [])
+
+  const toggleReviewHunk = useCallback((messageId: string, path: string, hunkId: string) => {
+    setSkippedHunksByMessage((prev) => {
+      const msgMap = prev[messageId] ?? {}
+      const existing = msgMap[path] ?? new Set<string>()
+      const nextSet = new Set(existing)
+      if (nextSet.has(hunkId)) nextSet.delete(hunkId)
+      else nextSet.add(hunkId)
+      const nextMsgMap = { ...msgMap }
+      if (nextSet.size === 0) delete nextMsgMap[path]
+      else nextMsgMap[path] = nextSet
+      return { ...prev, [messageId]: nextMsgMap }
+    })
+  }, [])
+
+  const resetReviewFileHunks = useCallback((messageId: string, path: string) => {
+    setSkippedHunksByMessage((prev) => {
+      const msgMap = prev[messageId]
+      if (!msgMap || !(path in msgMap)) return prev
+      const nextMsgMap = { ...msgMap }
+      delete nextMsgMap[path]
+      return { ...prev, [messageId]: nextMsgMap }
+    })
+  }, [])
+
+  const clearReviewDraftForMessage = useCallback((messageId: string) => {
+    setSkippedHunksByMessage((prev) => {
+      if (!(messageId in prev)) return prev
+      const next = { ...prev }
+      delete next[messageId]
+      return next
+    })
+  }, [])
+
   const handleApplyAgentProposal = useCallback(
-    async (messageId: string, proposal: AgentProposal, selectedPaths?: Set<string>): Promise<boolean> => {
+    async (
+      messageId: string,
+      proposal: AgentProposal,
+      options?: { forceApplyStale?: boolean; rawAutoApply?: boolean },
+    ): Promise<boolean> => {
       wysiwygFlushRef.current?.()
       const current = bookRef.current
       if (!current) return false
+
+      let selectedPaths: Set<string> | undefined
+      let composedTexts: Map<string, string> | undefined
+
+      if (!options?.rawAutoApply && !proposal.isStructural) {
+        const msgSkipped = skippedHunksRef.current[messageId] ?? {}
+        const models = new Map<string, FileDiffModel>()
+        for (const file of proposal.files) models.set(file.path, buildFileHunks(file))
+        const plan = buildComposedProposalPlan(proposal, models, msgSkipped)
+        const xmlFailures = validateComposedProposal(proposal, plan)
+        if (xmlFailures.length > 0) {
+          setSaveError(xmlFailures[0]!.message)
+          openProposalReview({ messageId, proposal, path: xmlFailures[0]!.path, readOnly: false })
+          return false
+        }
+        selectedPaths = plan.selectedPaths
+        composedTexts = plan.composedTexts
+        if (selectedPaths.size === 0) return false
+      }
+
+      if (!options?.rawAutoApply && !options?.forceApplyStale) {
+        const drifted = detectProposalStaleness(proposal, texts.current)
+        if (drifted.length > 0) {
+          setStaleApplyConfirm({ messageId, proposal, driftedPaths: drifted })
+          return false
+        }
+      }
+
+      setReviewBusy(true)
       try {
         const snapshot = createUndoSnapshot({
           book: current,
@@ -605,6 +737,7 @@ export function Editor({ bookId }: { bookId: string }) {
           active: activeRef.current,
           proposal,
           selectedPaths,
+          composedTexts,
         })
         if (applied.appliedCount === 0) return false
 
@@ -621,15 +754,60 @@ export function Editor({ bookId }: { bookId: string }) {
         const summary = syncDirtyFromBaseline(applied.book)
         syncDurability(summary)
 
+        clearReviewDraftForMessage(messageId)
+        closeProposalReview(messageId)
+        setProposalStatusSync({ messageId, status: 'applied', seq: Date.now() })
+
         await api.updateProposalStatus(current.id, messageId, 'applied').catch(() => {})
         return true
       } catch (error) {
         setSaveError(error instanceof Error ? error.message : '应用变更提案失败')
         return false
+      } finally {
+        setReviewBusy(false)
       }
     },
-    [syncDirtyFromBaseline, syncDurability],
+    [
+      clearReviewDraftForMessage,
+      closeProposalReview,
+      openProposalReview,
+      syncDirtyFromBaseline,
+      syncDurability,
+    ],
   )
+
+  const handleDismissAgentProposal = useCallback(
+    async (messageId: string): Promise<boolean> => {
+      const current = bookRef.current
+      if (!current) return false
+      setReviewBusy(true)
+      try {
+        await api.updateProposalStatus(current.id, messageId, 'dismissed')
+        clearReviewDraftForMessage(messageId)
+        closeProposalReview(messageId)
+        setProposalStatusSync({ messageId, status: 'dismissed', seq: Date.now() })
+        return true
+      } catch {
+        setSaveError('更新提案状态失败，请重试。')
+        return false
+      } finally {
+        setReviewBusy(false)
+      }
+    },
+    [clearReviewDraftForMessage, closeProposalReview],
+  )
+
+  const reviewMarks = useMemo(() => {
+    if (!activeReview || activeReview.readOnly) return undefined
+    const marks = new Map<string, AgentProposalFile['kind']>()
+    for (const file of activeReview.proposal.files) {
+      marks.set(file.path, file.kind)
+      if (file.kind === 'rename' && file.previousPath) {
+        marks.set(file.previousPath, 'rename')
+      }
+    }
+    return marks
+  }, [activeReview])
 
   const handleUndoAgentProposal = useCallback(
     (messageId: string) => {
@@ -2474,11 +2652,23 @@ export function Editor({ bookId }: { bookId: string }) {
             {navTab === 'files' ? (
               <FileTree
                 groups={book.groups}
-                active={active}
+                active={activeReview ? activeReview.selectedPath : active}
                 dirty={dirty}
                 spinePaths={spinePaths(book.pkg)}
                 markerCounts={markerCounts}
+                reviewMarks={reviewMarks}
                 onOpen={(path) => {
+                  if (activeReview) {
+                    const matched = activeReview.proposal.files.find(
+                      (file) => file.path === path || file.previousPath === path,
+                    )
+                    if (matched) {
+                      setActiveReview((cur) => (cur ? { ...cur, selectedPath: matched.path } : null))
+                      setTreeOpen(false)
+                      return
+                    }
+                    setActiveReview(null)
+                  }
                   open(path)
                   setTreeOpen(false)
                 }}
@@ -2558,8 +2748,30 @@ export function Editor({ bookId }: { bookId: string }) {
           </div>
         </aside>
 
-        <div className={`canvas-stage${showSplitPreview ? ' is-split' : ''}`}>
-          <div className="document-card editor-column">
+        <div className={`canvas-stage${showSplitPreview && !activeReview ? ' is-split' : ''}`}>
+          {activeReview ? (
+            <ProposalReviewPane
+              book={book}
+              texts={texts.current}
+              proposal={activeReview.proposal}
+              selectedPath={activeReview.selectedPath}
+              readOnly={activeReview.readOnly}
+              busy={reviewBusy}
+              autoDowngradeReason={activeReview.autoDowngradeReason}
+              skippedByPath={skippedHunksByMessage[activeReview.messageId] ?? {}}
+              resolveAsset={resolveAsset}
+              onSelectPath={(nextPath) =>
+                setActiveReview((cur) => (cur ? { ...cur, selectedPath: nextPath } : null))
+              }
+              onToggleHunk={(filePath, hunkId) => toggleReviewHunk(activeReview.messageId, filePath, hunkId)}
+              onResetFileHunks={(filePath) => resetReviewFileHunks(activeReview.messageId, filePath)}
+              onApply={() => void handleApplyAgentProposal(activeReview.messageId, activeReview.proposal)}
+              onDismiss={() => void handleDismissAgentProposal(activeReview.messageId)}
+              onExit={() => setActiveReview(null)}
+            />
+          ) : null}
+
+          <div className="document-card editor-column" hidden={Boolean(activeReview)}>
             <TabBar
               tabs={tabs}
               active={active}
@@ -2677,7 +2889,11 @@ export function Editor({ bookId }: { bookId: string }) {
           </div>
 
           {active && editable && previewable ? (
-            <section className="preview-card" aria-label="实时书页预览" hidden={!showSplitPreview}>
+            <section
+              className="preview-card"
+              aria-label="实时书页预览"
+              hidden={!showSplitPreview || Boolean(activeReview)}
+            >
               <PreviewPane
                 path={active}
                 content={content}
@@ -2711,6 +2927,17 @@ export function Editor({ bookId }: { bookId: string }) {
                 profilesLoading={agentProfilesLoading}
                 defaultApprovalMode={agentUserSettings?.defaultApprovalMode ?? 'review'}
                 undoMessageId={agentUndoMessageId}
+                activeReview={
+                  activeReview
+                    ? {
+                        messageId: activeReview.messageId,
+                        selectedPath: activeReview.selectedPath,
+                        readOnly: activeReview.readOnly,
+                      }
+                    : null
+                }
+                skippedHunksByMessage={skippedHunksByMessage}
+                proposalStatusSync={proposalStatusSync}
                 getOverlay={() => {
                   wysiwygFlushRef.current?.()
                   const current = bookRef.current ?? book
@@ -2722,7 +2949,10 @@ export function Editor({ bookId }: { bookId: string }) {
                 onOpenSettings={() => setSettingsTab('agent')}
                 onClose={() => setAgentOpen(false)}
                 onReloadBook={() => void reload()}
+                onOpenProposalReview={openProposalReview}
+                onCloseProposalReview={closeProposalReview}
                 onApplyProposal={handleApplyAgentProposal}
+                onDismissProposal={handleDismissAgentProposal}
                 onUndoProposal={handleUndoAgentProposal}
               />
             </aside>
@@ -2950,6 +3180,48 @@ export function Editor({ bookId }: { bookId: string }) {
         onOpenChange={setCommandPaletteOpen}
         commands={paletteCommands}
       />
+
+      <Dialog
+        open={Boolean(staleApplyConfirm)}
+        onOpenChange={(openState) => {
+          if (!openState) setStaleApplyConfirm(null)
+        }}
+        ariaLabel="确认应用过时提案"
+        title="工作区内容自该提案生成后已更新"
+        description="以下文件在提案生成后已有其他修改，继续应用将覆盖它们的当前内容（应用后仍可一键撤销）："
+        footer={
+          <>
+            <Button variant="ghost" type="button" onClick={() => setStaleApplyConfirm(null)}>
+              取消
+            </Button>
+            <Button
+              variant="primary"
+              type="button"
+              onClick={() => {
+                const pending = staleApplyConfirm
+                setStaleApplyConfirm(null)
+                if (pending) {
+                  void handleApplyAgentProposal(pending.messageId, pending.proposal, {
+                    forceApplyStale: true,
+                  })
+                }
+              }}
+            >
+              仍然应用
+            </Button>
+          </>
+        }
+      >
+        {staleApplyConfirm ? (
+          <ul className="reference-list">
+            {staleApplyConfirm.driftedPaths.map((driftedPath) => (
+              <li key={driftedPath}>
+                <code>{driftedPath}</code>
+              </li>
+            ))}
+          </ul>
+        ) : null}
+      </Dialog>
 
       <SettingsDialog
         open={settingsTab !== null}
