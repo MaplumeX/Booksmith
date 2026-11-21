@@ -48,3 +48,4 @@ Status: implemented
 
 - 颜色自适应通过轻量扫描器解析 CSS 声明与内联 `style`，对嵌套 CSS 自定义属性（`var(--custom)`）或复杂渐变内部色标不做展开替换；遇到未知表达式时保持原值不变。
 - 可视化模式在切换主题后执行撤销/重做时，会立即将恢复的快照内联 `style` 重新对齐至当前全局主题，以防止历史快照携带旧主题颜色。
+- **相邻引用块无缝拼接演进（2026-11-22）**：[contiguous blockquote rendering and structure-aware book-page revision preview](../feature/2026-11-22-contiguous-quote-and-structural-revision-preview.md) 在本记录零权重 `:where(blockquote)` 基线之上补充了 `:where(blockquote:has(+ blockquote))` / `:where(blockquote + blockquote)` 接缝拼接规则，原书 CSS 覆盖原则与暗色自适应保持不变。

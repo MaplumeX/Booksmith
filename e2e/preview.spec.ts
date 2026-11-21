@@ -137,17 +137,27 @@ test('applies reader baseline styles and adapts hardcoded grey quotes in dark mo
   await expect(frame.locator('#base-quote')).toBeVisible()
   const lightMetrics = await frame.locator('body').evaluate(() => {
     const baseQuote = getComputedStyle(document.getElementById('base-quote')!)
+    const greyQuote = getComputedStyle(document.getElementById('grey-quote')!)
     const pre = getComputedStyle(document.querySelector('pre')!)
     const th = getComputedStyle(document.querySelector('th')!)
     return {
       quoteBg: baseQuote.backgroundColor,
       quoteBorderLeft: baseQuote.borderLeftWidth,
+      baseMarginBottom: baseQuote.marginBottom,
+      baseBottomRightRadius: baseQuote.borderBottomRightRadius,
+      greyMarginTop: greyQuote.marginTop,
+      greyTopRightRadius: greyQuote.borderTopRightRadius,
       preBg: pre.backgroundColor,
       thBg: th.backgroundColor,
     }
   })
   expect(lightMetrics.quoteBg).toBe('rgb(244, 244, 246)')
   expect(lightMetrics.quoteBorderLeft).toBe('3px')
+  // Adjacent blockquotes stitch seamlessly without an inter-card gap or seam corner radius.
+  expect(lightMetrics.baseMarginBottom).toBe('0px')
+  expect(lightMetrics.baseBottomRightRadius).toBe('0px')
+  expect(lightMetrics.greyMarginTop).toBe('0px')
+  expect(lightMetrics.greyTopRightRadius).toBe('0px')
   expect(lightMetrics.preBg).toBe('rgb(244, 244, 246)')
   expect(lightMetrics.thBg).toBe('rgb(244, 244, 246)')
 

@@ -277,6 +277,18 @@ ${isEditable ? '' : '  margin: 0;\n  padding: 20px 24px;\n'}}
   background-color: ${p.raised};
   color: ${p.textSecondary};
 }
+/* Zero-specificity seam stitching keeps consecutive <blockquote> elements visually unified
+ * without overriding author stylesheets. See ADR 2026-11-22-contiguous-quote-and-structural-revision-preview. */
+:where(blockquote:has(+ blockquote)) {
+  margin-bottom: 0;
+  padding-bottom: 0.375em;
+  border-bottom-right-radius: 0;
+}
+:where(blockquote + blockquote) {
+  margin-top: 0;
+  padding-top: 0.375em;
+  border-top-right-radius: 0;
+}
 :where(blockquote > :first-child) {
   margin-top: 0;
 }

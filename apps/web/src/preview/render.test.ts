@@ -204,6 +204,10 @@ describe('preview & editor theme CSS', () => {
   it('builds zero-specificity reader baseline CSS for typography, blockquote, code, and tables', () => {
     const previewLight = buildReaderBaseCss('light', { mode: 'preview' })
     expect(previewLight).toContain(':where(blockquote)')
+    expect(previewLight).toContain(':where(blockquote:has(+ blockquote))')
+    expect(previewLight).toContain(':where(blockquote + blockquote)')
+    expect(previewLight).toContain('border-bottom-right-radius: 0')
+    expect(previewLight).toContain('border-top-right-radius: 0')
     expect(previewLight).toContain(':where(pre)')
     expect(previewLight).toContain(':where(table)')
     expect(previewLight).toContain('padding: 20px 24px')
@@ -211,6 +215,8 @@ describe('preview & editor theme CSS', () => {
     expect(previewLight).toContain('background-color: #f4f4f6')
 
     const previewDark = buildReaderBaseCss('dark', { mode: 'preview' })
+    expect(previewDark).toContain(':where(blockquote:has(+ blockquote))')
+    expect(previewDark).toContain(':where(blockquote + blockquote)')
     expect(previewDark).toContain('color: #b4b5c7')
     expect(previewDark).toContain('background-color: #222430')
 

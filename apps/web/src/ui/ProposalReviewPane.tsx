@@ -134,6 +134,7 @@ interface ReviewBookIframeProps {
   activeHunkId?: string | null
   scrollSeq?: number
   onHunkAction?: (hunkId: string, decision: HunkDecision) => void
+  onToggleDiffHunk?: (hunkId: string) => void
   onGotoSourceHunk?: (hunkId: string) => void
   onSelectionChange?: (selection: string) => void
   title: string
@@ -149,6 +150,7 @@ function ReviewBookIframe({
   activeHunkId = null,
   scrollSeq = 0,
   onHunkAction,
+  onToggleDiffHunk,
   onGotoSourceHunk,
   onSelectionChange,
   title,
@@ -158,8 +160,8 @@ function ReviewBookIframe({
   const blobCacheRef = useRef<PreviewBlobCache>(new PreviewBlobCache())
   const readyDocsRef = useRef<WeakSet<Document>>(new WeakSet())
   const [error, setError] = useState<string | null>(null)
-  const callbacksRef = useRef({ onHunkAction, onGotoSourceHunk, onSelectionChange })
-  callbacksRef.current = { onHunkAction, onGotoSourceHunk, onSelectionChange }
+  const callbacksRef = useRef({ onHunkAction, onToggleDiffHunk, onGotoSourceHunk, onSelectionChange })
+  callbacksRef.current = { onHunkAction, onToggleDiffHunk, onGotoSourceHunk, onSelectionChange }
 
   const isDocReady = useCallback((): boolean => {
     const doc = frameRef.current?.contentDocument
@@ -242,6 +244,8 @@ function ReviewBookIframe({
         callbacksRef.current.onHunkAction?.(hunkId, 'rejected')
       } else if (action === 'reset-hunk') {
         callbacksRef.current.onHunkAction?.(hunkId, 'pending')
+      } else if (action === 'toggle-diff') {
+        callbacksRef.current.onToggleDiffHunk?.(hunkId)
       } else if (action === 'goto-source') {
         callbacksRef.current.onGotoSourceHunk?.(hunkId)
       }
@@ -492,6 +496,7 @@ export function ProposalReviewPane({
   const [activeHunkIdx, setActiveHunkIdx] = useState(0)
   const [scrollSeq, setScrollSeq] = useState(0)
   const [expandedGaps, setExpandedGaps] = useState<Set<string>>(() => new Set())
+  const [expandedDiffHunksByPath, setExpandedDiffHunksByPath] = useState<Record<string, ReadonlySet<string>>>({})
   const [cssPreviewChapter, setCssPreviewChapter] = useState<string | null>(null)
   const [cssCompareMode, setCssCompareMode] = useState<'after' | 'before'>('after')
 
@@ -512,6 +517,7 @@ export function ProposalReviewPane({
     setActiveHunkIdx(typeof focusHunkIndex === 'number' && focusHunkIndex >= 0 ? focusHunkIndex : 0)
     setScrollSeq((v) => v + 1)
     setExpandedGaps(new Set())
+    if (proposalChanged) setExpandedDiffHunksByPath({})
     setCssPreviewChapter(null)
     setCssCompareMode('after')
   }, [activeFile?.path, proposal.id, focusHunkIndex])
@@ -567,6 +573,7 @@ export function ProposalReviewPane({
   const activeHunk = clampedHunkIdx >= 0 ? hunks[clampedHunkIdx]! : null
 
   const activeDecisions = activeFile ? decisionsByPath[activeFile.path] : undefined
+  const activeExpandedDiffHunks = activeFile ? expandedDiffHunksByPath[activeFile.path] : undefined
 
   const revisionResult = useMemo(() => {
     if (!activeModel || !isChapter) return null
@@ -575,8 +582,9 @@ export function ProposalReviewPane({
       decisions: readOnly ? undefined : activeDecisions,
       allowHunkToggle,
       activeHunkId: activeHunk?.id ?? null,
+      expandedDiffHunkIds: activeExpandedDiffHunks,
     })
-  }, [activeModel, isChapter, readOnly, activeDecisions, allowHunkToggle, activeHunk?.id])
+  }, [activeModel, isChapter, readOnly, activeDecisions, allowHunkToggle, activeHunk?.id, activeExpandedDiffHunks])
 
   const finalChapterXhtml = useMemo(() => {
     if (!activeModel || !isChapter) return ''
@@ -660,6 +668,15 @@ export function ProposalReviewPane({
     },
     [isLive, latestTouchedPath, onPauseFollow, onSetHunkDecision],
   )
+
+  const handleToggleDiffHunk = useCallback((filePath: string, hunkId: string) => {
+    setExpandedDiffHunksByPath((prev) => {
+      const nextSet = new Set(prev[filePath] ?? [])
+      if (nextSet.has(hunkId)) nextSet.delete(hunkId)
+      else nextSet.add(hunkId)
+      return { ...prev, [filePath]: nextSet }
+    })
+  }, [])
 
   if (!activeFile || !activeModel) {
     return (
@@ -1137,6 +1154,7 @@ export function ProposalReviewPane({
                 ? (hunkId, decision) => handleHunkDecision(activeFile.path, hunkId, decision)
                 : undefined
             }
+            onToggleDiffHunk={(hunkId) => handleToggleDiffHunk(activeFile.path, hunkId)}
             onGotoSourceHunk={handleGotoSourceHunk}
             onSelectionChange={(text) => onSelectionChange?.(text, activeFile.path)}
             title={`书页修订视图：${basename(activeFile.path)}`}

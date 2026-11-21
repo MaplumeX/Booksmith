@@ -138,17 +138,93 @@ describe('proposalReview engine', () => {
     expect(noneKept).toBe(before)
   })
 
-  it('blocks partial-hunk composition that splits a multi-line XML element', () => {
+  it('coalesces paired cross-line blockquote wrappers into one atomic hunk with accurate stats and lossless reject', () => {
     const before = [
       '<html xmlns="http://www.w3.org/1999/xhtml"><body>',
-      '<p>正文内容</p>',
+      '<p>第一段引文</p>',
+      '<p>第二段引文</p>',
       '</body></html>',
     ].join('\n')
     const after = [
       '<html xmlns="http://www.w3.org/1999/xhtml"><body>',
       '<blockquote>',
-      '<p>正文内容</p>',
+      '<p>第一段引文</p>',
+      '<p>第二段引文</p>',
       '</blockquote>',
+      '</body></html>',
+    ].join('\n')
+
+    const model = buildFileHunks({
+      path: 'EPUB/text/ch001.xhtml',
+      kind: 'update',
+      beforeText: before,
+      afterText: after,
+    })
+    expect(model.hunks).toHaveLength(1)
+    expect(model.hunks[0]!.addedCount).toBe(2)
+    expect(model.hunks[0]!.removedCount).toBe(0)
+    expect(model.hunks[0]!.beforeLines).toEqual(['<p>第一段引文</p>', '<p>第二段引文</p>'])
+    expect(model.hunks[0]!.afterLines).toEqual(['<blockquote>', '<p>第一段引文</p>', '<p>第二段引文</p>', '</blockquote>'])
+    expect(composeFileFromHunks(model, { 'hunk-0': 'rejected' })).toBe(before)
+    expect(composeFileFromHunks(model, { 'hunk-0': 'accepted' })).toBe(after)
+
+    // Unwrapping blockquote also coalesces into one atomic hunk.
+    const unwrapModel = buildFileHunks({
+      path: 'EPUB/text/ch001.xhtml',
+      kind: 'update',
+      beforeText: after,
+      afterText: before,
+    })
+    expect(unwrapModel.hunks).toHaveLength(1)
+    expect(unwrapModel.hunks[0]!.removedCount).toBe(2)
+    expect(unwrapModel.hunks[0]!.addedCount).toBe(0)
+    expect(composeFileFromHunks(unwrapModel, { 'hunk-0': 'rejected' })).toBe(after)
+
+    // Merging two consecutive blockquotes keeps the seam as one self-balanced hunk without over-merging.
+    const mergeBefore = [
+      '<html><body>',
+      '<blockquote>',
+      '<p>段1</p>',
+      '</blockquote>',
+      '<blockquote>',
+      '<p>段2</p>',
+      '</blockquote>',
+      '<p>后续编辑前</p>',
+      '</body></html>',
+    ].join('\n')
+    const mergeAfter = [
+      '<html><body>',
+      '<blockquote>',
+      '<p>段1</p>',
+      '<p>段2</p>',
+      '</blockquote>',
+      '<p>后续编辑后</p>',
+      '</body></html>',
+    ].join('\n')
+    const mergeModel = buildFileHunks({
+      path: 'EPUB/text/ch001.xhtml',
+      kind: 'update',
+      beforeText: mergeBefore,
+      afterText: mergeAfter,
+    })
+    expect(mergeModel.hunks).toHaveLength(2)
+    expect(mergeModel.hunks[0]!.beforeLines).toEqual(['</blockquote>', '<blockquote>'])
+    expect(mergeModel.hunks[0]!.afterLines).toEqual([])
+    expect(composeFileFromHunks(mergeModel, { 'hunk-0': 'rejected' })).toContain('</blockquote>\n<blockquote>')
+  })
+
+  it('keeps chapter-wide wrappers beyond the 40-line guard split and blocks partial XML breakage', () => {
+    const middleParagraphs = Array.from({ length: 42 }, (_, idx) => `<p>第 ${idx + 1} 段正文</p>`)
+    const before = [
+      '<html xmlns="http://www.w3.org/1999/xhtml"><body>',
+      ...middleParagraphs,
+      '</body></html>',
+    ].join('\n')
+    const after = [
+      '<html xmlns="http://www.w3.org/1999/xhtml"><body>',
+      '<section>',
+      ...middleParagraphs,
+      '</section>',
       '</body></html>',
     ].join('\n')
 
