@@ -190,6 +190,7 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
 async function consumeAgentSse(
   response: Response,
   onEvent: (event: AgentSseEvent) => void,
+  signal?: AbortSignal,
 ): Promise<void> {
   if (!response.ok) {
     const payload = await response.json().catch(() => ({}))
@@ -203,13 +204,22 @@ async function consumeAgentSse(
   const decoder = new TextDecoder('utf-8')
   let buffer = ''
 
+  const throwIfAborted = () => {
+    if (!signal?.aborted) return
+    void reader.cancel().catch(() => {})
+    throw new DOMException('The operation was aborted', 'AbortError')
+  }
+
   while (true) {
+    throwIfAborted()
     const { value, done } = await reader.read()
+    throwIfAborted()
     if (done) break
     buffer += decoder.decode(value, { stream: true })
     const chunks = buffer.split('\n\n')
     buffer = chunks.pop() ?? ''
     for (const chunk of chunks) {
+      throwIfAborted()
       const line = chunk.split('\n').find((entry) => entry.startsWith('data: '))
       if (!line) continue
       try {
@@ -221,6 +231,7 @@ async function consumeAgentSse(
     }
   }
 
+  throwIfAborted()
   const tail = buffer.trim()
   if (tail.startsWith('data: ')) {
     try {
@@ -462,6 +473,12 @@ export const api = {
       body: JSON.stringify({ status }),
     }),
 
+  abortAgentThread: (bookId: string, threadId: string) =>
+    request<{ aborted: boolean }>(`/books/${bookId}/agent/threads/${threadId}/abort`, {
+      method: 'POST',
+      keepalive: true,
+    }),
+
   streamAgentMessage: async (
     bookId: string,
     threadId: string,
@@ -484,7 +501,7 @@ export const api = {
       body: JSON.stringify(body),
       signal: options.signal,
     })
-    await consumeAgentSse(response, options.onEvent)
+    await consumeAgentSse(response, options.onEvent, options.signal)
   },
 
   retryAgentMessage: async (
@@ -508,7 +525,7 @@ export const api = {
       body: JSON.stringify(body),
       signal: options.signal,
     })
-    await consumeAgentSse(response, options.onEvent)
+    await consumeAgentSse(response, options.onEvent, options.signal)
   },
 }
 

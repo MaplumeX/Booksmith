@@ -234,13 +234,21 @@ const tocEntrySchema: z.ZodType<TocInput> = z.lazy(() =>
   }),
 )
 
+function createAbortError(): Error {
+  const error = new Error('The operation was aborted')
+  error.name = 'AbortError'
+  return error
+}
+
 function buildSdkTools(
   workspace: AgentWorkspace,
   records: ToolCallSummary[],
   emit: (event: AgentStreamEvent) => void,
   approvalMode: AgentApprovalMode,
+  abortSignal?: AbortSignal,
 ) {
   function run(name: AgentToolName, args: Record<string, unknown>) {
+    if (abortSignal?.aborted) throw createAbortError()
     const id = randomUUID()
     const argsSummary = summarizeArgs(name, args)
     emit({ type: 'tool_start', id, name, argsSummary })
@@ -513,6 +521,11 @@ export async function runAgentTurn(options: RunAgentTurnOptions): Promise<RunAge
   let reasoning = ''
 
   try {
+    if (options.abortSignal?.aborted) {
+      emit({ type: 'done', stopped: true })
+      return { content, reasoning, toolCalls, proposal: null, stopped: true, error: null }
+    }
+
     const model = createLanguageModel(options.provider)
     const trimmedUserMessage = options.userMessage.trim()
     const currentUserContent = formatUserMessageWithContext(
@@ -532,12 +545,13 @@ export async function runAgentTurn(options: RunAgentTurnOptions): Promise<RunAge
         customInstructions: options.customInstructions,
       }),
       messages,
-      tools: buildSdkTools(workspace, toolCalls, emit, approvalMode),
+      tools: buildSdkTools(workspace, toolCalls, emit, approvalMode, options.abortSignal),
       stopWhen: maxSteps > 0 ? stepCountIs(maxSteps) : () => false,
       abortSignal: options.abortSignal,
     })
 
     for await (const part of result.fullStream) {
+      if (options.abortSignal?.aborted || part.type === 'abort') break
       if (part.type === 'reasoning-delta') {
         reasoning += part.text
         emit({ type: 'reasoning_delta', text: part.text })

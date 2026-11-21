@@ -39,6 +39,7 @@ describe('agent providers & runner with local mock LLM servers', () => {
   let server: ReturnType<typeof createServer>
   let openAiStep = 0
   let anthropicStep = 0
+  let abortToolsCalls = 0
   let lastAskRequest: Record<string, unknown> | null = null
   let askRequests: Array<Record<string, unknown>> = []
 
@@ -200,7 +201,58 @@ describe('agent providers & runner with local mock LLM servers', () => {
         const timer = setTimeout(() => {
           if (!res.writableEnded) res.end()
         }, 5000)
-        req.on('close', () => clearTimeout(timer))
+        res.on('close', () => clearTimeout(timer))
+        return
+      }
+
+      // Multi-tool step for verifying abort stops subsequent tools and LLM steps
+      if (url.pathname === '/abort-tools/chat/completions') {
+        abortToolsCalls += 1
+        writeOpenAiSse(res, [
+          {
+            id: `at-${abortToolsCalls}`,
+            object: 'chat.completion.chunk',
+            created: 1,
+            model: 'mock-oai',
+            choices: [
+              {
+                index: 0,
+                delta: {
+                  role: 'assistant',
+                  tool_calls: [
+                    {
+                      index: 0,
+                      id: 'call_abort_1',
+                      type: 'function',
+                      function: { name: 'list_files', arguments: '{}' },
+                    },
+                    {
+                      index: 1,
+                      id: 'call_abort_2',
+                      type: 'function',
+                      function: {
+                        name: 'edit_file',
+                        arguments: JSON.stringify({
+                          path: 'EPUB/text/ch001.xhtml',
+                          oldText: '<p>从这里开始写。</p>',
+                          newText: '<p>不应被执行。</p>',
+                        }),
+                      },
+                    },
+                  ],
+                },
+                finish_reason: null,
+              },
+            ],
+          },
+          {
+            id: `at-${abortToolsCalls}`,
+            object: 'chat.completion.chunk',
+            created: 1,
+            model: 'mock-oai',
+            choices: [{ index: 0, delta: {}, finish_reason: 'tool_calls' }],
+          },
+        ])
         return
       }
 
@@ -594,6 +646,59 @@ describe('agent providers & runner with local mock LLM servers', () => {
     expect(result.error).toBeNull()
     expect(result.proposal).toBeNull()
     expect(result.content).toBe('正在分析…')
+    expect(events.at(-1)).toEqual({ type: 'done', stopped: true })
+  })
+
+  it('aborts immediately before LLM call when signal is pre-aborted and halts subsequent tools & steps', async () => {
+    const { archive } = openEpub(createEmptyEpub({ title: '工具中止测试' }), nodeXmlCodec.parse)
+
+    // Pre-aborted signal must not contact upstream provider at all
+    abortToolsCalls = 0
+    const preAborted = new AbortController()
+    preAborted.abort()
+    const preResult = await runAgentTurn({
+      archive,
+      provider: {
+        provider: 'openai-compatible',
+        baseUrl: `${mockUrl}/abort-tools`,
+        model: 'mock-oai',
+        apiKey: null,
+      },
+      history: [],
+      userMessage: '不要调用模型',
+      abortSignal: preAborted.signal,
+    })
+    expect(preResult.stopped).toBe(true)
+    expect(preResult.error).toBeNull()
+    expect(preResult.proposal).toBeNull()
+    expect(abortToolsCalls).toBe(0)
+
+    // Abort on the first tool_end: second tool and step 2 must not run
+    abortToolsCalls = 0
+    const controller = new AbortController()
+    const events: AgentStreamEvent[] = []
+    const midResult = await runAgentTurn({
+      archive,
+      provider: {
+        provider: 'openai-compatible',
+        baseUrl: `${mockUrl}/abort-tools`,
+        model: 'mock-oai',
+        apiKey: null,
+      },
+      history: [],
+      userMessage: '连续调用两个工具',
+      abortSignal: controller.signal,
+      onEvent: (event) => {
+        events.push(event)
+        if (event.type === 'tool_end') controller.abort()
+      },
+    })
+    expect(midResult.stopped).toBe(true)
+    expect(midResult.error).toBeNull()
+    expect(midResult.proposal).toBeNull()
+    expect(abortToolsCalls).toBe(1)
+    expect(midResult.toolCalls).toHaveLength(1)
+    expect(midResult.toolCalls[0]?.name).toBe('list_files')
     expect(events.at(-1)).toEqual({ type: 'done', stopped: true })
   })
 

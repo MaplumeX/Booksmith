@@ -45,11 +45,13 @@ import type { FileStore } from '../storage/fileStore'
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
 const MAX_PROFILE_MODELS = 100
+const DEFAULT_SSE_HEARTBEAT_MS = 2_000
 
 interface AgentDeps {
   db: Db
   config: Config
   fileStore: FileStore
+  sseHeartbeatMs?: number
 }
 
 export interface AgentProfileDto {
@@ -292,6 +294,15 @@ function parseOverlay(body: Record<string, unknown>): {
 export function registerAgentRoutes(app: FastifyInstance, deps: AgentDeps): void {
   const { db, config, fileStore } = deps
   const secretKey = config.agentSecretKey ?? null
+  const sseHeartbeatMs = deps.sseHeartbeatMs ?? DEFAULT_SSE_HEARTBEAT_MS
+  const activeTurns = new Map<string, AbortController>()
+
+  app.addHook('onClose', async () => {
+    for (const controller of activeTurns.values()) {
+      controller.abort()
+    }
+    activeTurns.clear()
+  })
 
   // --- Cloud-synced per-user Agent preferences ---
 
@@ -789,8 +800,31 @@ export function registerAgentRoutes(app: FastifyInstance, deps: AgentDeps): void
       const thread = await findOwnedThread(db, book.id, request.params.threadId, user.id)
       if (!thread) return reply.code(404).send({ error: 'not_found' })
 
+      const active = activeTurns.get(thread.id)
+      if (active) {
+        active.abort()
+        activeTurns.delete(thread.id)
+      }
+
       await db.delete(agentThreads).where(eq(agentThreads.id, thread.id))
       return reply.code(204).send()
+    },
+  )
+
+  app.post<{ Params: { id: string; threadId: string } }>(
+    '/api/books/:id/agent/threads/:threadId/abort',
+    async (request, reply) => {
+      const user = requireUser(request, reply)
+      if (!user) return
+      const book = await findOwnedBook(db, request.params.id, user.id)
+      if (!book) return reply.code(404).send({ error: 'not_found' })
+      const thread = await findOwnedThread(db, book.id, request.params.threadId, user.id)
+      if (!thread) return reply.code(404).send({ error: 'not_found' })
+
+      const active = activeTurns.get(thread.id)
+      if (!active) return reply.send({ aborted: false })
+      active.abort()
+      return reply.send({ aborted: true })
     },
   )
 
@@ -891,129 +925,230 @@ export function registerAgentRoutes(app: FastifyInstance, deps: AgentDeps): void
       return
     }
 
-    // Build AgentWorkspace directly from unpacked `book_entries` (text + mimetype bytes only,
-    // zero binary bytea detoasting or zip unpacking). See ADR 2026-11-20-entry-level-book-storage.
-    const workspaceRows = await fileStore.listWorkspaceEntries(book.id)
-    if (workspaceRows.length === 0) {
-      reply.code(404).send({ error: 'not_found' })
-      return
-    }
-    const emptyBinary = new Uint8Array(0)
-    const archive: EpubArchive = {
-      order: workspaceRows.map((row) => row.path),
-      entries: new Map(
-        workspaceRows.map((row) => [row.path, row.bytes ? new Uint8Array(row.bytes) : emptyBinary]),
-      ),
-    }
-    const overlay = parseOverlay(body)
-    const userSettings = await loadUserSettings(db, user.id)
-
-    if (persistUserMessage) {
-      await db.insert(agentMessages).values({
-        threadId: thread.id,
-        role: 'user',
-        content: userMessage,
-        contextJson: context ? JSON.stringify(context) : null,
-      })
-    }
-
-    await db
-      .update(agentThreads)
-      .set({
-        title: nextTitle,
-        profileId: profile.id,
-        model: effectiveModel,
-        approvalMode,
-        updatedAt: new Date(),
-      })
-      .where(eq(agentThreads.id, thread.id))
-
-    // Hijack Fastify response to stream SSE directly with reverse-proxy buffering disabled.
-    // See ADR 2026-11-20-builtin-epub-agent.
-    reply.hijack()
-    const raw = reply.raw
-    raw.writeHead(200, {
-      'Content-Type': 'text/event-stream; charset=utf-8',
-      'Cache-Control': 'no-cache, no-transform',
-      Connection: 'keep-alive',
-      'X-Accel-Buffering': 'no',
-    })
-    raw.flushHeaders?.()
-
     const controller = new AbortController()
-    request.raw.on('close', () => {
-      if (!raw.writableEnded) controller.abort()
-    })
-
-    const writeEvent = (payload: Record<string, unknown>) => {
-      if (raw.writableEnded) return
-      raw.write(`data: ${JSON.stringify(payload)}\n\n`)
+    const abortTurn = () => {
+      if (!controller.signal.aborted) controller.abort()
     }
-
-    const result = await runAgentTurn({
-      archive,
-      overlay,
-      provider: {
-        provider: isAgentProvider(profile.provider) ? profile.provider : 'openai-compatible',
-        baseUrl: profile.baseUrl,
-        model: effectiveModel,
-        apiKey,
-      },
-      history,
-      userMessage,
-      context,
-      approvalMode,
-      customInstructions: userSettings.customInstructions,
-      maxSteps: userSettings.maxSteps,
-      abortSignal: controller.signal,
-      onEvent: (event: AgentStreamEvent) => {
-        // Hold `done` until the assistant message is persisted so the client gets its real messageId.
-        if (event.type === 'done') return
-        writeEvent(event)
-      },
-    })
-
-    const persistedFields = {
-      content: result.content,
-      reasoning: result.reasoning.trim() ? result.reasoning : null,
-      toolCallsJson: result.toolCalls.length > 0 ? JSON.stringify(result.toolCalls) : null,
-      proposalJson: result.proposal ? JSON.stringify(result.proposal) : null,
-      proposalStatus: result.proposal ? 'pending' : null,
-      error: result.error ? result.error.message : null,
+    const raw = reply.raw
+    // Listen on `reply.raw` (ServerResponse) rather than `request.raw` (IncomingMessage):
+    // Fastify consumes and closes `request.raw` while parsing the POST JSON body before the handler runs,
+    // so client disconnects during SSE streaming emit `'close'` on `reply.raw` with `writableEnded === false`.
+    const onResponseClose = () => {
+      if (!raw.writableEnded) abortTurn()
     }
+    const onResponseError = () => {
+      abortTurn()
+    }
+    raw.once('close', onResponseClose)
+    raw.on('error', onResponseError)
+    if (raw.destroyed || raw.closed) abortTurn()
 
-    let savedMessageId: string | undefined
-    if (replaceMessageId) {
-      const [updated] = await db
-        .update(agentMessages)
-        .set(persistedFields)
-        .where(eq(agentMessages.id, replaceMessageId))
-        .returning({ id: agentMessages.id })
-      savedMessageId = updated?.id ?? replaceMessageId
-    } else {
-      const [inserted] = await db
-        .insert(agentMessages)
-        .values({
+    let heartbeatTimer: ReturnType<typeof setInterval> | null = null
+
+    try {
+      // Cancel any stale in-flight turn on the same thread before registering this one.
+      const previous = activeTurns.get(thread.id)
+      if (previous && previous !== controller) previous.abort()
+      activeTurns.set(thread.id, controller)
+
+      // Build AgentWorkspace directly from unpacked `book_entries` (text + mimetype bytes only,
+      // zero binary bytea detoasting or zip unpacking). See ADR 2026-11-20-entry-level-book-storage.
+      const workspaceRows = await fileStore.listWorkspaceEntries(book.id)
+      if (controller.signal.aborted || raw.destroyed || raw.closed) {
+        if (!raw.destroyed && !raw.writableEnded) {
+          reply.hijack()
+          raw.writeHead(200, {
+            'Content-Type': 'text/event-stream; charset=utf-8',
+            'Cache-Control': 'no-cache, no-transform',
+            Connection: 'keep-alive',
+            'X-Accel-Buffering': 'no',
+          })
+          raw.write(`data: ${JSON.stringify({ type: 'done', stopped: true })}\n\n`)
+          raw.end()
+        }
+        return
+      }
+      if (workspaceRows.length === 0) {
+        reply.code(404).send({ error: 'not_found' })
+        return
+      }
+      const emptyBinary = new Uint8Array(0)
+      const archive: EpubArchive = {
+        order: workspaceRows.map((row) => row.path),
+        entries: new Map(
+          workspaceRows.map((row) => [row.path, row.bytes ? new Uint8Array(row.bytes) : emptyBinary]),
+        ),
+      }
+      const overlay = parseOverlay(body)
+      const userSettings = await loadUserSettings(db, user.id)
+      if (controller.signal.aborted || raw.destroyed || raw.closed) {
+        if (!raw.destroyed && !raw.writableEnded) {
+          reply.hijack()
+          raw.writeHead(200, {
+            'Content-Type': 'text/event-stream; charset=utf-8',
+            'Cache-Control': 'no-cache, no-transform',
+            Connection: 'keep-alive',
+            'X-Accel-Buffering': 'no',
+          })
+          raw.write(`data: ${JSON.stringify({ type: 'done', stopped: true })}\n\n`)
+          raw.end()
+        }
+        return
+      }
+
+      if (persistUserMessage) {
+        await db.insert(agentMessages).values({
           threadId: thread.id,
-          role: 'assistant',
-          ...persistedFields,
+          role: 'user',
+          content: userMessage,
+          contextJson: context ? JSON.stringify(context) : null,
         })
-        .returning({ id: agentMessages.id })
-      savedMessageId = inserted?.id
+      }
+
+      await db
+        .update(agentThreads)
+        .set({
+          title: nextTitle,
+          profileId: profile.id,
+          model: effectiveModel,
+          approvalMode,
+          updatedAt: new Date(),
+        })
+        .where(eq(agentThreads.id, thread.id))
+
+      // Hijack Fastify response to stream SSE directly with reverse-proxy buffering disabled.
+      // See ADR 2026-11-20-builtin-epub-agent.
+      reply.hijack()
+      if (raw.destroyed || raw.closed) abortTurn()
+      if (!raw.destroyed && !raw.writableEnded) {
+        raw.writeHead(200, {
+          'Content-Type': 'text/event-stream; charset=utf-8',
+          'Cache-Control': 'no-cache, no-transform',
+          Connection: 'keep-alive',
+          'X-Accel-Buffering': 'no',
+        })
+        raw.flushHeaders?.()
+      }
+
+      const writeEvent = (payload: Record<string, unknown>) => {
+        if (raw.writableEnded || raw.destroyed) return
+        try {
+          raw.write(`data: ${JSON.stringify(payload)}\n\n`)
+        } catch {
+          abortTurn()
+        }
+      }
+
+      // Periodic SSE comment heartbeats keep reverse proxies alive during long reasoning pauses
+      // and surface half-open TCP disconnects (CLOSE_WAIT) promptly so silent tab closes abort the LLM turn.
+      if (sseHeartbeatMs > 0 && !raw.destroyed && !raw.writableEnded) {
+        heartbeatTimer = setInterval(() => {
+          if (raw.writableEnded || raw.destroyed || controller.signal.aborted) {
+            if (heartbeatTimer) {
+              clearInterval(heartbeatTimer)
+              heartbeatTimer = null
+            }
+            return
+          }
+          try {
+            raw.write(': ping\n\n')
+          } catch {
+            abortTurn()
+          }
+        }, sseHeartbeatMs)
+      }
+
+      const result = await runAgentTurn({
+        archive,
+        overlay,
+        provider: {
+          provider: isAgentProvider(profile.provider) ? profile.provider : 'openai-compatible',
+          baseUrl: profile.baseUrl,
+          model: effectiveModel,
+          apiKey,
+        },
+        history,
+        userMessage,
+        context,
+        approvalMode,
+        customInstructions: userSettings.customInstructions,
+        maxSteps: userSettings.maxSteps,
+        abortSignal: controller.signal,
+        onEvent: (event: AgentStreamEvent) => {
+          // Hold `done` until the assistant message is persisted so the client gets its real messageId.
+          if (event.type === 'done') return
+          writeEvent(event)
+        },
+      })
+
+      const hasPartialOutput = Boolean(
+        result.content.trim() || result.reasoning.trim() || result.toolCalls.length > 0,
+      )
+      const shouldPersistAssistant = !result.stopped || hasPartialOutput
+
+      let savedMessageId: string | undefined
+      if (shouldPersistAssistant) {
+        const persistedFields = {
+          content: result.stopped ? result.content || '已停止生成。' : result.content,
+          reasoning: result.reasoning.trim() ? result.reasoning : null,
+          toolCallsJson: result.toolCalls.length > 0 ? JSON.stringify(result.toolCalls) : null,
+          proposalJson: !result.stopped && result.proposal ? JSON.stringify(result.proposal) : null,
+          proposalStatus: !result.stopped && result.proposal ? 'pending' : null,
+          error: result.error ? result.error.message : null,
+        }
+
+        try {
+          if (replaceMessageId) {
+            const [updated] = await db
+              .update(agentMessages)
+              .set(persistedFields)
+              .where(eq(agentMessages.id, replaceMessageId))
+              .returning({ id: agentMessages.id })
+            savedMessageId = updated?.id ?? replaceMessageId
+          } else {
+            const [inserted] = await db
+              .insert(agentMessages)
+              .values({
+                threadId: thread.id,
+                role: 'assistant',
+                ...persistedFields,
+              })
+              .returning({ id: agentMessages.id })
+            savedMessageId = inserted?.id
+          }
+
+          await db.update(agentThreads).set({ updatedAt: new Date() }).where(eq(agentThreads.id, thread.id))
+        } catch (error) {
+          // Ignore FK/missing-row errors if the thread was deleted while an aborted turn was unwinding.
+          if (!result.stopped) throw error
+        }
+      }
+
+      if (heartbeatTimer) {
+        clearInterval(heartbeatTimer)
+        heartbeatTimer = null
+      }
+      writeEvent({
+        type: 'done',
+        messageId: savedMessageId,
+        threadTitle: nextTitle,
+        stopped: result.stopped,
+        approvalMode,
+        model: effectiveModel,
+        profileId: profile.id,
+      })
+      if (!raw.writableEnded && !raw.destroyed) raw.end()
+    } finally {
+      if (heartbeatTimer) {
+        clearInterval(heartbeatTimer)
+        heartbeatTimer = null
+      }
+      raw.off('close', onResponseClose)
+      raw.off('error', onResponseError)
+      if (activeTurns.get(thread.id) === controller) {
+        activeTurns.delete(thread.id)
+      }
     }
-
-    await db.update(agentThreads).set({ updatedAt: new Date() }).where(eq(agentThreads.id, thread.id))
-
-    writeEvent({
-      type: 'done',
-      messageId: savedMessageId,
-      threadTitle: nextTitle,
-      stopped: result.stopped,
-      approvalMode,
-      model: effectiveModel,
-      profileId: profile.id,
-    })
-    if (!raw.writableEnded) raw.end()
   }
 
   // --- Streaming turn execution (SSE) ---
