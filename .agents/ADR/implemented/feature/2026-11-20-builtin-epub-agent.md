@@ -82,3 +82,4 @@ Booksmith 的核心使用场景是在浏览器三栏工作台中对整本 EPUB�
 - **服务端新增依赖**：`apps/server` 引入了 `ai`、`@ai-sdk/openai-compatible`、`@ai-sdk/anthropic`、`zod` 四个依赖；核心 EPUB 工具原语仍保留在 `packages/core` 中与 SDK 解耦。
 - **主密钥运维要求**：使用云端 API Key 的部署必须持久保存环境变量 `AGENT_SECRET_KEY`，变更该密钥会导致既有加密 API Key 无法解密，需用户重新录入；表结构为纯增量三表（`agent_profiles`、`agent_threads`、`agent_messages`），不影响既有书籍与快照数据。
 - **长对话与大章节预算控制**：当前采用固定上限（`read_file` 400 行 / 24KB、`search_book` 100 条、`trimHistory` 24,000 字符）；单轮最大工具步数默认 15，现已由 [Agent approval modes, multi-model providers, preferences, reasoning & retry](2026-11-20-agent-modes-and-multimodel.md) 扩展为可按账号云端自定义（支持任意正整数或留空不限），并增量扩展了三档审批模式、同供应商多模型列表、流式思考过程与末条助手原地重试。
+- **主画布审阅与逐处审批演进**：本文档中的「侧栏 `AgentProposalCard` 内嵌窄栏 Diff 与纯文本仅按文件勾选」条款已由 [in-canvas EPUB Agent proposal review](2026-11-21-in-canvas-agent-proposal-review.md) 部分替代，升级为中央主编辑区原位三态审阅（`修订 / 终稿 / 源码`）与纯文本逐处变更块（Hunk）审批；核心工具层、服务端沙盒、结构变更原子应用与浏览器工作区单一保存路径保持有效。

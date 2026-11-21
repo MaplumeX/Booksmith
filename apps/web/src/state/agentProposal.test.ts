@@ -158,11 +158,17 @@ describe('agentProposal application & undo', () => {
       ...initial,
       proposal,
       selectedPaths: new Set(['EPUB/text/ch001.xhtml']),
+      composedTexts: new Map([
+        [
+          'EPUB/text/ch001.xhtml',
+          '<html xmlns="http://www.w3.org/1999/xhtml"><body><p>仅保留部分块的正文。</p></body></html>',
+        ],
+      ]),
       parseXml: stubOpfParser,
     })
 
     expect(applied.appliedCount).toBe(1)
-    expect(applied.texts.get('EPUB/text/ch001.xhtml')).toContain('校对后的正文。')
+    expect(applied.texts.get('EPUB/text/ch001.xhtml')).toContain('仅保留部分块的正文。')
     expect(applied.texts.get('EPUB/styles/stylesheet1.css')).toContain('line-height: 1.6;')
     expect(applied.dirty.has('EPUB/text/ch001.xhtml')).toBe(true)
     expect(applied.dirty.has('EPUB/styles/stylesheet1.css')).toBe(false)

@@ -39,7 +39,7 @@
 | `ContextMenu` | `src/ui/ContextMenu.tsx` | Radix ContextMenu；图标 + 分组 + danger / disabled / edge（视口回拉）/ 键盘导航 |
 | `Dialog` | `src/ui/Dialog.tsx` | Radix Dialog；default / wide / 自定义 `onCloseAutoFocus` / 右上角关闭 / 右下角动作 / Escape 与遮罩关闭 |
 | `FileTypeIcon` | `src/ui/FileTypeIcon.tsx` | 文本 / 样式代码 / 图片 / 容器四类统一线宽图标 |
-| `FileTree` | `src/ui/FileTree.tsx` | 左悬浮结构岛「文件」视图；default / empty（无图片组）/ loading / error / edge（长名截断、待拆分徽标）/ Text 组多选批量栏（合并 / 样式表）/ Styles 新建样式表 / 接入 `ContextMenu` |
+| `FileTree` | `src/ui/FileTree.tsx` | 左悬浮结构岛「文件」视图；default / empty（无图片组）/ loading / error / edge（长名截断、待拆分徽标、待审阅变更徽标）/ Text 组多选批量栏（合并 / 样式表）/ Styles 新建样式表 / 接入 `ContextMenu` |
 | `LinkStylesheetsDialog` | `src/ui/LinkStylesheetsDialog.tsx` | `480px` 居中章节样式表关联弹窗；default（单/多章三态半选勾选、内嵌新建样式表）/ empty（无 CSS 引导创建）/ error（重名与非法路径提示）/ edge（长路径截断与滚动） |
 | `UnusedResourcesDialog` | `src/ui/UnusedResourcesDialog.tsx` | `560px` 居中未引用资源清理弹窗；default（图片/字体/未关联样式表分组勾选、缩略图与体积汇总）/ empty（零未引用绿标）/ edge（自动排除封面图、长列表滚动、缺图回退图标） |
 | `TocPanel` | `src/ui/TocPanel.tsx` | 左悬浮结构岛「目录」视图；default（单击跳转与高亮、折叠/按级展开、过滤、拖拽、多选批量栏、右键与 `···` 菜单、50 步撤销重做）/ empty（缺失目录初始化、空目录、过滤无命中）/ error（断链徽标点击直达修复、仅看断链）/ edge（177+ 项滚动、深层缩进钳制、长标题截断） |
@@ -56,7 +56,8 @@
 | `CheckPanel` | `src/ui/CheckPanel.tsx` | 顶栏「检查」动态健康度胶囊触发的 `380px` Radix Popover 诊断浮卡；empty（通过绿标）/ 错误与提醒分层卡片 / 点击跳行并收起浮卡 |
 | `AgentPanel` | `src/ui/AgentPanel.tsx` | 右侧独立悬浮对话白卡；default（`38px` 单行顶栏 + Radix Popover 历史会话 + IM 左右气泡与 Markdown + 中文工具步骤条 + 悬浮输入卡）/ empty / loading / error / edge（`<1024px` 互斥覆盖抽屉） |
 | `AgentMarkdown` | `src/ui/AgentMarkdown.tsx` | default（零依赖安全 React Markdown）/ empty / loading / error / edge（宽表与长代码独立横向滚动） |
-| `AgentProposalCard` | `src/ui/AgentProposalCard.tsx` | default（气泡外通栏轻量卡 + `+N/-M` 统计 + 折叠字符级 Diff）/ applied / dismissed / error / edge |
+| `AgentProposalCard` | `src/ui/AgentProposalCard.tsx` | 右侧栏瘦身导航摘要卡；default（文件列表、`+N/-M`、已选 Hunk 计数、「审阅中」高亮）/ applied（只读「查看改动」+ 撤销）/ dismissed / error / edge |
+| `ProposalReviewPane` | `src/ui/ProposalReviewPane.tsx` | 中央主画布原位三态审阅视图（`修订 / 终稿` `max-width: 760px`、`源码` `max-width: 900px`）；default（书页内联修订、逐处 Hunk 跳过、CSS 联动终稿预览、结构摘要）/ empty（无差异或全部跳过）/ loading / error（预检与 XML 不闭合阻断）/ edge（MathML 保护岛、`<head>` 变更提示、已应用只读回看、`<720px` 响应零溢出） |
 | `AgentSettingsDialog` | `src/ui/AgentSettingsDialog.tsx` | 导出嵌入式 `AgentSettingsPanel`（集成于 `SettingsDialog` 的「AI 助手」分页）/ 多预设列表 / OpenAI·Anthropic 分段协议控件 / API Key 显隐切换 / 测试连接反馈 |
 | `SettingsDialog` | `src/ui/SettingsDialog.tsx` | Radix Dialog (`760px`) / 「通用 \| AI 助手」分页 / 外观主题（跟随系统·浅色·深色，全局同步界面、代码与预览）/ 编辑器字号·自动换行·默认模式·默认对照预览 / 恢复默认 / 内嵌 AI 助手模型预设管理 |
 | `MediaPane` | `src/ui/MediaPane.tsx` | default（带外框预览）/ 非图片（图标说明）/ 替换确认（Radix Dialog）/ 删除入口 |

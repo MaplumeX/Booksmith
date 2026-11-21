@@ -34,7 +34,14 @@ async function resetAgentState(): Promise<void> {
 
 let mockServer: ReturnType<typeof createServer>
 let mockUrl = ''
-let mode: 'proofread' | 'chapter' | 'ask-reasoning' | 'auto-edit' | 'retry-fail' | 'retry-ok' = 'proofread'
+let mode:
+  | 'proofread'
+  | 'chapter'
+  | 'css-edit'
+  | 'ask-reasoning'
+  | 'auto-edit'
+  | 'retry-fail'
+  | 'retry-ok' = 'proofread'
 let turnStep = 0
 let lastModelSeen = ''
 let lastToolCountSeen = 0
@@ -196,6 +203,66 @@ test.beforeAll(async () => {
         return
       }
 
+      if (mode === 'css-edit') {
+        if (turnStep === 1) {
+          writeOpenAiSse(res, [
+            {
+              id: 'css1',
+              object: 'chat.completion.chunk',
+              created: 1,
+              model: 'mock',
+              choices: [
+                {
+                  index: 0,
+                  delta: {
+                    role: 'assistant',
+                    tool_calls: [
+                      {
+                        index: 0,
+                        id: 'call_css_1',
+                        type: 'function',
+                        function: {
+                          name: 'write_file',
+                          arguments: JSON.stringify({
+                            path: 'EPUB/styles/stylesheet1.css',
+                            content: 'body { line-height: 1.85; }\np { text-indent: 2em; }\n',
+                          }),
+                        },
+                      },
+                    ],
+                  },
+                  finish_reason: null,
+                },
+              ],
+            },
+            {
+              id: 'css1',
+              object: 'chat.completion.chunk',
+              created: 1,
+              model: 'mock',
+              choices: [{ index: 0, delta: {}, finish_reason: 'tool_calls' }],
+            },
+          ])
+          return
+        }
+        writeOpenAiSse(res, [
+          {
+            id: 'css2',
+            object: 'chat.completion.chunk',
+            created: 1,
+            model: 'mock',
+            choices: [
+              {
+                index: 0,
+                delta: { role: 'assistant', content: '已调整全书样式表行高与段首缩进。' },
+                finish_reason: 'stop',
+              },
+            ],
+          },
+        ])
+        return
+      }
+
       if (mode === 'proofread') {
         if (turnStep === 1) {
           writeOpenAiSse(res, [
@@ -220,6 +287,19 @@ test.beforeAll(async () => {
                             path: 'EPUB/text/ch001.xhtml',
                             oldText: '未保存测试错字',
                             newText: '已校对正确文本',
+                          }),
+                        },
+                      },
+                      {
+                        index: 1,
+                        id: 'call_edit_2',
+                        type: 'function',
+                        function: {
+                          name: 'edit_file',
+                          arguments: JSON.stringify({
+                            path: 'EPUB/text/ch001.xhtml',
+                            oldText: '第二处待定措辞',
+                            newText: '第二处改写措辞',
                           }),
                         },
                       },
@@ -250,7 +330,7 @@ test.beforeAll(async () => {
                 index: 0,
                 delta: {
                   role: 'assistant',
-                  content: '已定位并修正 **未保存草稿** 中的错字（`ch001.xhtml`）。',
+                  content: '已定位并修正 **未保存草稿** 中的两处文本（`ch001.xhtml`）。',
                 },
                 finish_reason: 'stop',
               },
@@ -389,12 +469,19 @@ test('multi-model provider fetch, approval modes (ask/review/auto), reasoning, c
   await dialog.getByRole('button', { name: '关闭', exact: true }).click()
   await expect(dialog).toBeHidden()
 
-  // Open ch001.xhtml and make an unsaved edit
+  // Open ch001.xhtml and make an unsaved edit with two distinct paragraphs & linked stylesheet
   await page.getByRole('button', { name: 'ch001.xhtml', exact: true }).click()
   const docWithTypo = [
     '<?xml version="1.0" encoding="UTF-8"?>',
     '<!DOCTYPE html>',
-    '<html xmlns="http://www.w3.org/1999/xhtml"><head><title>第一章</title></head><body><p>未保存测试错字</p></body></html>',
+    '<html xmlns="http://www.w3.org/1999/xhtml">',
+    '<head><title>第一章</title><link rel="stylesheet" type="text/css" href="../styles/stylesheet1.css" /></head>',
+    '<body>',
+    '<p>未保存测试错字</p>',
+    '<p>中间保持原样的段落</p>',
+    '<p>第二处待定措辞</p>',
+    '</body>',
+    '</html>',
   ].join('\n')
   await page.locator('.cm-content').click()
   await page.keyboard.press('Control+a')
@@ -446,24 +533,97 @@ test('multi-model provider fetch, approval modes (ask/review/auto), reasoning, c
   // Retry button is disabled on applied proposal turn
   await expect(page.getByRole('button', { name: '重试此回复' })).toBeDisabled()
 
-  // Undo restores original unsaved text
+  // Undo restores original unsaved text; applied card also supports read-only replay in main canvas
+  await page.getByRole('button', { name: '查看改动' }).click()
+  const reviewPane = page.locator('.review-pane')
+  await expect(reviewPane).toBeVisible()
+  await expect(reviewPane.getByText('已应用回看')).toBeVisible()
+  await reviewPane.getByRole('button', { name: '退出回看' }).click()
+  await expect(reviewPane).toBeHidden()
+
   await page.getByRole('button', { name: '撤销本次应用' }).click()
   await expect(page.locator('.cm-content')).toContainText('未保存测试错字')
 
-  // Turn 3: review mode proofreading diff apply + structural create_chapter
+  // Turn 3: review mode automatically opens main-canvas book-page revision view with per-hunk skipping
   await page.getByRole('button', { name: '切换审批模式' }).click()
   await page.getByRole('menuitemradio', { name: /审阅/ }).click()
 
   mode = 'proofread'
   turnStep = 0
-  await page.getByLabel('向助手输入指令').fill('审阅修正错字')
+  await page.getByLabel('向助手输入指令').fill('审阅修正两处错字')
   await page.getByRole('button', { name: '发送' }).click()
 
   await expect(page.locator('.agent-bubble.is-assistant .agent-md strong')).toContainText('未保存草稿')
-  await expect(page.getByText('纯文本 · 可勾选')).toBeVisible()
-  await expect(page.locator('.diff-inline-added')).toContainText('已校对正确文本')
-  await page.getByRole('button', { name: '应用变更' }).click()
+  // Sidebar card is slimmed down (no embedded code diff) and highlights active review
+  await expect(page.locator('.agent-proposal-diff')).toHaveCount(0)
+  await expect(page.locator('.agent-proposal-card.is-reviewing')).toBeVisible()
+  // Left file tree shows pending review badge for ch001.xhtml
+  await expect(page.locator('.tree-review-badge.is-update')).toHaveText('改')
+
+  // Main canvas renders book-page "修订" view with inline del/ins inside the iframe
+  await expect(reviewPane).toBeVisible()
+  const revFrame = reviewPane.frameLocator('.review-book-frame')
+  await expect(revFrame.locator('.bs-rev-ins').first()).toContainText('已校对正确文本')
+  await expect(revFrame.locator('.bs-rev-del').first()).toContainText('未保存测试错字')
+
+  // Skip the 2nd hunk directly inside the book-page revision view
+  await revFrame.locator('[data-bs-action="toggle-hunk"][data-bs-target-hunk="hunk-1"]').click()
+  await expect(revFrame.locator('[data-bs-hunk="hunk-1"]')).toContainText('第二处待定措辞')
+  await expect(reviewPane.getByRole('button', { name: '应用已选（1/2 处）' })).toBeVisible()
+
+  // Switch to "终稿" view and verify skipped hunk stays original while kept hunk is updated
+  await reviewPane.getByRole('button', { name: '终稿' }).click()
+  const finalFrame = reviewPane.frameLocator('.review-book-frame')
+  await expect(finalFrame.locator('body')).toContainText('已校对正确文本')
+  await expect(finalFrame.locator('body')).toContainText('第二处待定措辞')
+  await expect(finalFrame.locator('body')).not.toContainText('第二处改写措辞')
+
+  // Switch to "源码" view and verify line numbers & shared skipped hunk state
+  await reviewPane.getByRole('button', { name: '源码' }).click()
+  await expect(reviewPane.locator('.review-src-hunk')).toHaveCount(2)
+  await expect(reviewPane.locator('.review-src-hunk.is-skipped')).toHaveCount(1)
+
+  // Exit review and re-enter via sidebar card: skipped hunk draft is preserved in memory
+  await reviewPane.getByRole('button', { name: '退出审阅' }).click()
+  await expect(reviewPane).toBeHidden()
+  await page.getByRole('button', { name: '审阅变更' }).click()
+  await expect(reviewPane).toBeVisible()
+  await expect(reviewPane.getByRole('button', { name: '应用已选（1/2 处）' })).toBeVisible()
+
+  // Apply only kept hunk -> editor receives kept change while skipped paragraph stays intact
+  await reviewPane.getByRole('button', { name: '应用已选（1/2 处）' }).click()
+  await expect(reviewPane).toBeHidden()
   await expect(page.locator('.cm-content')).toContainText('已校对正确文本')
+  await expect(page.locator('.cm-content')).toContainText('第二处待定措辞')
+  await expect(page.locator('.cm-content')).not.toContainText('第二处改写措辞')
+
+  // Turn 3b: CSS edit proposal offers linked chapter final-style preview with before/after toggle
+  mode = 'css-edit'
+  turnStep = 0
+  await page.getByLabel('向助手输入指令').fill('优化样式表行高')
+  await page.getByRole('button', { name: '发送' }).click()
+
+  await expect(reviewPane).toBeVisible()
+  await expect(reviewPane.getByRole('button', { name: /在引用章节终稿中预览样式/ })).toBeVisible()
+  await reviewPane.getByRole('button', { name: /在引用章节终稿中预览样式/ }).click()
+  await expect(reviewPane.getByRole('button', { name: '修改后样式' })).toHaveAttribute('aria-pressed', 'true')
+  await reviewPane.getByRole('button', { name: '修改前样式' }).click()
+  await expect(reviewPane.getByRole('button', { name: '修改前样式' })).toHaveAttribute('aria-pressed', 'true')
+  await reviewPane.getByRole('button', { name: '返回样式源码' }).click()
+  await reviewPane.getByRole('button', { name: '放弃' }).click()
+  await expect(reviewPane).toBeHidden()
+
+  // Turn 3c: Structural proposal shows top structural summary strip and applies atomically
+  mode = 'chapter'
+  turnStep = 0
+  await page.getByLabel('向助手输入指令').fill('新增一章后记并加入目录')
+  await page.getByRole('button', { name: '发送' }).click()
+
+  await expect(reviewPane).toBeVisible()
+  await expect(reviewPane.locator('.review-context-strip.is-structural')).toContainText('新增 1 章')
+  await reviewPane.getByRole('button', { name: '应用全部变更' }).click()
+  await expect(reviewPane).toBeHidden()
+  await expect(page.getByRole('button', { name: 'afterword.xhtml', exact: true })).toBeVisible()
 
   // Turn 4: failed turn -> switch model and retry in place without duplicating user bubbles
   mode = 'retry-fail'
