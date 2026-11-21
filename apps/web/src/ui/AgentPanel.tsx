@@ -1,4 +1,4 @@
-import type { AgentProposal, AgentToolName } from '@booksmith/core'
+import type { AgentProposal } from '@booksmith/core'
 import {
   AlertCircle,
   ArrowUp,
@@ -41,6 +41,16 @@ import {
   type AgentToolCallDto,
 } from '../api/client'
 import { evaluateAutoApply } from '../state/agentProposal'
+import {
+  AGENT_TOOL_LABELS,
+  appendTimelineDelta,
+  applyToolEndToRunning,
+  buildMessageTurnView,
+  buildTurnView,
+  type AgentTurnView,
+  type ProcessStep,
+  type RunningToolCall,
+} from '../state/agentTimeline'
 import { basename } from '../state/bookStore'
 import {
   buildComposedProposalPlan,
@@ -106,102 +116,11 @@ interface StreamingState {
   reasoning: string
   timeline: AgentTimelineItem[]
   toolCalls: AgentToolCallDto[]
-  runningTool: { id: string; name: AgentToolName; argsSummary: string } | null
+  runningTools: RunningToolCall[]
   proposal: AgentProposal | null
   compactionNotice: AgentCompactionNotice | null
   usage: { inputTokens: number; contextWindow: number } | null
   replacingMessageId?: string
-}
-
-type TimelineSegment =
-  | { kind: 'reasoning'; text: string }
-  | { kind: 'text'; text: string }
-  | {
-      kind: 'tools'
-      calls: AgentToolCallDto[]
-      running?: { id: string; name: AgentToolName; argsSummary: string } | null
-    }
-
-function appendTimelineDelta(
-  timeline: AgentTimelineItem[],
-  type: 'reasoning' | 'text',
-  delta: string,
-): AgentTimelineItem[] {
-  if (!delta) return timeline
-  const last = timeline[timeline.length - 1]
-  if (last && last.type === type) {
-    return [...timeline.slice(0, -1), { type, text: last.text + delta }]
-  }
-  return [...timeline, { type, text: delta }]
-}
-
-function groupTimelineSegments(
-  timeline: readonly AgentTimelineItem[],
-  runningTool?: { id: string; name: AgentToolName; argsSummary: string } | null,
-): TimelineSegment[] {
-  const segments: TimelineSegment[] = []
-  for (const item of timeline) {
-    if (item.type === 'reasoning') {
-      if (!item.text.trim()) continue
-      const prev = segments[segments.length - 1]
-      if (prev && prev.kind === 'reasoning') {
-        prev.text += item.text
-      } else {
-        segments.push({ kind: 'reasoning', text: item.text })
-      }
-    } else if (item.type === 'text') {
-      if (!item.text) continue
-      const prev = segments[segments.length - 1]
-      if (prev && prev.kind === 'text') {
-        prev.text += item.text
-      } else {
-        segments.push({ kind: 'text', text: item.text })
-      }
-    } else if (item.type === 'tool') {
-      const prev = segments[segments.length - 1]
-      const call: AgentToolCallDto = {
-        id: item.id,
-        name: item.name,
-        argsSummary: item.argsSummary,
-        ok: item.ok,
-        summary: item.summary,
-      }
-      if (prev && prev.kind === 'tools') {
-        prev.calls.push(call)
-      } else {
-        segments.push({ kind: 'tools', calls: [call] })
-      }
-    }
-  }
-  if (runningTool) {
-    const last = segments[segments.length - 1]
-    if (last && last.kind === 'tools' && !last.running) {
-      last.running = runningTool
-    } else {
-      segments.push({ kind: 'tools', calls: [], running: runningTool })
-    }
-  }
-  return segments
-}
-
-function buildMessageTimelineSegments(msg: AgentMessageDto): TimelineSegment[] {
-  if (Array.isArray(msg.timeline) && msg.timeline.length > 0) {
-    return groupTimelineSegments(msg.timeline)
-  }
-  const fallback: AgentTimelineItem[] = []
-  for (const call of msg.toolCalls) {
-    fallback.push({
-      type: 'tool',
-      id: call.id,
-      name: call.name,
-      argsSummary: call.argsSummary,
-      ok: call.ok,
-      summary: call.summary,
-    })
-  }
-  if (msg.reasoning) fallback.push({ type: 'reasoning', text: msg.reasoning })
-  if (msg.content) fallback.push({ type: 'text', text: msg.content })
-  return groupTimelineSegments(fallback)
 }
 
 function formatCompactTokens(tokens: number): string {
@@ -233,30 +152,6 @@ const APPROVAL_META: Record<
 }
 
 const APPROVAL_ORDER: AgentApprovalMode[] = ['ask', 'review', 'auto']
-
-const TOOL_LABELS: Record<AgentToolName, string> = {
-  list_files: '列出书籍文件',
-  read_file: '读取文件',
-  search_book: '检索全书',
-  lint_book: '检查全书结构',
-  get_metadata: '读取元数据',
-  get_toc: '读取目录',
-  scan_headings: '扫描正文标题',
-  edit_file: '编辑文件',
-  write_file: '写入文件',
-  update_metadata: '更新元数据',
-  update_toc: '更新目录',
-  generate_toc: '生成目录',
-  edit_toc: '调整目录结构',
-  create_chapter: '新建章节',
-  rename_file: '重命名文件',
-  delete_file: '删除文件',
-  split_chapter: '拆分章节',
-  merge_chapters: '合并章节',
-  link_stylesheets: '关联样式表',
-  create_stylesheet: '新建样式表',
-  cleanup_unused_resources: '清理未引用资源',
-}
 
 const STARTER_PROMPTS: Array<{ icon: typeof ShieldCheck; title: string; prompt: string }> = [
   {
@@ -313,18 +208,6 @@ function formatThreadTime(iso: string): string {
   return `${date.getMonth() + 1}/${date.getDate()}`
 }
 
-function summarizeCalls(calls: AgentToolCallDto[]): string {
-  if (calls.length === 0) return ''
-  const uniqueLabels: string[] = []
-  for (const call of calls) {
-    const label = TOOL_LABELS[call.name] ?? call.name
-    if (!uniqueLabels.includes(label)) uniqueLabels.push(label)
-  }
-  const preview = uniqueLabels.slice(0, 2).join('、')
-  const suffix = uniqueLabels.length > 2 ? ' 等' : ''
-  return `已执行 ${calls.length} 步 · ${preview}${suffix}`
-}
-
 function CompactionDivider({ notice }: { notice: AgentCompactionNotice }) {
   const [open, setOpen] = useState(false)
   const label = notice.degraded
@@ -357,118 +240,171 @@ function CompactionDivider({ notice }: { notice: AgentCompactionNotice }) {
   )
 }
 
-function ReasoningBlock({
-  text,
-  streaming = false,
-  hasAnswer = false,
+function ProcessReasoningItem({
+  step,
 }: {
-  text: string
-  streaming?: boolean
-  hasAnswer?: boolean
+  step: Extract<ProcessStep, { kind: 'reasoning' }>
 }) {
   const [userToggled, setUserToggled] = useState<boolean | null>(null)
-  const trimmed = text.trim()
-  if (!trimmed) return null
-
-  const autoOpen = streaming && !hasAnswer
-  const open = userToggled ?? autoOpen
+  const isActive = step.status === 'active'
+  const open = userToggled ?? isActive
 
   return (
-    <div className={`agent-reasoning-box${open ? ' is-open' : ''}`}>
+    <li
+      className={`agent-process-step is-reasoning${isActive ? ' is-active' : ''}`}
+      data-testid="agent-process-reasoning"
+      data-status={step.status}
+    >
       <button
         type="button"
-        className="agent-reasoning-toggle"
+        className="agent-process-reasoning-toggle"
         aria-expanded={open}
-        onClick={() => setUserToggled((cur) => !(cur ?? autoOpen))}
+        onClick={() => setUserToggled((cur) => !(cur ?? isActive))}
       >
-        {streaming && !hasAnswer ? (
-          <Loader2 size={12} strokeWidth={1.8} className="spin agent-icon-accent" aria-hidden="true" />
-        ) : (
-          <Brain size={12} strokeWidth={1.75} className="agent-icon-muted" aria-hidden="true" />
-        )}
-        <span className="agent-reasoning-summary">
-          {streaming && !hasAnswer ? '正在深度思考…' : `思考过程 · ${trimmed.length} 字`}
+        <span className="agent-process-marker" aria-hidden="true">
+          {isActive ? (
+            <Loader2 size={12} strokeWidth={1.85} className="spin agent-icon-accent" />
+          ) : (
+            <Brain size={12} strokeWidth={1.75} className="agent-icon-muted" />
+          )}
+        </span>
+        <span className="agent-process-reasoning-label">
+          {isActive ? '正在思考…' : `思考过程 · ${step.text.length} 字`}
         </span>
         {open ? (
-          <ChevronDown size={12} strokeWidth={1.75} aria-hidden="true" />
+          <ChevronDown size={11} strokeWidth={1.75} className="agent-process-step-caret" aria-hidden="true" />
         ) : (
-          <ChevronRight size={12} strokeWidth={1.75} aria-hidden="true" />
+          <ChevronRight size={11} strokeWidth={1.75} className="agent-process-step-caret" aria-hidden="true" />
         )}
       </button>
-      {open ? <div className="agent-reasoning-content">{trimmed}</div> : null}
-    </div>
+      {open ? <div className="agent-process-reasoning-body">{step.text}</div> : null}
+    </li>
   )
 }
 
-function ToolSteps({
-  calls,
-  running,
+function ProcessToolItem({
+  step,
 }: {
-  calls: AgentToolCallDto[]
-  running?: { id: string; name: AgentToolName; argsSummary: string } | null
+  step: Extract<ProcessStep, { kind: 'tool' }>
 }) {
-  const [open, setOpen] = useState(false)
-  if (calls.length === 0 && !running) return null
+  const label = AGENT_TOOL_LABELS[step.name] ?? step.name
+  return (
+    <li
+      className={`agent-process-step is-tool${step.status === 'error' ? ' is-err' : ''}${step.status === 'running' ? ' is-active' : ''}`}
+      data-testid="agent-process-tool"
+      data-status={step.status}
+    >
+      <span className="agent-process-marker" aria-hidden="true">
+        {step.status === 'running' ? (
+          <Loader2 size={12} strokeWidth={1.85} className="spin agent-icon-accent" />
+        ) : step.status === 'ok' ? (
+          <Check size={12} strokeWidth={2} className="agent-icon-ok" />
+        ) : (
+          <AlertCircle size={12} strokeWidth={1.9} className="agent-icon-err" />
+        )}
+      </span>
+      <div className="agent-process-tool-main">
+        <div className="agent-process-tool-head">
+          <span className="agent-process-tool-label">{label}</span>
+          {step.argsSummary ? (
+            <span className="agent-process-tool-args" title={step.argsSummary}>
+              {step.argsSummary}
+            </span>
+          ) : null}
+        </div>
+        {step.summary ? (
+          <span className="agent-process-tool-result" title={step.summary}>
+            {step.summary}
+          </span>
+        ) : null}
+      </div>
+    </li>
+  )
+}
 
-  const hasError = calls.some((c) => !c.ok)
-  const runningLabel = running ? TOOL_LABELS[running.name] ?? running.name : ''
+function ProcessNoteItem({
+  step,
+}: {
+  step: Extract<ProcessStep, { kind: 'note' }>
+}) {
+  return (
+    <li className="agent-process-step is-note" data-testid="agent-process-note">
+      <span className="agent-process-marker" aria-hidden="true">
+        <span className="agent-process-note-dot" />
+      </span>
+      <p className="agent-process-note-text">{step.text}</p>
+    </li>
+  )
+}
+
+/**
+ * Unified collapsible process disclosure for reasoning blocks, tool calls, and intermediate
+ * commentary; defaults to collapsed during both streaming and idle so only the final reply
+ * commands primary visual weight. See ADR 2026-11-22-agent-chat-process-drawer-ui.
+ */
+function AgentProcessDrawer({ view }: { view: AgentTurnView }) {
+  const [open, setOpen] = useState(false)
+  if (!view.hasProcess) return null
+
+  const canExpand = view.processSteps.length > 0
+  const displayLabel = view.isProcessLive ? (view.liveLabel ?? '正在思考…') : view.summaryLabel
+
+  if (!canExpand) {
+    return (
+      <div className="agent-process" data-testid="agent-process-drawer" data-live="true">
+        <div className="agent-process-status" data-testid="agent-process-status">
+          <Loader2 size={12} strokeWidth={1.85} className="spin agent-icon-accent" aria-hidden="true" />
+          <span className="agent-process-label">{displayLabel}</span>
+        </div>
+      </div>
+    )
+  }
+
+  const hasError = view.stats.failedToolCount > 0
+  const reasoningOnly = view.stats.toolCount === 0 && view.stats.reasoningCount > 0
 
   return (
-    <div className={`agent-tools-box${open ? ' is-open' : ''}`}>
+    <div
+      className={`agent-process${open ? ' is-open' : ''}${view.isProcessLive ? ' is-live' : ''}`}
+      data-testid="agent-process-drawer"
+      data-live={view.isProcessLive ? 'true' : 'false'}
+    >
       <button
         type="button"
-        className="agent-tools-toggle"
+        className="agent-process-toggle"
+        data-testid="agent-process-toggle"
         aria-expanded={open}
         onClick={() => setOpen((v) => !v)}
       >
-        {running ? (
-          <Loader2 size={12} strokeWidth={1.8} className="spin agent-icon-accent" aria-hidden="true" />
+        {view.isProcessLive ? (
+          <Loader2 size={12} strokeWidth={1.85} className="spin agent-icon-accent" aria-hidden="true" />
         ) : hasError ? (
-          <AlertCircle size={12} strokeWidth={1.8} className="agent-icon-err" aria-hidden="true" />
+          <AlertCircle size={12} strokeWidth={1.85} className="agent-icon-err" aria-hidden="true" />
+        ) : reasoningOnly ? (
+          <Brain size={12} strokeWidth={1.75} className="agent-icon-muted" aria-hidden="true" />
         ) : (
           <Wrench size={12} strokeWidth={1.75} className="agent-icon-muted" aria-hidden="true" />
         )}
-        <span className="agent-tools-summary">
-          {running
-            ? `正在${runningLabel}${running.argsSummary ? `（${running.argsSummary}）` : ''}…`
-            : summarizeCalls(calls)}
-        </span>
+        <span className="agent-process-label">{displayLabel}</span>
         {open ? (
-          <ChevronDown size={12} strokeWidth={1.75} aria-hidden="true" />
+          <ChevronDown size={12} strokeWidth={1.75} className="agent-process-caret" aria-hidden="true" />
         ) : (
-          <ChevronRight size={12} strokeWidth={1.75} aria-hidden="true" />
+          <ChevronRight size={12} strokeWidth={1.75} className="agent-process-caret" aria-hidden="true" />
         )}
       </button>
 
       {open ? (
-        <ul className="agent-tools-list">
-          {calls.map((call) => (
-            <li key={call.id} className={`agent-tool-item${call.ok ? '' : ' is-err'}`}>
-              <span className="agent-tool-status" aria-hidden="true">
-                {call.ok ? (
-                  <Check size={12} strokeWidth={2} className="agent-icon-ok" />
-                ) : (
-                  <AlertCircle size={12} strokeWidth={1.9} className="agent-icon-err" />
-                )}
-              </span>
-              <div className="agent-tool-main">
-                <div className="agent-tool-head">
-                  <span className="agent-tool-label">{TOOL_LABELS[call.name] ?? call.name}</span>
-                  {call.argsSummary ? (
-                    <span className="agent-tool-args" title={call.argsSummary}>
-                      {call.argsSummary}
-                    </span>
-                  ) : null}
-                </div>
-                {call.summary ? (
-                  <span className="agent-tool-result" title={call.summary}>
-                    {call.summary}
-                  </span>
-                ) : null}
-              </div>
-            </li>
-          ))}
-        </ul>
+        <ol className="agent-process-timeline" data-testid="agent-process-timeline">
+          {view.processSteps.map((step) => {
+            if (step.kind === 'reasoning') {
+              return <ProcessReasoningItem key={step.key} step={step} />
+            }
+            if (step.kind === 'tool') {
+              return <ProcessToolItem key={step.key} step={step} />
+            }
+            return <ProcessNoteItem key={step.key} step={step} />
+          })}
+        </ol>
       ) : null}
     </div>
   )
@@ -676,7 +612,7 @@ export function AgentPanel({
     streaming?.content,
     streaming?.reasoning,
     streaming?.toolCalls.length,
-    streaming?.runningTool?.id,
+    streaming?.runningTools.length,
   ])
 
   // Sync proposal status changes triggered from the main-canvas ProposalReviewPane.
@@ -920,7 +856,7 @@ export function AgentPanel({
       reasoning: '',
       timeline: [],
       toolCalls: [],
-      runningTool: null,
+      runningTools: [],
       proposal: null,
       compactionNotice: null,
       usage: null,
@@ -995,21 +931,16 @@ export function AgentPanel({
               draft.timeline = appendTimelineDelta(draft.timeline, 'text', event.text)
               setStreaming({ ...draft })
             } else if (event.type === 'tool_start') {
-              draft.runningTool = { id: event.id, name: event.name, argsSummary: event.argsSummary }
+              draft.runningTools = [
+                ...draft.runningTools.filter((t) => t.id !== event.id),
+                { id: event.id, name: event.name, argsSummary: event.argsSummary },
+              ]
               setStreaming({ ...draft })
             } else if (event.type === 'tool_end') {
-              const argsSummary =
-                draft.runningTool?.id === event.id ? draft.runningTool.argsSummary : event.name
-              draft.runningTool = null
-              const callItem: AgentToolCallDto = {
-                id: event.id,
-                name: event.name,
-                argsSummary,
-                ok: event.ok,
-                summary: event.summary,
-              }
-              draft.toolCalls = [...draft.toolCalls, callItem]
-              draft.timeline = [...draft.timeline, { type: 'tool', ...callItem }]
+              const { nextRunning, completedCall } = applyToolEndToRunning(draft.runningTools, event)
+              draft.runningTools = nextRunning
+              draft.toolCalls = [...draft.toolCalls, completedCall]
+              draft.timeline = [...draft.timeline, { type: 'tool', ...completedCall }]
               setStreaming({ ...draft })
             } else if (event.type === 'proposal') {
               draft.proposal = event.proposal
@@ -1105,7 +1036,7 @@ export function AgentPanel({
       reasoning: '',
       timeline: [],
       toolCalls: [],
-      runningTool: null,
+      runningTools: [],
       proposal: null,
       compactionNotice: null,
       usage: null,
@@ -1178,21 +1109,16 @@ export function AgentPanel({
               draft.timeline = appendTimelineDelta(draft.timeline, 'text', event.text)
               setStreaming({ ...draft })
             } else if (event.type === 'tool_start') {
-              draft.runningTool = { id: event.id, name: event.name, argsSummary: event.argsSummary }
+              draft.runningTools = [
+                ...draft.runningTools.filter((t) => t.id !== event.id),
+                { id: event.id, name: event.name, argsSummary: event.argsSummary },
+              ]
               setStreaming({ ...draft })
             } else if (event.type === 'tool_end') {
-              const argsSummary =
-                draft.runningTool?.id === event.id ? draft.runningTool.argsSummary : event.name
-              draft.runningTool = null
-              const callItem: AgentToolCallDto = {
-                id: event.id,
-                name: event.name,
-                argsSummary,
-                ok: event.ok,
-                summary: event.summary,
-              }
-              draft.toolCalls = [...draft.toolCalls, callItem]
-              draft.timeline = [...draft.timeline, { type: 'tool', ...callItem }]
+              const { nextRunning, completedCall } = applyToolEndToRunning(draft.runningTools, event)
+              draft.runningTools = nextRunning
+              draft.toolCalls = [...draft.toolCalls, completedCall]
+              draft.timeline = [...draft.timeline, { type: 'tool', ...completedCall }]
               setStreaming({ ...draft })
             } else if (event.type === 'proposal') {
               draft.proposal = event.proposal
@@ -1676,17 +1602,12 @@ export function AgentPanel({
                     )
                   }
 
-                  const segments = buildMessageTimelineSegments(msg)
-                  const textSegmentIndices: number[] = []
-                  segments.forEach((seg, segIdx) => {
-                    if (seg.kind === 'text') textSegmentIndices.push(segIdx)
-                  })
-                  const firstTextIdx = textSegmentIndices[0] ?? -1
-                  const lastTextIdx = textSegmentIndices[textSegmentIndices.length - 1] ?? -1
+                  const view = buildMessageTurnView(msg)
+                  const copyTarget = view.finalText ?? msg.content
                   const renderAssistantMeta = (
                     <div className="agent-assistant-meta">
                       {clock ? <time className="agent-msg-time">{clock}</time> : null}
-                      {msg.content ? <CopyReplyButton text={msg.content} /> : null}
+                      {copyTarget ? <CopyReplyButton text={copyTarget} /> : null}
                       {canShowRetry ? (
                         <button
                           type="button"
@@ -1711,60 +1632,24 @@ export function AgentPanel({
                     <article key={msg.id} className="agent-turn is-assistant">
                       {msg.compactionNotice ? <CompactionDivider notice={msg.compactionNotice} /> : null}
 
-                      {/* Render interleaved reasoning, tool groups, and assistant text in exact execution order.
-                          See ADR 2026-11-21-agent-session-continuity. */}
-                      {segments.map((seg, segIdx) => {
-                        if (seg.kind === 'tools') {
-                          return <ToolSteps key={`tools-${segIdx}`} calls={seg.calls} />
-                        }
-                        if (seg.kind === 'reasoning') {
-                          return <ReasoningBlock key={`reasoning-${segIdx}`} text={seg.text} />
-                        }
-                        const isFirstText = segIdx === firstTextIdx
-                        const isLastText = segIdx === lastTextIdx
-                        return (
-                          <div key={`text-${segIdx}`} className="agent-assistant-row">
-                            {isFirstText ? (
-                              <div className="agent-avatar" aria-hidden="true">
-                                <Sparkles size={13} strokeWidth={1.8} />
-                              </div>
-                            ) : (
-                              <div className="agent-avatar-spacer" aria-hidden="true" />
-                            )}
-                            <div className="agent-assistant-col">
-                              <div className="agent-bubble is-assistant">
-                                <AgentMarkdown content={seg.text} />
-                                {isLastText && msg.error ? (
-                                  <p className="banner banner-error agent-inline-banner" role="alert">
-                                    <AlertCircle size={13} strokeWidth={1.75} aria-hidden="true" />
-                                    <span>{msg.error}</span>
-                                  </p>
-                                ) : null}
-                              </div>
-                              {isLastText ? renderAssistantMeta : null}
-                            </div>
-                          </div>
-                        )
-                      })}
+                      {/* Unified collapsible process drawer + flat full-width final reply.
+                          See ADR 2026-11-22-agent-chat-process-drawer-ui. */}
+                      {view.hasProcess ? <AgentProcessDrawer view={view} /> : null}
 
-                      {textSegmentIndices.length === 0 && msg.error ? (
-                        <div className="agent-assistant-row">
-                          <div className="agent-avatar" aria-hidden="true">
-                            <Sparkles size={13} strokeWidth={1.8} />
-                          </div>
-                          <div className="agent-assistant-col">
-                            <div className="agent-bubble is-assistant">
-                              <p className="banner banner-error agent-inline-banner" role="alert">
-                                <AlertCircle size={13} strokeWidth={1.75} aria-hidden="true" />
-                                <span>{msg.error}</span>
-                              </p>
-                            </div>
-                            {renderAssistantMeta}
-                          </div>
+                      {view.finalText ? (
+                        <div className="agent-reply" data-testid="agent-assistant-reply">
+                          <AgentMarkdown content={view.finalText} />
                         </div>
                       ) : null}
 
-                      {textSegmentIndices.length === 0 && !msg.error && (clock || canShowRetry) ? renderAssistantMeta : null}
+                      {msg.error ? (
+                        <p className="banner banner-error agent-inline-banner" role="alert">
+                          <AlertCircle size={13} strokeWidth={1.75} aria-hidden="true" />
+                          <span>{msg.error}</span>
+                        </p>
+                      ) : null}
+
+                      {clock || copyTarget || canShowRetry ? renderAssistantMeta : null}
 
                       {/* Slimmed summary card navigates directly into the main-canvas ProposalReviewPane. See ADR 2026-11-21-in-canvas-agent-proposal-review. */}
                       {msg.proposal && msg.proposalStatus ? (() => {
@@ -1809,71 +1694,18 @@ export function AgentPanel({
                 })}
 
                 {streaming ? (() => {
-                  const streamSegments = groupTimelineSegments(streaming.timeline, streaming.runningTool)
-                  const firstStreamTextIdx = streamSegments.findIndex((s) => s.kind === 'text')
-                  const lastSeg = streamSegments[streamSegments.length - 1]
-                  const showThinkingTail = !lastSeg || lastSeg.kind !== 'text'
+                  const streamView = buildTurnView({
+                    timeline: streaming.timeline,
+                    runningTools: streaming.runningTools,
+                    isStreaming: true,
+                  })
                   return (
                     <article className="agent-turn is-assistant is-streaming" aria-live="polite">
                       {streaming.compactionNotice ? <CompactionDivider notice={streaming.compactionNotice} /> : null}
-                      {streamSegments.map((seg, segIdx) => {
-                        if (seg.kind === 'tools') {
-                          return <ToolSteps key={`st-tools-${segIdx}`} calls={seg.calls} running={seg.running} />
-                        }
-                        if (seg.kind === 'reasoning') {
-                          const hasTextAfter = streamSegments
-                            .slice(segIdx + 1)
-                            .some((later) => later.kind === 'text')
-                          return (
-                            <ReasoningBlock
-                              key={`st-reasoning-${segIdx}`}
-                              text={seg.text}
-                              streaming
-                              hasAnswer={hasTextAfter}
-                            />
-                          )
-                        }
-                        const isFirst = segIdx === firstStreamTextIdx
-                        return (
-                          <div key={`st-text-${segIdx}`} className="agent-assistant-row">
-                            {isFirst ? (
-                              <div className="agent-avatar is-pulsing" aria-hidden="true">
-                                <Sparkles size={13} strokeWidth={1.8} />
-                              </div>
-                            ) : (
-                              <div className="agent-avatar-spacer" aria-hidden="true" />
-                            )}
-                            <div className="agent-assistant-col">
-                              <div className="agent-bubble is-assistant">
-                                <AgentMarkdown content={seg.text} />
-                              </div>
-                            </div>
-                          </div>
-                        )
-                      })}
-                      {showThinkingTail ? (
-                        <div className="agent-assistant-row">
-                          {firstStreamTextIdx < 0 ? (
-                            <div className="agent-avatar is-pulsing" aria-hidden="true">
-                              <Sparkles size={13} strokeWidth={1.8} />
-                            </div>
-                          ) : (
-                            <div className="agent-avatar-spacer" aria-hidden="true" />
-                          )}
-                          <div className="agent-assistant-col">
-                            <div className="agent-bubble is-assistant">
-                              <div className="agent-thinking">
-                                <Loader2 size={12} strokeWidth={1.8} className="spin" aria-hidden="true" />
-                                <span>
-                                  {streaming.runningTool
-                                    ? '正在处理工具返回…'
-                                    : streaming.reasoning
-                                      ? '正在整理回复…'
-                                      : '正在思考…'}
-                                </span>
-                              </div>
-                            </div>
-                          </div>
+                      {streamView.hasProcess ? <AgentProcessDrawer view={streamView} /> : null}
+                      {streamView.finalText ? (
+                        <div className="agent-reply is-streaming" data-testid="agent-assistant-reply">
+                          <AgentMarkdown content={streamView.finalText} />
                         </div>
                       ) : null}
                     </article>

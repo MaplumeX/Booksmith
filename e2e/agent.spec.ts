@@ -39,6 +39,7 @@ let mode:
   | 'chapter'
   | 'css-edit'
   | 'ask-reasoning'
+  | 'multi-reasoning'
   | 'auto-edit'
   | 'retry-fail'
   | 'retry-ok'
@@ -46,6 +47,8 @@ let mode:
   | 'continuity-t2'
   | 'continuity-t3' = 'proofread'
 let turnStep = 0
+let releaseSecondReasoning: (() => void) | null = null
+let secondReasoningFlushed: (() => void) | null = null
 let lastModelSeen = ''
 let lastToolCountSeen = 0
 let lastSystemPromptSeen = ''
@@ -289,6 +292,105 @@ test.beforeAll(async () => {
             ],
           },
         ])
+        return
+      }
+
+      if (mode === 'multi-reasoning') {
+        turnStep += 1
+        if (turnStep === 1) {
+          writeOpenAiSse(res, [
+            {
+              id: 'mr-1',
+              object: 'chat.completion.chunk',
+              created: 1,
+              model: lastModelSeen || 'mock-reasoner',
+              choices: [
+                {
+                  index: 0,
+                  delta: {
+                    role: 'assistant',
+                    reasoning_content: '第一阶段思考：读取第一章确认错字位置。',
+                  },
+                  finish_reason: null,
+                },
+              ],
+            },
+            {
+              id: 'mr-1',
+              object: 'chat.completion.chunk',
+              created: 1,
+              model: lastModelSeen || 'mock-reasoner',
+              choices: [
+                {
+                  index: 0,
+                  delta: {
+                    tool_calls: [
+                      {
+                        index: 0,
+                        id: 'call_mr_read',
+                        type: 'function',
+                        function: {
+                          name: 'read_file',
+                          arguments: JSON.stringify({ path: 'EPUB/text/ch001.xhtml' }),
+                        },
+                      },
+                    ],
+                  },
+                  finish_reason: null,
+                },
+              ],
+            },
+            {
+              id: 'mr-1',
+              object: 'chat.completion.chunk',
+              created: 1,
+              model: lastModelSeen || 'mock-reasoner',
+              choices: [{ index: 0, delta: {}, finish_reason: 'tool_calls' }],
+            },
+          ])
+          return
+        }
+
+        res.writeHead(200, { 'content-type': 'text/event-stream; charset=utf-8' })
+        res.write(
+          `data: ${JSON.stringify({
+            id: 'mr-2',
+            object: 'chat.completion.chunk',
+            created: 1,
+            model: lastModelSeen || 'mock-reasoner',
+            choices: [
+              {
+                index: 0,
+                delta: {
+                  role: 'assistant',
+                  reasoning_content: '第二阶段思考：已确认内容，准备整理最终回复。',
+                },
+                finish_reason: null,
+              },
+            ],
+          })}\n\n`,
+        )
+        secondReasoningFlushed?.()
+        await new Promise<void>((resolve) => {
+          releaseSecondReasoning = resolve
+        })
+        res.write(
+          `data: ${JSON.stringify({
+            id: 'mr-2',
+            object: 'chat.completion.chunk',
+            created: 1,
+            model: lastModelSeen || 'mock-reasoner',
+            choices: [
+              {
+                index: 0,
+                delta: { content: '双阶段推理完成：第一章结构正常。' },
+                finish_reason: 'stop',
+              },
+            ],
+          })}\n\n`,
+        )
+        res.write('data: [DONE]\n\n')
+        res.end()
         return
       }
 
@@ -691,8 +793,11 @@ test('multi-model provider fetch, approval modes (ask/review/auto), reasoning, c
   expect(lastToolCountSeen).toBe(7)
   expect(lastSystemPromptSeen).toContain('校对时保留原文学术术语。')
 
-  // Expand collapsed reasoning trace block
-  await page.getByRole('button', { name: /思考过程/ }).click()
+  // Expand collapsed process drawer, then open the reasoning step inside it
+  const turn1Drawer = page.getByTestId('agent-process-drawer').last()
+  await expect(turn1Drawer.getByTestId('agent-process-timeline')).toHaveCount(0)
+  await turn1Drawer.getByTestId('agent-process-toggle').click()
+  await turn1Drawer.getByRole('button', { name: /思考过程/ }).click()
   await expect(page.getByText('核对只读权限边界与自定义学术校对指令。')).toBeVisible()
 
   // Turn 2: switch to `auto` mode + same-provider `mock-pro` -> auto-applies to workspace with undo button
@@ -736,7 +841,7 @@ test('multi-model provider fetch, approval modes (ask/review/auto), reasoning, c
   await page.getByLabel('向助手输入指令').fill('审阅修正两处错字')
   await page.getByRole('button', { name: '发送' }).click()
 
-  await expect(page.locator('.agent-bubble.is-assistant .agent-md strong')).toContainText('未保存草稿')
+  await expect(page.locator('.agent-reply .agent-md strong')).toContainText('未保存草稿')
   // Sidebar card is slimmed down (no embedded code diff) and highlights active review
   await expect(page.locator('.agent-proposal-diff')).toHaveCount(0)
   await expect(page.locator('.agent-proposal-card.is-reviewing')).toBeVisible()
@@ -917,9 +1022,12 @@ test('continuous Agent session: keep-alive collapse, interleaved timeline, cumul
 
   await expect(page.getByText('第一轮润色已完成，可先审阅或直接继续微调。')).toBeVisible()
   expect(JSON.stringify(lastMessagesSeen)).toContain('从这里开始写。')
-  await expect(page.getByText('先定位并修改第一处。')).toBeVisible()
-  // Interleaved: assistant turn has 2 distinct assistant bubbles separated by a ToolSteps bar
-  await expect(page.locator('.agent-turn.is-assistant .agent-bubble.is-assistant')).toHaveCount(2)
+  // Intermediate commentary & tool calls stay collapsed inside the single process drawer; only final reply renders outside
+  await expect(page.locator('.agent-turn.is-assistant .agent-reply')).toHaveCount(1)
+  await expect(page.getByText('先定位并修改第一处。')).toBeHidden()
+  await page.getByTestId('agent-process-toggle').first().click()
+  await expect(page.getByTestId('agent-process-note')).toContainText('先定位并修改第一处。')
+  await expect(page.getByTestId('agent-process-tool')).toHaveCount(1)
   await expect(page.getByTestId('agent-context-usage')).toHaveText('34%')
 
   // Exit main-canvas review without applying, then send Turn 2 while collapsing sidebar mid-stream
@@ -979,4 +1087,78 @@ test('continuous Agent session: keep-alive collapse, interleaved timeline, cumul
   await expect(page.getByText('已被后续修改替代（1 个文件）')).toBeVisible()
   await expect(page.getByTestId('agent-compaction-divider')).toBeVisible()
   await expect(page.getByTestId('agent-context-usage')).toHaveText('27%')
+})
+
+test('multi-step reasoning isolates per-block thinking status and collapses process above final reply', async ({
+  page,
+}) => {
+  const bookId = await seedBook()
+  await resetAgentState()
+
+  await login(page)
+  await expectLoggedIn(page)
+  await page.goto(`/books/${bookId}`)
+  await page.waitForSelector('.cm-content')
+
+  await page.getByRole('button', { name: '助手' }).click()
+  await page.getByRole('button', { name: '配置模型预设' }).click()
+  const dialog = page.getByRole('dialog', { name: '应用设置' })
+  await dialog.getByLabel('预设名称').fill('双思考测试')
+  await dialog.getByLabel('Base URL').fill(`${mockUrl}/v1`)
+  await dialog.getByLabel('模型名称').fill('mock-reasoner')
+  await dialog.getByRole('button', { name: '添加预设' }).click()
+  await expect(dialog.getByText('预设已保存')).toBeVisible()
+  await dialog.getByRole('button', { name: '关闭', exact: true }).click()
+
+  mode = 'multi-reasoning'
+  turnStep = 0
+  releaseSecondReasoning = null
+  const reachedSecondReasoning = new Promise<void>((resolve) => {
+    secondReasoningFlushed = resolve
+  })
+
+  await page.getByLabel('向助手输入指令').fill('检查第一章是否正常')
+  await page.getByRole('button', { name: '发送' }).click()
+  await reachedSecondReasoning
+
+  // During streaming step 2: process drawer defaults to collapsed single live status row
+  const liveDrawer = page.locator('.agent-turn.is-streaming').getByTestId('agent-process-drawer')
+  await expect(liveDrawer).toHaveAttribute('data-live', 'true')
+  await expect(liveDrawer.getByTestId('agent-process-toggle')).toContainText('正在深度思考… · 已完成 2 步')
+  await expect(liveDrawer.getByTestId('agent-process-timeline')).toHaveCount(0)
+
+  // Expand live drawer: ONLY reasoning #2 is active while reasoning #1 is already settled ('done')
+  await liveDrawer.getByTestId('agent-process-toggle').click()
+  const liveReasoningBlocks = liveDrawer.getByTestId('agent-process-reasoning')
+  await expect(liveReasoningBlocks).toHaveCount(2)
+  await expect(liveReasoningBlocks.nth(0)).toHaveAttribute('data-status', 'done')
+  await expect(liveReasoningBlocks.nth(0)).toContainText('思考过程')
+  await expect(liveReasoningBlocks.nth(0)).not.toContainText('正在思考…')
+  await expect(liveReasoningBlocks.nth(1)).toHaveAttribute('data-status', 'active')
+  await expect(liveReasoningBlocks.nth(1)).toContainText('正在思考…')
+  await expect(liveReasoningBlocks.nth(1)).toContainText('第二阶段思考：已确认内容，准备整理最终回复。')
+
+  // Release final answer -> settles to collapsed summary drawer + single flat final reply
+  releaseSecondReasoning?.()
+  await expect(page.getByTestId('agent-assistant-reply')).toContainText('双阶段推理完成：第一章结构正常。')
+  const settledDrawer = page.getByTestId('agent-process-drawer').last()
+  await expect(settledDrawer).toHaveAttribute('data-live', 'false')
+  await expect(settledDrawer.getByTestId('agent-process-toggle')).toContainText('思考 2 次 · 调用 1 个工具')
+  await expect(settledDrawer.getByTestId('agent-process-timeline')).toHaveCount(0)
+
+  // Expand settled drawer: both reasoning blocks are 'done' and independently toggleable
+  await settledDrawer.getByTestId('agent-process-toggle').click()
+  const settledReasoningBlocks = settledDrawer.getByTestId('agent-process-reasoning')
+  await expect(settledReasoningBlocks).toHaveCount(2)
+  await expect(settledReasoningBlocks.nth(0)).toHaveAttribute('data-status', 'done')
+  await expect(settledReasoningBlocks.nth(1)).toHaveAttribute('data-status', 'done')
+  await settledReasoningBlocks.nth(0).getByRole('button').click()
+  await expect(settledReasoningBlocks.nth(0)).toContainText('第一阶段思考：读取第一章确认错字位置。')
+
+  // Reload confirms collapsed drawer + final reply persist
+  await page.reload()
+  await page.waitForSelector('.cm-content')
+  await page.getByRole('button', { name: '助手' }).click()
+  await expect(page.getByTestId('agent-assistant-reply')).toContainText('双阶段推理完成：第一章结构正常。')
+  await expect(page.getByTestId('agent-process-toggle').last()).toContainText('思考 2 次 · 调用 1 个工具')
 })
