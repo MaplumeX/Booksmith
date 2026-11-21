@@ -27,6 +27,7 @@ const EDITOR_ONLY_ATTRS = new Set([
   'data-booksmith-src',
   'data-booksmith-orig-alt',
   'data-booksmith-no-alt',
+  'data-booksmith-orig-style',
   'data-booksmith-island',
   'data-booksmith-selected',
   'data-booksmith-tabindex',
@@ -235,17 +236,28 @@ function serializeAttributes(el: EditableNodeLike, tag: string): string {
   const hasOrigAlt = el.hasAttribute?.('data-booksmith-orig-alt') ?? false
   const origAlt = el.getAttribute?.('data-booksmith-orig-alt') ?? ''
   const hadNoAlt = el.hasAttribute?.('data-booksmith-no-alt') ?? false
+  const hasOrigStyle = el.hasAttribute?.('data-booksmith-orig-style') ?? false
+  const origStyle = el.getAttribute?.('data-booksmith-orig-style') ?? ''
   const addedTabindex = el.hasAttribute?.('data-booksmith-tabindex') ?? false
 
   const parts: string[] = []
   let emittedSrc = false
   let emittedAlt = false
+  let emittedStyle = false
 
   for (const attr of attrs) {
     const name = attr.name
     const lower = name.toLowerCase()
     if (EDITOR_ONLY_ATTRS.has(lower)) continue
     if (addedTabindex && lower === 'tabindex') continue
+
+    // Restore pre-adaptation inline styles so dark-mode color transforms never leak into saved XHTML.
+    // See ADR 2026-11-21-reader-typography-and-dark-adaptation.
+    if (lower === 'style' && hasOrigStyle) {
+      if (origStyle) parts.push(`style="${escapeAttr(origStyle)}"`)
+      emittedStyle = true
+      continue
+    }
 
     if (tag === 'img' && lower === 'src') {
       const finalSrc = origSrc ?? (attr.value.startsWith('blob:') ? null : attr.value)
@@ -272,6 +284,9 @@ function serializeAttributes(el: EditableNodeLike, tag: string): string {
   }
   if (tag === 'img' && !emittedAlt && !hadNoAlt && hasOrigAlt) {
     parts.push(`alt="${escapeAttr(origAlt)}"`)
+  }
+  if (!emittedStyle && hasOrigStyle && origStyle) {
+    parts.push(`style="${escapeAttr(origStyle)}"`)
   }
 
   return parts.length > 0 ? ` ${parts.join(' ')}` : ''

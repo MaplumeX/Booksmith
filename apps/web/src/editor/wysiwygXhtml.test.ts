@@ -188,4 +188,21 @@ describe('wysiwygXhtml', () => {
     expect(nextXhtml).toContain('<body epub:type="bodymatter">\r\n<p>修改后的正文</p>\r\n</body>')
     expect(nextXhtml.replace(/\r\n/g, '')).not.toContain('\n')
   })
+
+  it('restores original inline styles and strips dark-mode adaptation artifacts', () => {
+    const bodyDom = el('body', { contenteditable: 'true' }, [
+      el(
+        'blockquote',
+        {
+          style: 'color: #b4b5c7; background: #222430;',
+          'data-booksmith-orig-style': 'color: #555; background: #f5f5f5;',
+        },
+        [el('p', {}, [txt('引用正文')])],
+      ),
+    ])
+    const serialized = serializeEditableBody(bodyDom, SAMPLE_XHTML, [])
+    expect(serialized).toContain('<blockquote style="color: #555; background: #f5f5f5;"><p>引用正文</p></blockquote>')
+    expect(serialized).not.toContain('data-booksmith-orig-style')
+    expect(serialized).not.toContain('#b4b5c7')
+  })
 })

@@ -47,7 +47,7 @@ import { checkXmlWellFormed, replaceBodyInXhtml, serializeEditableBody } from '.
 import { formatShortcut } from '../editor/shortcuts'
 import { patchDocument, patchHead } from '../preview/patchDocument'
 import {
-  buildEditorStyleCss,
+  adaptDocumentBodyInlineStyles,
   buildPreviewDocument,
   EMPTY_IFRAME_DOC,
   mediaTypeOf,
@@ -343,6 +343,7 @@ export function WysiwygPane({
     if (undoIndex.current <= 0) return
     undoIndex.current -= 1
     doc.body.innerHTML = undoStack.current[undoIndex.current] ?? ''
+    adaptDocumentBodyInlineStyles(doc.body, paperThemeRef.current, true)
     hasPendingEdit.current = true
     setContext(null)
     updateUndoFlags()
@@ -356,6 +357,7 @@ export function WysiwygPane({
     if (undoIndex.current >= undoStack.current.length - 1) return
     undoIndex.current += 1
     doc.body.innerHTML = undoStack.current[undoIndex.current] ?? ''
+    adaptDocumentBodyInlineStyles(doc.body, paperThemeRef.current, true)
     hasPendingEdit.current = true
     setContext(null)
     updateUndoFlags()
@@ -794,10 +796,21 @@ export function WysiwygPane({
   useEffect(() => {
     paperThemeRef.current = paperTheme
     const doc = frame.current?.contentDocument
-    if (!doc?.head || !isDocReady()) return
-    const style = doc.head.querySelector('style[data-booksmith-editor-style="true"]')
-    if (style) style.textContent = buildEditorStyleCss(paperTheme)
-  }, [paperTheme, isDocReady])
+    if (!doc?.head || !doc.body || !isDocReady() || loadedPath.current !== path) return
+    const cur = latest.current
+    const built = buildPreviewDocument({
+      xhtml: liveSession.current.xhtml,
+      path: cur.path,
+      archive: cur.archive,
+      pkg: cur.pkg,
+      editable: { paperTheme },
+      blobCache: blobCache.current,
+      resolveAsset: cur.resolveAsset,
+    })
+    patchHead(doc, built.doc)
+    adaptDocumentBodyInlineStyles(doc.body, paperTheme, true)
+    blobCache.current.flushObsolete(cur.archive)
+  }, [paperTheme, path, isDocReady])
 
   useEffect(() => {
     latest.current = { path, content, archive, pkg, externalVersion, resolveAsset }

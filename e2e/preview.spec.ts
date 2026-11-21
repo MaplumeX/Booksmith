@@ -39,6 +39,13 @@ test('renders MathML as real boxes', async ({ page }) => {
   const box = await math.boundingBox()
   expect(box?.width ?? 0).toBeGreaterThan(4)
   expect(box?.height ?? 0).toBeGreaterThan(4)
+  const scrollableMathCount = await frame.locator('math').evaluateAll((els) =>
+    els.filter((el) => {
+      const style = getComputedStyle(el)
+      return style.overflowY !== 'visible' || style.overflowX !== 'visible'
+    }).length,
+  )
+  expect(scrollableMathCount).toBe(0)
 })
 
 test('loads images from the book archive', async ({ page }) => {
@@ -102,4 +109,83 @@ test('patches preview in place on code edits and save without reloading the ifra
     }
   })
   expect(afterSave).toEqual({ sameWindow: true, sameStyle: true, sameHeading: true })
+})
+
+test('applies reader baseline styles and adapts hardcoded grey quotes in dark mode without reloading iframe', async ({
+  page,
+}) => {
+  await openChapter(page, 'ch003.xhtml')
+  const frame = page.frameLocator('.preview-frame')
+  await expect(frame.locator('body')).toContainText('序言')
+
+  await page.evaluate(() => {
+    const iframe = document.querySelector<HTMLIFrameElement>('.preview-frame')!
+    ;(iframe.contentWindow as unknown as Record<string, unknown>).__previewSessionId = 'theme-stable'
+  })
+
+  await page.locator('.cm-content').click()
+  await page.keyboard.press('Control+End')
+  await page.keyboard.press('ArrowUp')
+  await page.keyboard.press('ArrowUp')
+  await page.keyboard.insertText(
+    '<blockquote id="base-quote"><p>基线引用</p></blockquote>' +
+      '<blockquote id="grey-quote" style="color: #555; background: #f5f5f5;"><p>灰字引用</p></blockquote>' +
+      '<pre><code>let x = 1;</code></pre>' +
+      '<table><tr><th>列</th></tr><tr><td>值</td></tr></table>',
+  )
+
+  await expect(frame.locator('#base-quote')).toBeVisible()
+  const lightMetrics = await frame.locator('body').evaluate(() => {
+    const baseQuote = getComputedStyle(document.getElementById('base-quote')!)
+    const pre = getComputedStyle(document.querySelector('pre')!)
+    const th = getComputedStyle(document.querySelector('th')!)
+    return {
+      quoteBg: baseQuote.backgroundColor,
+      quoteBorderLeft: baseQuote.borderLeftWidth,
+      preBg: pre.backgroundColor,
+      thBg: th.backgroundColor,
+    }
+  })
+  expect(lightMetrics.quoteBg).toBe('rgb(244, 244, 246)')
+  expect(lightMetrics.quoteBorderLeft).toBe('3px')
+  expect(lightMetrics.preBg).toBe('rgb(244, 244, 246)')
+  expect(lightMetrics.thBg).toBe('rgb(244, 244, 246)')
+
+  // Switch to dark theme and confirm both baseline and hardcoded inline quote colors adapt cleanly.
+  await page.getByRole('button', { name: '设置', exact: true }).click()
+  const dialog = page.getByRole('dialog', { name: '应用设置' })
+  await dialog.getByRole('radio', { name: /深色/ }).click()
+  await dialog.getByRole('button', { name: '完成', exact: true }).click()
+
+  const darkMetrics = await page.evaluate(() => {
+    const iframe = document.querySelector<HTMLIFrameElement>('.preview-frame')!
+    const doc = iframe.contentDocument!
+    const win = iframe.contentWindow as unknown as Record<string, unknown>
+    const baseQuote = doc.defaultView!.getComputedStyle(doc.getElementById('base-quote')!)
+    const greyQuote = doc.defaultView!.getComputedStyle(doc.getElementById('grey-quote')!)
+    return {
+      sameWindow: win.__previewSessionId === 'theme-stable',
+      baseColor: baseQuote.color,
+      baseBg: baseQuote.backgroundColor,
+      greyColor: greyQuote.color,
+      greyBg: greyQuote.backgroundColor,
+    }
+  })
+  expect(darkMetrics.sameWindow).toBe(true)
+  expect(darkMetrics.baseColor).toBe('rgb(180, 181, 199)')
+  expect(darkMetrics.baseBg).toBe('rgb(34, 36, 48)')
+  expect(darkMetrics.greyColor).toBe('rgb(180, 181, 199)')
+  expect(darkMetrics.greyBg).toBe('rgb(34, 36, 48)')
+
+  // Switch back to light theme and confirm original inline quote colors restore.
+  await page.getByRole('button', { name: '设置', exact: true }).click()
+  await dialog.getByRole('radio', { name: /浅色/ }).click()
+  await dialog.getByRole('button', { name: '完成', exact: true }).click()
+
+  const restoredLight = await frame.locator('#grey-quote').evaluate((el) => {
+    const style = getComputedStyle(el)
+    return { color: style.color, bg: style.backgroundColor }
+  })
+  expect(restoredLight.color).toBe('rgb(85, 85, 85)')
+  expect(restoredLight.bg).toBe('rgb(245, 245, 245)')
 })
