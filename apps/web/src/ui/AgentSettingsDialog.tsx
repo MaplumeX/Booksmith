@@ -109,6 +109,8 @@ interface DraftForm {
   baseUrl: string
   model: string
   models: string[]
+  contextWindow: string
+  modelContextWindows: Record<string, number>
   apiKey: string
   clearApiKey: boolean
   isDefault: boolean
@@ -120,6 +122,8 @@ const EMPTY_FORM: DraftForm = {
   baseUrl: '',
   model: '',
   models: [],
+  contextWindow: '',
+  modelContextWindows: {},
   apiKey: '',
   clearApiKey: false,
   isDefault: false,
@@ -215,6 +219,8 @@ export function AgentSettingsPanel({ active, onChanged, onSettingsChanged }: Age
       baseUrl: profile.baseUrl,
       model: profile.model,
       models: normalizeModelList(profile.model, profile.models),
+      contextWindow: profile.contextWindow ? String(profile.contextWindow) : '',
+      modelContextWindows: profile.modelContextWindows ?? {},
       apiKey: '',
       clearApiKey: false,
       isDefault: profile.isDefault,
@@ -394,6 +400,15 @@ export function AgentSettingsPanel({ active, onChanged, onSettingsChanged }: Age
         setFetchedModels(null)
       } else {
         setFetchedModels(result.models)
+        if (result.modelContextWindows && Object.keys(result.modelContextWindows).length > 0) {
+          setForm((current) => ({
+            ...current,
+            modelContextWindows: {
+              ...current.modelContextWindows,
+              ...result.modelContextWindows,
+            },
+          }))
+        }
         setModelPickerQuery('')
       }
     } catch (cause) {
@@ -424,6 +439,17 @@ export function AgentSettingsPanel({ active, onChanged, onSettingsChanged }: Age
       return
     }
 
+    let parsedContextWindow: number | null = null
+    const rawCtx = form.contextWindow.trim()
+    if (rawCtx) {
+      const num = Number(rawCtx)
+      if (!Number.isInteger(num) || num < 2048 || num > 10_000_000) {
+        setFormError('上下文窗口请填写 2048–10000000 之间的整数，或留空自动识别。')
+        return
+      }
+      parsedContextWindow = num
+    }
+
     setSaving(true)
     try {
       let savedId: string
@@ -434,6 +460,8 @@ export function AgentSettingsPanel({ active, onChanged, onSettingsChanged }: Age
           baseUrl: form.baseUrl.trim(),
           model: cleanModel,
           models: finalModels,
+          contextWindow: parsedContextWindow,
+          modelContextWindows: form.modelContextWindows,
           ...(form.clearApiKey
             ? { clearApiKey: true }
             : form.apiKey.trim()
@@ -449,6 +477,8 @@ export function AgentSettingsPanel({ active, onChanged, onSettingsChanged }: Age
           baseUrl: form.baseUrl.trim(),
           model: cleanModel,
           models: finalModels,
+          contextWindow: parsedContextWindow,
+          modelContextWindows: form.modelContextWindows,
           apiKey: form.apiKey.trim(),
           isDefault: form.isDefault,
         })
@@ -855,6 +885,22 @@ export function AgentSettingsPanel({ active, onChanged, onSettingsChanged }: Age
                   )}
                 </button>
               </span>
+            </label>
+
+            <label className="panel-field">
+              <span>上下文窗口（tokens，留空自动识别）</span>
+              <input
+                type="number"
+                min={2048}
+                max={10000000}
+                step={1024}
+                inputMode="numeric"
+                aria-label="上下文窗口（tokens）"
+                data-testid="agent-context-window-input"
+                placeholder="自动识别（如 128000 / 32768），达到 80% 自动压缩"
+                value={form.contextWindow}
+                onChange={(event) => setForm({ ...form, contextWindow: event.target.value })}
+              />
             </label>
 
             {/* Multi-model management under the same provider & API key. See ADR 2026-11-20-agent-modes-and-multimodel. */}

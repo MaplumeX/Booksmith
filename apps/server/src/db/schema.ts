@@ -91,7 +91,7 @@ export const pageVersions = pgTable(
 )
 
 /** Per-user LLM provider presets with AES-256-GCM encrypted API keys and optional multi-model list.
- * See ADR 2026-11-20-builtin-epub-agent, ADR 2026-11-20-agent-modes-and-multimodel. */
+ * See ADR 2026-11-20-builtin-epub-agent, ADR 2026-11-20-agent-modes-and-multimodel, ADR 2026-11-21-agent-session-continuity. */
 export const agentProfiles = pgTable(
   'agent_profiles',
   {
@@ -104,6 +104,8 @@ export const agentProfiles = pgTable(
     baseUrl: text('base_url').notNull(),
     model: text('model').notNull(),
     modelsJson: text('models_json'),
+    contextWindow: integer('context_window'),
+    modelContextWindowsJson: text('model_context_windows_json'),
     apiKeyCiphertext: text('api_key_ciphertext'),
     apiKeyLast4: text('api_key_last4'),
     isDefault: boolean('is_default').notNull().default(false),
@@ -125,7 +127,9 @@ export const agentUserSettings = pgTable('agent_user_settings', {
   updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
 })
 
-/** Per-book Agent conversation threads, persisted across reloads and devices. */
+/** Per-book Agent conversation threads, persisted across reloads and devices.
+ * Stores persistent auto-compaction boundaries and latest context-window usage.
+ * See ADR 2026-11-21-agent-session-continuity. */
 export const agentThreads = pgTable(
   'agent_threads',
   {
@@ -140,13 +144,19 @@ export const agentThreads = pgTable(
     profileId: uuid('profile_id').references(() => agentProfiles.id, { onDelete: 'set null' }),
     model: text('model'),
     approvalMode: text('approval_mode').notNull().default('review'),
+    compactionSummary: text('compaction_summary'),
+    compactedUpToMessageId: uuid('compacted_up_to_message_id'),
+    lastInputTokens: integer('last_input_tokens'),
+    lastContextWindow: integer('last_context_window'),
     createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
   },
   (table) => [index('agent_threads_book_user_updated_idx').on(table.bookId, table.userId, table.updatedAt)],
 )
 
-/** Individual user/assistant turns within an Agent thread, including reasoning traces, tool summaries, and proposals. */
+/** Individual user/assistant turns within an Agent thread, including canonical multi-step traces,
+ * reasoning traces, tool summaries, proposals, proposal resolutions, and auto-compaction notices.
+ * See ADR 2026-11-21-agent-session-continuity. */
 export const agentMessages = pgTable(
   'agent_messages',
   {
@@ -158,9 +168,12 @@ export const agentMessages = pgTable(
     content: text('content').notNull().default(''),
     reasoning: text('reasoning'),
     contextJson: text('context_json'),
+    stepsJson: text('steps_json'),
     toolCallsJson: text('tool_calls_json'),
     proposalJson: text('proposal_json'),
     proposalStatus: text('proposal_status'),
+    proposalResolutionJson: text('proposal_resolution_json'),
+    compactionNoticeJson: text('compaction_notice_json'),
     error: text('error'),
     createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
   },

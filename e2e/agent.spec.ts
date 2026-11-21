@@ -41,11 +41,16 @@ let mode:
   | 'ask-reasoning'
   | 'auto-edit'
   | 'retry-fail'
-  | 'retry-ok' = 'proofread'
+  | 'retry-ok'
+  | 'continuity-t1'
+  | 'continuity-t2'
+  | 'continuity-t3' = 'proofread'
 let turnStep = 0
 let lastModelSeen = ''
 let lastToolCountSeen = 0
 let lastSystemPromptSeen = ''
+let lastMessagesSeen: Array<Record<string, unknown>> = []
+let compactionRequestsSeen = 0
 
 test.beforeAll(async () => {
   mockServer = createServer(async (req, res) => {
@@ -69,8 +74,38 @@ test.beforeAll(async () => {
       lastToolCountSeen = Array.isArray(body.tools) ? body.tools.length : 0
       const msgs = Array.isArray(body.messages) ? (body.messages as Array<{ role?: string; content?: string }>) : []
       lastSystemPromptSeen = msgs.find((m) => m.role === 'system')?.content ?? ''
+      if (body.stream === true) {
+        lastMessagesSeen = msgs as Array<Record<string, unknown>>
+      }
 
       if (body.stream !== true) {
+        const isCompaction = msgs.some(
+          (m) => m.role === 'system' && typeof m.content === 'string' && m.content.includes('上下文压缩器'),
+        )
+        if (isCompaction) {
+          compactionRequestsSeen += 1
+          res.writeHead(200, { 'content-type': 'application/json' })
+          res.end(
+            JSON.stringify({
+              id: `cmp-${compactionRequestsSeen}`,
+              object: 'chat.completion',
+              created: 1,
+              model: body.model ?? 'mock',
+              choices: [
+                {
+                  index: 0,
+                  message: {
+                    role: 'assistant',
+                    content: '【E2E自动摘要】前两轮已连续修改第一章两处段落并保持术语统一。',
+                  },
+                  finish_reason: 'stop',
+                },
+              ],
+              usage: { prompt_tokens: 180, completion_tokens: 40, total_tokens: 220 },
+            }),
+          )
+          return
+        }
         res.writeHead(200, { 'content-type': 'application/json' })
         res.end(
           JSON.stringify({
@@ -81,6 +116,154 @@ test.beforeAll(async () => {
             choices: [{ index: 0, message: { role: 'assistant', content: 'OK' }, finish_reason: 'stop' }],
           }),
         )
+        return
+      }
+
+      if (mode === 'continuity-t1') {
+        turnStep += 1
+        if (turnStep === 1) {
+          writeOpenAiSse(res, [
+            {
+              id: 'ct1-a',
+              object: 'chat.completion.chunk',
+              created: 1,
+              model: 'mock-fast',
+              choices: [
+                {
+                  index: 0,
+                  delta: {
+                    role: 'assistant',
+                    content: '先定位并修改第一处。',
+                    tool_calls: [
+                      {
+                        index: 0,
+                        id: 'call_e2e_ct1',
+                        type: 'function',
+                        function: {
+                          name: 'edit_file',
+                          arguments: JSON.stringify({
+                            path: 'EPUB/text/ch001.xhtml',
+                            oldText: '<p>从这里开始写。</p>',
+                            newText: '<p>第一处已润色。</p>\n<p>第二处待润色。</p>',
+                          }),
+                        },
+                      },
+                    ],
+                  },
+                  finish_reason: null,
+                },
+              ],
+            },
+            {
+              id: 'ct1-a',
+              object: 'chat.completion.chunk',
+              created: 1,
+              model: 'mock-fast',
+              choices: [{ index: 0, delta: {}, finish_reason: 'tool_calls' }],
+            },
+          ])
+          return
+        }
+        writeOpenAiSse(res, [
+          {
+            id: 'ct1-b',
+            object: 'chat.completion.chunk',
+            created: 1,
+            model: 'mock-fast',
+            choices: [
+              {
+                index: 0,
+                delta: { role: 'assistant', content: '第一轮润色已完成，可先审阅或直接继续微调。' },
+                finish_reason: 'stop',
+              },
+            ],
+            usage: { prompt_tokens: 1400, completion_tokens: 24, total_tokens: 1424 },
+          },
+        ])
+        return
+      }
+
+      if (mode === 'continuity-t2') {
+        turnStep += 1
+        if (turnStep === 1) {
+          await new Promise((r) => setTimeout(r, 350))
+          writeOpenAiSse(res, [
+            {
+              id: 'ct2-a',
+              object: 'chat.completion.chunk',
+              created: 1,
+              model: 'mock-fast',
+              choices: [
+                {
+                  index: 0,
+                  delta: {
+                    role: 'assistant',
+                    tool_calls: [
+                      {
+                        index: 0,
+                        id: 'call_e2e_ct2',
+                        type: 'function',
+                        function: {
+                          name: 'edit_file',
+                          arguments: JSON.stringify({
+                            path: 'EPUB/text/ch001.xhtml',
+                            oldText: '<p>第二处待润色。</p>',
+                            newText: '<p>第二处也已顺带润色。</p>',
+                          }),
+                        },
+                      },
+                    ],
+                  },
+                  finish_reason: null,
+                },
+              ],
+            },
+            {
+              id: 'ct2-a',
+              object: 'chat.completion.chunk',
+              created: 1,
+              model: 'mock-fast',
+              choices: [{ index: 0, delta: {}, finish_reason: 'tool_calls' }],
+            },
+          ])
+          return
+        }
+        writeOpenAiSse(res, [
+          {
+            id: 'ct2-b',
+            object: 'chat.completion.chunk',
+            created: 1,
+            model: 'mock-fast',
+            choices: [
+              {
+                index: 0,
+                delta: { role: 'assistant', content: '已在原待审阅草稿上叠加修改第二处。' },
+                finish_reason: 'stop',
+              },
+            ],
+            usage: { prompt_tokens: 3400, completion_tokens: 20, total_tokens: 3420 },
+          },
+        ])
+        return
+      }
+
+      if (mode === 'continuity-t3') {
+        writeOpenAiSse(res, [
+          {
+            id: 'ct3',
+            object: 'chat.completion.chunk',
+            created: 1,
+            model: 'mock-fast',
+            choices: [
+              {
+                index: 0,
+                delta: { role: 'assistant', content: '已基于自动压缩摘要继续协助。' },
+                finish_reason: 'stop',
+              },
+            ],
+            usage: { prompt_tokens: 1100, completion_tokens: 18, total_tokens: 1118 },
+          },
+        ])
         return
       }
 
@@ -667,4 +850,133 @@ test('multi-model provider fetch, approval modes (ask/review/auto), reasoning, c
   // Closing the Agent sidebar at 400px closes the drawer cleanly
   await page.getByRole('button', { name: '关闭助手栏' }).click()
   await expect(page.locator('.sidebar')).toBeHidden()
+})
+
+test('continuous Agent session: keep-alive collapse, interleaved timeline, cumulative pending proposals, and 80% auto-compaction', async ({
+  page,
+}) => {
+  const bookId = await seedBook()
+  await resetAgentState()
+  compactionRequestsSeen = 0
+  lastMessagesSeen = []
+
+  await login(page)
+  await expectLoggedIn(page)
+  await page.goto(`/books/${bookId}`)
+  await page.waitForSelector('.cm-content')
+
+  // Open Agent sidebar and create a profile with an explicit 4096 contextWindow override
+  await page.getByRole('button', { name: '助手' }).click()
+  await page.getByRole('button', { name: '配置模型预设' }).click()
+  const dialog = page.getByRole('dialog', { name: '应用设置' })
+  await dialog.getByLabel('预设名称').fill('连续会话测试')
+  await dialog.getByLabel('Base URL').fill(`${mockUrl}/v1`)
+  await dialog.getByLabel('模型名称').fill('mock-fast')
+  await dialog.getByTestId('agent-context-window-input').fill('4096')
+  await dialog.getByRole('button', { name: '添加预设' }).click()
+  await expect(dialog.getByText('预设已保存')).toBeVisible()
+  await dialog.getByRole('button', { name: '关闭', exact: true }).click()
+
+  // Open ch001.xhtml and seed known text so Turn 1 & Turn 2 edit_file calls match deterministically
+  await page.getByRole('button', { name: 'ch001.xhtml', exact: true }).click()
+  const baseChapter = [
+    '<?xml version="1.0" encoding="UTF-8"?>',
+    '<!DOCTYPE html>',
+    '<html xmlns="http://www.w3.org/1999/xhtml">',
+    '<head><title>第一章</title></head>',
+    '<body>',
+    '<p>从这里开始写。</p>',
+    '</body>',
+    '</html>',
+  ].join('\n')
+  await page.locator('.cm-content').click()
+  await page.keyboard.press('Control+a')
+  await page.keyboard.insertText(baseChapter)
+  await expect(page.locator('.cm-content')).toContainText('从这里开始写。')
+
+  // Select text inside the live book Preview iframe -> Agent selection chip captures snippet & sends it in context
+  const previewFrame = page.locator('.preview-card iframe').contentFrame()
+  const previewParagraph = previewFrame.getByText('从这里开始写。')
+  await expect(previewParagraph).toBeVisible()
+  await previewParagraph.evaluate((el) => {
+    const doc = el.ownerDocument
+    const range = doc.createRange()
+    range.selectNodeContents(el)
+    const sel = doc.defaultView?.getSelection()
+    sel?.removeAllRanges()
+    sel?.addRange(range)
+    doc.dispatchEvent(new Event('selectionchange'))
+  })
+  await expect(page.getByTestId('agent-selection-chip')).toContainText('从这里开始写。')
+
+  // Turn 1: interleaved timeline (text -> tool -> text) + context usage pill + pending proposal
+  mode = 'continuity-t1'
+  turnStep = 0
+  await page.getByLabel('向助手输入指令').fill('先润色第一章第一句')
+  await page.getByRole('button', { name: '发送' }).click()
+
+  await expect(page.getByText('第一轮润色已完成，可先审阅或直接继续微调。')).toBeVisible()
+  expect(JSON.stringify(lastMessagesSeen)).toContain('从这里开始写。')
+  await expect(page.getByText('先定位并修改第一处。')).toBeVisible()
+  // Interleaved: assistant turn has 2 distinct assistant bubbles separated by a ToolSteps bar
+  await expect(page.locator('.agent-turn.is-assistant .agent-bubble.is-assistant')).toHaveCount(2)
+  await expect(page.getByTestId('agent-context-usage')).toHaveText('34%')
+
+  // Exit main-canvas review without applying, then send Turn 2 while collapsing sidebar mid-stream
+  const reviewPane = page.locator('.review-pane')
+  await expect(reviewPane).toBeVisible()
+  await reviewPane.getByRole('button', { name: '退出审阅' }).click()
+
+  mode = 'continuity-t2'
+  turnStep = 0
+  const textarea = page.getByLabel('向助手输入指令')
+  await textarea.fill('顺便把第二处也润色了')
+  await page.getByRole('button', { name: '发送' }).click()
+
+  // While streaming: textarea stays editable for drafting, and collapsing sidebar does NOT abort the stream!
+  await textarea.fill('提前起草的下一句草稿')
+  await expect(textarea).toHaveValue('提前起草的下一句草稿')
+  await page.getByRole('button', { name: '关闭助手栏' }).click()
+  await expect(page.locator('.sidebar.is-agent')).toBeHidden()
+
+  // Wait for background stream to finish and automatically open the cumulative proposal review
+  await expect(reviewPane).toBeVisible()
+  await page.getByRole('button', { name: '助手' }).click()
+  await expect(page.getByText('已在原待审阅草稿上叠加修改第二处。')).toBeVisible()
+  // Draft typed during streaming and old proposal superseded state are preserved!
+  await expect(textarea).toHaveValue('提前起草的下一句草稿')
+  await expect(page.getByText('已被后续修改替代（1 个文件）')).toBeVisible()
+  // Usage pill updated to 83% and enters warn state (>= 70%)
+  await expect(page.getByTestId('agent-context-usage')).toHaveText('83%')
+  await expect(page.getByTestId('agent-context-usage')).toHaveClass(/is-warn/)
+
+  // Verify Turn 2 actually replayed Turn 1's tool_call and tool result to the model
+  expect(JSON.stringify(lastMessagesSeen)).toContain('call_e2e_ct1')
+
+  // Apply cumulative proposal and verify BOTH Turn 1 & Turn 2 edits landed in editor
+  await reviewPane.getByRole('button', { name: '应用变更' }).click()
+  await expect(page.locator('.cm-content')).toContainText('第一处已润色。')
+  await expect(page.locator('.cm-content')).toContainText('第二处也已顺带润色。')
+
+  // Turn 3: previous inputTokens (3400) >= 80% of 4096 -> triggers auto-compaction divider!
+  mode = 'continuity-t3'
+  turnStep = 0
+  await textarea.fill('继续下一项检查')
+  await page.getByRole('button', { name: '发送' }).click()
+
+  await expect(page.getByText('已基于自动压缩摘要继续协助。')).toBeVisible()
+  expect(compactionRequestsSeen).toBe(1)
+  const compactionDivider = page.getByTestId('agent-compaction-divider')
+  await expect(compactionDivider).toBeVisible()
+  await compactionDivider.getByRole('button').click()
+  await expect(compactionDivider).toContainText('【E2E自动摘要】')
+  await expect(page.getByTestId('agent-context-usage')).toHaveText('27%')
+
+  // Reload and verify timeline, superseded card, compaction divider & context usage persist
+  await page.reload()
+  await page.waitForSelector('.cm-content')
+  await page.getByRole('button', { name: '助手' }).click()
+  await expect(page.getByText('已被后续修改替代（1 个文件）')).toBeVisible()
+  await expect(page.getByTestId('agent-compaction-divider')).toBeVisible()
+  await expect(page.getByTestId('agent-context-usage')).toHaveText('27%')
 })

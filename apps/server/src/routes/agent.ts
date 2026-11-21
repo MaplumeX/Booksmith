@@ -2,6 +2,11 @@ import { and, asc, desc, eq } from 'drizzle-orm'
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify'
 import type { AgentProposal, EpubArchive } from '@booksmith/core'
 import {
+  normalizeContextWindow,
+  normalizeModelContextWindows,
+  resolveContextWindow,
+} from '../agent/contextWindow'
+import {
   AgentKeyDecryptError,
   AgentSecretNotConfiguredError,
   decryptApiKey,
@@ -20,9 +25,16 @@ import {
   MAX_TOOL_STEPS,
   normalizeMaxToolSteps,
   runAgentTurn,
+  toTimelineItems,
   type AgentApprovalMode,
+  type AgentProposalStatus,
+  type AgentStepRecord,
   type AgentStreamEvent,
+  type AgentTimelineItem,
+  type CompactionNotice,
   type HistoryTurn,
+  type PendingProposalSeed,
+  type ProposalResolution,
   type ToolCallSummary,
 } from '../agent/runner'
 import { MAX_CUSTOM_INSTRUCTIONS_CHARS, type AgentTurnContext } from '../agent/systemPrompt'
@@ -61,6 +73,8 @@ export interface AgentProfileDto {
   baseUrl: string
   model: string
   models: string[]
+  contextWindow: number | null
+  modelContextWindows: Record<string, number>
   hasApiKey: boolean
   apiKeyLast4: string | null
   isDefault: boolean
@@ -81,6 +95,10 @@ export interface AgentThreadDto {
   profileId: string | null
   model: string | null
   approvalMode: AgentApprovalMode
+  compactionSummary: string | null
+  compactedUpToMessageId: string | null
+  lastInputTokens: number | null
+  lastContextWindow: number | null
   createdAt: string
   updatedAt: string
 }
@@ -91,10 +109,18 @@ export interface AgentMessageDto {
   role: 'user' | 'assistant'
   content: string
   reasoning: string | null
-  context: { activePath?: string | null; selection?: string | null } | null
+  context: {
+    activePath?: string | null
+    selection?: string | null
+    selectionStartLine?: number | null
+    selectionEndLine?: number | null
+  } | null
+  timeline: AgentTimelineItem[]
   toolCalls: ToolCallSummary[]
   proposal: AgentProposal | null
-  proposalStatus: 'pending' | 'applied' | 'dismissed' | null
+  proposalStatus: AgentProposalStatus | null
+  proposalResolution: ProposalResolution | null
+  compactionNotice: CompactionNotice | null
   error: string | null
   createdAt: string
 }
@@ -133,8 +159,45 @@ function normalizeProfileModels(primaryModel: string, rawModels: unknown): strin
   return out
 }
 
+function parseProposalStatus(raw: unknown): AgentProposalStatus | null {
+  if (
+    raw === 'pending' ||
+    raw === 'applied' ||
+    raw === 'dismissed' ||
+    raw === 'reverted' ||
+    raw === 'superseded'
+  ) {
+    return raw
+  }
+  return null
+}
+
+function parseProposalResolution(raw: unknown): ProposalResolution | null {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null
+  const obj = raw as Record<string, unknown>
+  const out: ProposalResolution = {}
+  if (typeof obj.keptHunks === 'number' && Number.isInteger(obj.keptHunks) && obj.keptHunks >= 0) {
+    out.keptHunks = obj.keptHunks
+  }
+  if (typeof obj.totalHunks === 'number' && Number.isInteger(obj.totalHunks) && obj.totalHunks >= 0) {
+    out.totalHunks = obj.totalHunks
+  }
+  if (Array.isArray(obj.skippedPaths)) {
+    const cleaned = obj.skippedPaths
+      .filter((item): item is string => typeof item === 'string' && item.trim().length > 0)
+      .map((item) => item.trim())
+      .slice(0, 50)
+    if (cleaned.length > 0) out.skippedPaths = cleaned
+  }
+  if (typeof obj.summary === 'string' && obj.summary.trim()) {
+    out.summary = obj.summary.trim().slice(0, 400)
+  }
+  return Object.keys(out).length > 0 ? out : null
+}
+
 function toProfileDto(row: AgentProfile): AgentProfileDto {
   const parsed = safeJsonParse<unknown>(row.modelsJson, null)
+  const modelContextWindows = normalizeModelContextWindows(safeJsonParse<unknown>(row.modelContextWindowsJson, null))
   return {
     id: row.id,
     name: row.name,
@@ -142,6 +205,8 @@ function toProfileDto(row: AgentProfile): AgentProfileDto {
     baseUrl: row.baseUrl,
     model: row.model,
     models: normalizeProfileModels(row.model, parsed),
+    contextWindow: normalizeContextWindow(row.contextWindow),
+    modelContextWindows,
     hasApiKey: Boolean(row.apiKeyCiphertext),
     apiKeyLast4: row.apiKeyLast4,
     isDefault: row.isDefault,
@@ -174,12 +239,17 @@ function toThreadDto(row: AgentThread): AgentThreadDto {
     profileId: row.profileId,
     model: row.model,
     approvalMode: isAgentApprovalMode(row.approvalMode) ? row.approvalMode : 'review',
+    compactionSummary: row.compactionSummary,
+    compactedUpToMessageId: row.compactedUpToMessageId,
+    lastInputTokens: row.lastInputTokens,
+    lastContextWindow: row.lastContextWindow,
     createdAt: row.createdAt.toISOString(),
     updatedAt: row.updatedAt.toISOString(),
   }
 }
 
 function toMessageDto(row: AgentMessage): AgentMessageDto {
+  const steps = safeJsonParse<AgentStepRecord[]>(row.stepsJson, [])
   return {
     id: row.id,
     threadId: row.threadId,
@@ -187,15 +257,63 @@ function toMessageDto(row: AgentMessage): AgentMessageDto {
     content: row.content,
     reasoning: row.reasoning,
     context: safeJsonParse(row.contextJson, null),
+    timeline: steps.length > 0 ? toTimelineItems(steps) : [],
     toolCalls: safeJsonParse<ToolCallSummary[]>(row.toolCallsJson, []),
     proposal: safeJsonParse<AgentProposal | null>(row.proposalJson, null),
-    proposalStatus:
-      row.proposalStatus === 'pending' || row.proposalStatus === 'applied' || row.proposalStatus === 'dismissed'
-        ? row.proposalStatus
-        : null,
+    proposalStatus: parseProposalStatus(row.proposalStatus),
+    proposalResolution: parseProposalResolution(safeJsonParse<unknown>(row.proposalResolutionJson, null)),
+    compactionNotice: safeJsonParse<CompactionNotice | null>(row.compactionNoticeJson, null),
     error: row.error,
     createdAt: row.createdAt.toISOString(),
   }
+}
+
+function sliceMessagesAfterCompaction<T extends { id: string }>(
+  rows: readonly T[],
+  compactedUpToMessageId: string | null,
+): T[] {
+  if (!compactedUpToMessageId) return [...rows]
+  const boundaryIdx = rows.findIndex((row) => row.id === compactedUpToMessageId)
+  if (boundaryIdx < 0) return [...rows]
+  return rows.slice(boundaryIdx + 1)
+}
+
+function rowsToHistoryTurns(rows: readonly AgentMessage[]): HistoryTurn[] {
+  return rows.map((row) => {
+    const role = (row.role === 'assistant' ? 'assistant' : 'user') as 'user' | 'assistant'
+    if (role === 'user') {
+      return {
+        id: row.id,
+        role,
+        content: row.content,
+        context: safeJsonParse<AgentTurnContext | null>(row.contextJson, null),
+      }
+    }
+    const steps = safeJsonParse<AgentStepRecord[] | null>(row.stepsJson, null)
+    const proposal = safeJsonParse<AgentProposal | null>(row.proposalJson, null)
+    return {
+      id: row.id,
+      role,
+      content: row.content,
+      steps: Array.isArray(steps) && steps.length > 0 ? steps : null,
+      proposalStatus: parseProposalStatus(row.proposalStatus),
+      proposalResolution: parseProposalResolution(safeJsonParse<unknown>(row.proposalResolutionJson, null)),
+      proposalFilePaths: proposal ? proposal.files.map((f) => f.path) : null,
+    }
+  })
+}
+
+function findLatestPendingProposal(rows: readonly AgentMessage[]): PendingProposalSeed | null {
+  for (let i = rows.length - 1; i >= 0; i -= 1) {
+    const row = rows[i]!
+    if (row.role !== 'assistant') continue
+    if (row.proposalStatus !== 'pending' || !row.proposalJson) continue
+    const proposal = safeJsonParse<AgentProposal | null>(row.proposalJson, null)
+    if (proposal && Array.isArray(proposal.files) && proposal.files.length > 0) {
+      return { messageId: row.id, proposal }
+    }
+  }
+  return null
 }
 
 function requireUser(request: FastifyRequest, reply: FastifyReply): User | null {
@@ -424,6 +542,17 @@ export function registerAgentRoutes(app: FastifyInstance, deps: AgentDeps): void
     if (!model) return reply.code(400).send({ error: 'invalid_profile', message: '至少需要填写一个模型名称' })
 
     const finalModels = normalizeProfileModels(model, normalizedModels)
+    let contextWindow: number | null = null
+    if (body.contextWindow !== undefined && body.contextWindow !== null && body.contextWindow !== '') {
+      contextWindow = normalizeContextWindow(body.contextWindow)
+      if (contextWindow === null) {
+        return reply.code(400).send({
+          error: 'invalid_context_window',
+          message: '上下文窗口需为 2048–10000000 之间的正整数（留空表示自动识别）',
+        })
+      }
+    }
+    const modelContextWindows = normalizeModelContextWindows(body.modelContextWindows)
 
     let baseUrl: string
     let encrypted: { ciphertext: string | null; last4: string | null }
@@ -454,6 +583,8 @@ export function registerAgentRoutes(app: FastifyInstance, deps: AgentDeps): void
         baseUrl,
         model,
         modelsJson: JSON.stringify(finalModels),
+        contextWindow,
+        modelContextWindowsJson: Object.keys(modelContextWindows).length > 0 ? JSON.stringify(modelContextWindows) : null,
         apiKeyCiphertext: encrypted.ciphertext,
         apiKeyLast4: encrypted.last4,
         isDefault: shouldBeDefault,
@@ -528,6 +659,27 @@ export function registerAgentRoutes(app: FastifyInstance, deps: AgentDeps): void
         updates.model = nextModel
         updates.modelsJson = JSON.stringify(merged)
       }
+    }
+
+    if (body.contextWindow !== undefined) {
+      if (body.contextWindow === null || body.contextWindow === '') {
+        updates.contextWindow = null
+      } else {
+        const parsedCtx = normalizeContextWindow(body.contextWindow)
+        if (parsedCtx === null) {
+          return reply.code(400).send({
+            error: 'invalid_context_window',
+            message: '上下文窗口需为 2048–10000000 之间的正整数（留空表示自动识别）',
+          })
+        }
+        updates.contextWindow = parsedCtx
+      }
+    }
+
+    if (body.modelContextWindows !== undefined) {
+      const normalizedMap = normalizeModelContextWindows(body.modelContextWindows)
+      updates.modelContextWindowsJson =
+        Object.keys(normalizedMap).length > 0 ? JSON.stringify(normalizedMap) : null
     }
 
     if (body.clearApiKey === true) {
@@ -840,6 +992,7 @@ export function registerAgentRoutes(app: FastifyInstance, deps: AgentDeps): void
     userMessage: string
     context: AgentTurnContext | undefined
     history: HistoryTurn[]
+    pendingProposalSeed: PendingProposalSeed | null
     nextTitle: string
     persistUserMessage: boolean
     replaceMessageId?: string
@@ -854,6 +1007,7 @@ export function registerAgentRoutes(app: FastifyInstance, deps: AgentDeps): void
       userMessage,
       context,
       history,
+      pendingProposalSeed,
       nextTitle,
       persistUserMessage,
       replaceMessageId,
@@ -1058,6 +1212,16 @@ export function registerAgentRoutes(app: FastifyInstance, deps: AgentDeps): void
         }, sseHeartbeatMs)
       }
 
+      const profileModelWindows = normalizeModelContextWindows(
+        safeJsonParse<unknown>(profile.modelContextWindowsJson, null),
+      )
+      const resolvedWindow = resolveContextWindow({
+        model: effectiveModel,
+        profileContextWindow: profile.contextWindow,
+        modelContextWindows: profileModelWindows,
+      })
+      const sameModelAsLastTurn = thread.profileId === profile.id && thread.model === effectiveModel
+
       const result = await runAgentTurn({
         archive,
         overlay,
@@ -1072,6 +1236,10 @@ export function registerAgentRoutes(app: FastifyInstance, deps: AgentDeps): void
         context,
         approvalMode,
         customInstructions: userSettings.customInstructions,
+        contextWindow: resolvedWindow.contextWindow,
+        compactionSummary: thread.compactionSummary,
+        previousInputTokens: sameModelAsLastTurn ? thread.lastInputTokens : null,
+        pendingProposalSeed,
         maxSteps: userSettings.maxSteps,
         abortSignal: controller.signal,
         onEvent: (event: AgentStreamEvent) => {
@@ -1087,13 +1255,17 @@ export function registerAgentRoutes(app: FastifyInstance, deps: AgentDeps): void
       const shouldPersistAssistant = !result.stopped || hasPartialOutput
 
       let savedMessageId: string | undefined
+      const supersededMessageId = !result.stopped ? result.supersededProposalMessageId : null
       if (shouldPersistAssistant) {
         const persistedFields = {
           content: result.stopped ? result.content || '已停止生成。' : result.content,
           reasoning: result.reasoning.trim() ? result.reasoning : null,
+          stepsJson: result.steps.length > 0 ? JSON.stringify(result.steps) : null,
           toolCallsJson: result.toolCalls.length > 0 ? JSON.stringify(result.toolCalls) : null,
           proposalJson: !result.stopped && result.proposal ? JSON.stringify(result.proposal) : null,
           proposalStatus: !result.stopped && result.proposal ? 'pending' : null,
+          proposalResolutionJson: null,
+          compactionNoticeJson: result.compaction ? JSON.stringify(result.compaction.notice) : null,
           error: result.error ? result.error.message : null,
         }
 
@@ -1117,7 +1289,29 @@ export function registerAgentRoutes(app: FastifyInstance, deps: AgentDeps): void
             savedMessageId = inserted?.id
           }
 
-          await db.update(agentThreads).set({ updatedAt: new Date() }).where(eq(agentThreads.id, thread.id))
+          if (supersededMessageId) {
+            await db
+              .update(agentMessages)
+              .set({ proposalStatus: 'superseded' })
+              .where(and(eq(agentMessages.id, supersededMessageId), eq(agentMessages.threadId, thread.id)))
+          }
+
+          const threadUpdates: Partial<typeof agentThreads.$inferInsert> = {
+            updatedAt: new Date(),
+            lastInputTokens: result.usage.inputTokens,
+            lastContextWindow: result.usage.contextWindow,
+          }
+          if (
+            result.compaction &&
+            !result.compaction.notice.degraded &&
+            result.compaction.summary &&
+            result.compaction.compactedUpToMessageId
+          ) {
+            threadUpdates.compactionSummary = result.compaction.summary
+            threadUpdates.compactedUpToMessageId = result.compaction.compactedUpToMessageId
+          }
+
+          await db.update(agentThreads).set(threadUpdates).where(eq(agentThreads.id, thread.id))
         } catch (error) {
           // Ignore FK/missing-row errors if the thread was deleted while an aborted turn was unwinding.
           if (!result.stopped) throw error
@@ -1136,6 +1330,9 @@ export function registerAgentRoutes(app: FastifyInstance, deps: AgentDeps): void
         approvalMode,
         model: effectiveModel,
         profileId: profile.id,
+        usage: result.usage,
+        supersededMessageId,
+        compactionNotice: result.compaction?.notice ?? null,
       })
       if (!raw.writableEnded && !raw.destroyed) raw.end()
     } finally {
@@ -1169,36 +1366,32 @@ export function registerAgentRoutes(app: FastifyInstance, deps: AgentDeps): void
 
       const rawContext =
         body.context && typeof body.context === 'object' ? (body.context as Record<string, unknown>) : null
+      const parsePositiveLine = (value: unknown): number | null =>
+        typeof value === 'number' && Number.isInteger(value) && value > 0 ? value : null
       const context = rawContext
         ? {
             activePath: typeof rawContext.activePath === 'string' ? rawContext.activePath : null,
             selection: typeof rawContext.selection === 'string' ? rawContext.selection : null,
+            ...(parsePositiveLine(rawContext.selectionStartLine) !== null
+              ? { selectionStartLine: parsePositiveLine(rawContext.selectionStartLine) }
+              : {}),
+            ...(parsePositiveLine(rawContext.selectionEndLine) !== null
+              ? { selectionEndLine: parsePositiveLine(rawContext.selectionEndLine) }
+              : {}),
           }
         : undefined
 
       const priorMessages = await db
-        .select({
-          role: agentMessages.role,
-          content: agentMessages.content,
-          contextJson: agentMessages.contextJson,
-        })
+        .select()
         .from(agentMessages)
         .where(eq(agentMessages.threadId, thread.id))
         .orderBy(asc(agentMessages.createdAt), asc(agentMessages.id))
 
-      // History intentionally omits stored reasoning traces to preserve the 24k char sliding window,
-      // while replaying each user turn's saved page/selection context verbatim so conversation prefixes stay cache-stable.
-      // See ADR 2026-11-20-agent-modes-and-multimodel.
-      const history: HistoryTurn[] = priorMessages.map((row) => {
-        const role = (row.role === 'assistant' ? 'assistant' : 'user') as 'user' | 'assistant'
-        return {
-          role,
-          content: row.content,
-          ...(role === 'user'
-            ? { context: safeJsonParse<AgentTurnContext | null>(row.contextJson, null) }
-            : {}),
-        }
-      })
+      // Slice history from the persisted auto-compaction boundary and replay full provider-neutral tool traces
+      // plus proposal outcomes so multi-turn sessions stay continuous. See ADR 2026-11-21-agent-session-continuity.
+      const activePriorMessages = sliceMessagesAfterCompaction(priorMessages, thread.compactedUpToMessageId)
+      const history = rowsToHistoryTurns(activePriorMessages)
+      const pendingProposalSeed = findLatestPendingProposal(priorMessages)
 
       const nextTitle =
         priorMessages.length === 0 && thread.title === '新对话' ? autoTitleFromPrompt(content) : thread.title
@@ -1213,6 +1406,7 @@ export function registerAgentRoutes(app: FastifyInstance, deps: AgentDeps): void
         userMessage: content,
         context,
         history,
+        pendingProposalSeed,
         nextTitle,
         persistUserMessage: true,
       })
@@ -1269,16 +1463,10 @@ export function registerAgentRoutes(app: FastifyInstance, deps: AgentDeps): void
       }
 
       const userTurn = allMessages[userTurnIndex]!
-      const history: HistoryTurn[] = allMessages.slice(0, userTurnIndex).map((row) => {
-        const role = (row.role === 'assistant' ? 'assistant' : 'user') as 'user' | 'assistant'
-        return {
-          role,
-          content: row.content,
-          ...(role === 'user'
-            ? { context: safeJsonParse<AgentTurnContext | null>(row.contextJson, null) }
-            : {}),
-        }
-      })
+      const priorRows = allMessages.slice(0, userTurnIndex)
+      const activePriorRows = sliceMessagesAfterCompaction(priorRows, thread.compactedUpToMessageId)
+      const history = rowsToHistoryTurns(activePriorRows)
+      const pendingProposalSeed = findLatestPendingProposal(priorRows)
       const savedContext = safeJsonParse<AgentTurnContext | null>(
         userTurn.contextJson,
         null,
@@ -1295,6 +1483,7 @@ export function registerAgentRoutes(app: FastifyInstance, deps: AgentDeps): void
         userMessage: userTurn.content,
         context: savedContext ?? undefined,
         history,
+        pendingProposalSeed,
         nextTitle: thread.title,
         persistUserMessage: false,
         replaceMessageId: latest.id,
@@ -1316,9 +1505,14 @@ export function registerAgentRoutes(app: FastifyInstance, deps: AgentDeps): void
       if (!UUID.test(messageId)) return reply.code(404).send({ error: 'not_found' })
 
       const body = (request.body ?? {}) as Record<string, unknown>
-      if (body.status !== 'applied' && body.status !== 'dismissed') {
-        return reply.code(400).send({ error: 'invalid_status', message: '状态只能是 applied 或 dismissed' })
+      if (body.status !== 'applied' && body.status !== 'dismissed' && body.status !== 'reverted') {
+        return reply.code(400).send({
+          error: 'invalid_status',
+          message: '状态只能是 applied、dismissed 或 reverted',
+        })
       }
+
+      const resolution = parseProposalResolution(body.resolution)
 
       const rows = await db
         .select({ message: agentMessages })
@@ -1341,7 +1535,14 @@ export function registerAgentRoutes(app: FastifyInstance, deps: AgentDeps): void
 
       const [updated] = await db
         .update(agentMessages)
-        .set({ proposalStatus: body.status })
+        .set({
+          proposalStatus: body.status,
+          ...(body.resolution !== undefined
+            ? { proposalResolutionJson: resolution ? JSON.stringify(resolution) : null }
+            : body.status === 'reverted'
+              ? { proposalResolutionJson: null }
+              : {}),
+        })
         .where(eq(agentMessages.id, found.id))
         .returning()
 

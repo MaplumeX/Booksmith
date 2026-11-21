@@ -409,4 +409,78 @@ describe('AgentWorkspace structural tools (metadata, TOC, create, rename, delete
     expect(proposal.isStructural).toBe(true)
     expect(proposal.validationIssues).toEqual([])
   })
+
+  it('seeds unapplied pending proposals cumulatively, preserves read-only follow-ups, and detects manual drift', () => {
+    const ch1 = 'EPUB/text/ch001.xhtml'
+    const baseArchive = openEpub(createEmptyEpub({ title: '续聊测试书', author: '原作者' }), codec.parse).archive
+
+    // Turn 1: produces a pending proposal
+    const ws1 = AgentWorkspace.fromArchive(baseArchive, { codec, checkXml: strictCheckXml, now: FIXED_NOW })
+    expect(
+      ws1.executeTool('edit_file', {
+        path: ch1,
+        oldText: '<p>从这里开始写。</p>',
+        newText: '<p>第一处修订。</p>\n<p>第二段待定。</p>',
+      }).ok,
+    ).toBe(true)
+    const pending1 = ws1.buildProposal('p-pending-1')!
+    expect(pending1).not.toBeNull()
+
+    // Turn 2a: pure Q&A on top of seeded pending proposal -> sees pending edits, produces null proposal
+    const wsReadOnly = AgentWorkspace.fromArchive(baseArchive, { codec, checkXml: strictCheckXml, now: FIXED_NOW })
+    expect(wsReadOnly.seedPendingProposal(pending1)).toEqual({ seeded: true, driftedPaths: [] })
+    expect(wsReadOnly.hasSeededPendingProposal()).toBe(true)
+    expect(wsReadOnly.hasNewMutations()).toBe(false)
+    expect(wsReadOnly.getText(ch1)).toContain('第一处修订。')
+    expect(wsReadOnly.executeTool('read_file', { path: ch1 }).ok).toBe(true)
+    expect(wsReadOnly.buildProposal('p-noop')).toBeNull()
+
+    // Turn 2b: follow-up edit on top of seeded pending proposal -> cumulative diff against real baseline
+    const wsFollowUp = AgentWorkspace.fromArchive(baseArchive, { codec, checkXml: strictCheckXml, now: FIXED_NOW })
+    expect(wsFollowUp.seedPendingProposal(pending1)).toEqual({ seeded: true, driftedPaths: [] })
+    expect(
+      wsFollowUp.executeTool('edit_file', {
+        path: ch1,
+        oldText: '<p>第二段待定。</p>',
+        newText: '<p>第二段也已修订。</p>',
+      }).ok,
+    ).toBe(true)
+    expect(wsFollowUp.hasNewMutations()).toBe(true)
+    const cumulative = wsFollowUp.buildProposal('p-cumulative')!
+    expect(cumulative).not.toBeNull()
+    expect(cumulative.files).toHaveLength(1)
+    expect(cumulative.files[0]!.beforeText).toContain('<p>从这里开始写。</p>')
+    expect(cumulative.files[0]!.afterText).toContain('第一处修订。')
+    expect(cumulative.files[0]!.afterText).toContain('第二段也已修订。')
+
+    // Turn 2c: follow-up reverts pending edit completely back to baseline -> null proposal with hasNewMutations=true
+    const wsRevert = AgentWorkspace.fromArchive(baseArchive, { codec, checkXml: strictCheckXml, now: FIXED_NOW })
+    expect(wsRevert.seedPendingProposal(pending1)).toEqual({ seeded: true, driftedPaths: [] })
+    expect(
+      wsRevert.executeTool('edit_file', {
+        path: ch1,
+        oldText: '<p>第一处修订。</p>\n<p>第二段待定。</p>',
+        newText: '<p>从这里开始写。</p>',
+      }).ok,
+    ).toBe(true)
+    expect(wsRevert.hasNewMutations()).toBe(true)
+    expect(wsRevert.buildProposal('p-reverted')).toBeNull()
+
+    // Turn 2d: user manually edited ch1 -> detects drift and refuses to seed stale proposal
+    const wsDrifted = AgentWorkspace.fromArchive(baseArchive, {
+      codec,
+      checkXml: strictCheckXml,
+      now: FIXED_NOW,
+      overlay: {
+        dirtyTexts: {
+          [ch1]: ws1.getText(ch1)!.replace('第一处修订。', '用户手改的内容。'),
+        },
+      },
+    })
+    const driftRes = wsDrifted.seedPendingProposal(pending1)
+    expect(driftRes.seeded).toBe(false)
+    expect(driftRes.driftedPaths).toEqual([ch1])
+    expect(wsDrifted.hasSeededPendingProposal()).toBe(false)
+    expect(wsDrifted.getText(ch1)).toContain('用户手改的内容。')
+  })
 })

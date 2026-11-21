@@ -26,6 +26,7 @@ interface PreviewPaneProps {
   resolveAsset?: PreviewAssetResolver
   revealFragment?: FragmentRevealTarget | null
   subscribeTextChange?: (listener: (changedPath: string, value: string) => void) => () => void
+  onSelectionChange?: (selection: string) => void
 }
 
 const DEBOUNCE_MS = 180
@@ -56,10 +57,14 @@ export function PreviewPane({
   resolveAsset,
   revealFragment,
   subscribeTextChange,
+  onSelectionChange,
 }: PreviewPaneProps) {
   const theme = useResolvedTheme()
   const [failure, setFailure] = useState<string | null>(null)
   const frame = useRef<HTMLIFrameElement>(null)
+  const onSelectionChangeRef = useRef(onSelectionChange)
+  onSelectionChangeRef.current = onSelectionChange
+  const selectionCleanupRef = useRef<(() => void) | null>(null)
   const blobCache = useRef<PreviewBlobCache>(new PreviewBlobCache())
   const readyDocs = useRef<WeakSet<Document>>(new WeakSet())
   const timer = useRef<number | null>(null)
@@ -145,9 +150,29 @@ export function PreviewPane({
     [isDocReady],
   )
 
+  const bindSelectionListeners = useCallback((doc: Document) => {
+    selectionCleanupRef.current?.()
+    const report = () => {
+      const sel = doc.defaultView?.getSelection()
+      const text = sel && !sel.isCollapsed ? sel.toString() : ''
+      onSelectionChangeRef.current?.(text)
+    }
+    doc.addEventListener('selectionchange', report)
+    doc.addEventListener('mouseup', report)
+    doc.addEventListener('keyup', report)
+    selectionCleanupRef.current = () => {
+      doc.removeEventListener('selectionchange', report)
+      doc.removeEventListener('mouseup', report)
+      doc.removeEventListener('keyup', report)
+    }
+  }, [])
+
   const handleFrameLoad = useCallback(() => {
     const doc = frame.current?.contentDocument
-    if (doc) readyDocs.current.add(doc)
+    if (doc) {
+      readyDocs.current.add(doc)
+      bindSelectionListeners(doc)
+    }
     renderNow(
       latest.current.path,
       liveContent.current,
@@ -155,7 +180,7 @@ export function PreviewPane({
       latest.current.pkg,
       latest.current.resolveAsset,
     )
-  }, [renderNow])
+  }, [bindSelectionListeners, renderNow])
 
   useEffect(() => {
     themeRef.current = theme
@@ -239,6 +264,9 @@ export function PreviewPane({
   useEffect(
     () => () => {
       clearTimer()
+      selectionCleanupRef.current?.()
+      selectionCleanupRef.current = null
+      onSelectionChangeRef.current?.('')
       applied.current = null
       blobCache.current.dispose()
     },

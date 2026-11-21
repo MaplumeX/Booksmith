@@ -42,6 +42,9 @@ describe('agent providers & runner with local mock LLM servers', () => {
   let abortToolsCalls = 0
   let lastAskRequest: Record<string, unknown> | null = null
   let askRequests: Array<Record<string, unknown>> = []
+  let anthropicCapturedBodies: Array<Record<string, unknown>> = []
+  let compactCalls = 0
+  let compactFailMode = false
 
   beforeAll(async () => {
     server = createServer(async (req, res) => {
@@ -174,6 +177,35 @@ describe('agent providers & runner with local mock LLM servers', () => {
       if (url.pathname === '/ask-check/v1/chat/completions') {
         lastAskRequest = body
         askRequests.push(body)
+        if (body.stream !== true) {
+          compactCalls += 1
+          if (compactFailMode) {
+            res.writeHead(500, { 'content-type': 'application/json' })
+            res.end(JSON.stringify({ error: { message: 'compaction upstream failure' } }))
+            return
+          }
+          res.writeHead(200, { 'content-type': 'application/json' })
+          res.end(
+            JSON.stringify({
+              id: `cmp_${compactCalls}`,
+              object: 'chat.completion',
+              created: 1,
+              model: body.model ?? 'mock-ask',
+              choices: [
+                {
+                  index: 0,
+                  message: {
+                    role: 'assistant',
+                    content: '【压缩摘要】用户约定保留学术术语，已核对第一章前 200 行并定位 2 处标点问题。',
+                  },
+                  finish_reason: 'stop',
+                },
+              ],
+              usage: { prompt_tokens: 120, completion_tokens: 40, total_tokens: 160 },
+            }),
+          )
+          return
+        }
         writeOpenAiSse(res, [
           {
             id: 'ask1',
@@ -181,7 +213,50 @@ describe('agent providers & runner with local mock LLM servers', () => {
             created: 1,
             model: 'mock-ask',
             choices: [{ index: 0, delta: { role: 'assistant', content: '仅给出只读校对建议。' }, finish_reason: 'stop' }],
+            usage: { prompt_tokens: 320, completion_tokens: 16, total_tokens: 336 },
           },
+        ])
+        return
+      }
+
+      // Anthropic replay inspection endpoint
+      if (url.pathname === '/anthropic-replay/v1/messages') {
+        anthropicCapturedBodies.push(body)
+        writeAnthropicSse(res, [
+          {
+            event: 'message_start',
+            data: {
+              type: 'message_start',
+              message: {
+                id: 'msg_rep',
+                type: 'message',
+                role: 'assistant',
+                model: 'claude-sonnet-4-20250514',
+                content: [],
+                stop_reason: null,
+                stop_sequence: null,
+                usage: { input_tokens: 480, output_tokens: 1 },
+              },
+            },
+          },
+          {
+            event: 'content_block_start',
+            data: { type: 'content_block_start', index: 0, content_block: { type: 'text', text: '' } },
+          },
+          {
+            event: 'content_block_delta',
+            data: { type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: '已衔接上一轮工具结果继续回复。' } },
+          },
+          { event: 'content_block_stop', data: { type: 'content_block_stop', index: 0 } },
+          {
+            event: 'message_delta',
+            data: {
+              type: 'message_delta',
+              delta: { stop_reason: 'end_turn', stop_sequence: null },
+              usage: { output_tokens: 12 },
+            },
+          },
+          { event: 'message_stop', data: { type: 'message_stop' } },
         ])
         return
       }
@@ -858,7 +933,10 @@ describe('agent providers & runner with local mock LLM servers', () => {
     const fenced = formatUserMessageWithContext('检查这段', {
       activePath: 'EPUB/text/ch001.xhtml',
       selection: '含```三重反引号```的选区',
+      selectionStartLine: 12,
+      selectionEndLine: 15,
     })
+    expect(fenced).toContain('用户选中的文本片段（第 12–15 行）：')
     expect(fenced).toContain('````\n含```三重反引号```的选区\n````')
 
     const longSelection = '甲'.repeat(4100)
@@ -945,5 +1023,169 @@ describe('agent providers & runner with local mock LLM servers', () => {
     expect(req2Msgs[3]!.content).toContain('EPUB/text/ch002.xhtml')
     expect(req2Msgs[3]!.content).toContain('第二章选中的片段')
     expect(req2Msgs[3]!.content).toContain('再看看这一页')
+  })
+
+  it('replays full tool-call/tool-result chains across providers, folds old large outputs, and annotates proposal outcomes', async () => {
+    askRequests = []
+    anthropicCapturedBodies = []
+    const { archive } = openEpub(createEmptyEpub({ title: '跨协议记忆测试书' }), nodeXmlCodec.parse)
+
+    const largeReadBody = '这是很长的旧章节内容。'.repeat(120)
+    const oldTurnRead = {
+      id: 'm1-a',
+      role: 'assistant' as const,
+      content: '已读取第一章。',
+      proposalStatus: 'applied' as const,
+      proposalResolution: { keptHunks: 2, totalHunks: 3, skippedPaths: ['EPUB/text/ch001.xhtml'] },
+      steps: [
+        { type: 'text' as const, text: '先读一下正文。' },
+        {
+          type: 'tool' as const,
+          id: 't-old',
+          callId: 'weird.call:id/with spaces',
+          name: 'read_file' as const,
+          args: { path: 'EPUB/text/ch001.xhtml', startLine: 1, endLine: 200 },
+          argsSummary: 'EPUB/text/ch001.xhtml:1-200',
+          ok: true,
+          summary: '第 1–200 / 200 行',
+          result: { ok: true, data: { content: largeReadBody, startLine: 1, endLine: 200, totalLines: 200 } },
+        },
+        { type: 'text' as const, text: '已读取第一章。' },
+      ],
+    }
+
+    const recentTurnRead = {
+      id: 'm4-a',
+      role: 'assistant' as const,
+      content: '已检查最新章节。',
+      proposalStatus: 'reverted' as const,
+      steps: [
+        {
+          type: 'tool' as const,
+          id: 't-new',
+          callId: 'call_recent_1',
+          name: 'read_file' as const,
+          args: { path: 'EPUB/text/ch001.xhtml', startLine: 1, endLine: 20 },
+          argsSummary: 'EPUB/text/ch001.xhtml:1-20',
+          ok: true,
+          summary: '第 1–20 / 20 行',
+          result: { ok: true, data: { content: '<p>最近保留的完整原文</p>', startLine: 1, endLine: 20, totalLines: 20 } },
+        },
+        { type: 'text' as const, text: '已检查最新章节。' },
+      ],
+    }
+
+    // 4 prior logical turns so turn 1 is older than the newest 3 turns (gets folded) while turn 4 stays full.
+    const history = [
+      { id: 'm1-u', role: 'user' as const, content: '读第一章' },
+      oldTurnRead,
+      { id: 'm2-u', role: 'user' as const, content: '继续' },
+      { id: 'm2-a', role: 'assistant' as const, content: '第二轮完成。' },
+      { id: 'm3-u', role: 'user' as const, content: '再继续' },
+      { id: 'm3-a', role: 'assistant' as const, content: '第三轮完成。' },
+      { id: 'm4-u', role: 'user' as const, content: '再看一遍' },
+      recentTurnRead,
+    ]
+
+    // Replay into Anthropic endpoint to verify normalized tool_use IDs and cross-provider compatibility!
+    const res = await runAgentTurn({
+      archive,
+      provider: {
+        provider: 'anthropic',
+        baseUrl: `${mockUrl}/anthropic-replay/v1`,
+        model: 'claude-sonnet-4-20250514',
+        apiKey: 'sk-ant-mock',
+      },
+      history,
+      userMessage: '把刚才那句改一下',
+      approvalMode: 'ask',
+      contextWindow: 200_000,
+    })
+
+    expect(res.error).toBeNull()
+    expect(res.content).toBe('已衔接上一轮工具结果继续回复。')
+    expect(res.usage.inputTokens).toBe(480)
+    expect(anthropicCapturedBodies).toHaveLength(1)
+
+    const serialized = JSON.stringify(anthropicCapturedBodies[0]!.messages)
+    // Old large read_file output is folded (no raw 120x repetition), while recent read_file stays intact.
+    expect(serialized).not.toContain('这是很长的旧章节内容。这是很长的旧章节内容。这是很长的旧章节内容。')
+    expect(serialized).toContain('较早轮次的详细只读输出已折叠')
+    expect(serialized).toContain('最近保留的完整原文')
+    // Proposal annotations from applied (partial) and reverted turns are present.
+    expect(serialized).toContain('保留 2/3 处变更')
+    expect(serialized).toContain('撤销了本轮提案')
+    // Normalized tool call id contains no dots/colons/slashes/spaces.
+    expect(serialized).toContain('weird_call_id_with_spaces')
+  })
+
+  it('auto-compacts at 80% context window and gracefully degrades when compaction fails', async () => {
+    askRequests = []
+    compactCalls = 0
+    compactFailMode = false
+    const { archive } = openEpub(createEmptyEpub({ title: '自动压缩测试书' }), nodeXmlCodec.parse)
+
+    const longHistory = [
+      { id: 'u1', role: 'user' as const, content: '第一轮请核对全书术语规范：'.concat('学术术语记录。'.repeat(180)) },
+      { id: 'a1', role: 'assistant' as const, content: '已核对并记录了术语列表：'.concat('条目详情。'.repeat(180)) },
+      { id: 'u2', role: 'user' as const, content: '第二轮请检查标点：'.concat('标点详情。'.repeat(180)) },
+      { id: 'a2', role: 'assistant' as const, content: '第二轮已完成标点检查：'.concat('检查结论。'.repeat(180)) },
+      { id: 'u3', role: 'user' as const, content: '第三轮看看目录' },
+      { id: 'a3', role: 'assistant' as const, content: '目录结构正常。' },
+    ]
+
+    const events: AgentStreamEvent[] = []
+    const compactedRes = await runAgentTurn({
+      archive,
+      provider: {
+        provider: 'openai-compatible',
+        baseUrl: `${mockUrl}/ask-check/v1`,
+        model: 'mock-ask',
+        apiKey: null,
+      },
+      history: longHistory,
+      userMessage: '继续第四轮校对',
+      approvalMode: 'ask',
+      contextWindow: 4_096,
+      onEvent: (event) => events.push(event),
+    })
+
+    expect(compactedRes.error).toBeNull()
+    expect(compactCalls).toBe(1)
+    expect(compactedRes.compaction).not.toBeNull()
+    expect(compactedRes.compaction!.summary).toContain('【压缩摘要】')
+    expect(compactedRes.compaction!.compactedUpToMessageId).toBeTruthy()
+    expect(events.some((e) => e.type === 'compacted')).toBe(true)
+    expect(events.some((e) => e.type === 'usage')).toBe(true)
+
+    const streamingReq = askRequests.find((r) => r.stream === true)!
+    const sentMessages = streamingReq.messages as Array<{ role: string; content: string }>
+    expect(JSON.stringify(sentMessages)).toContain('<session_compaction_summary>')
+    expect(JSON.stringify(sentMessages)).toContain('【压缩摘要】')
+
+    // Now simulate compaction endpoint failure -> must gracefully degrade and still answer!
+    askRequests = []
+    compactFailMode = true
+    const degradedEvents: AgentStreamEvent[] = []
+    const degradedRes = await runAgentTurn({
+      archive,
+      provider: {
+        provider: 'openai-compatible',
+        baseUrl: `${mockUrl}/ask-check/v1`,
+        model: 'mock-ask',
+        apiKey: null,
+      },
+      history: longHistory,
+      userMessage: '即使压缩失败也继续回答',
+      approvalMode: 'ask',
+      contextWindow: 4_096,
+      onEvent: (event) => degradedEvents.push(event),
+    })
+
+    compactFailMode = false
+    expect(degradedRes.error).toBeNull()
+    expect(degradedRes.content).toBe('仅给出只读校对建议。')
+    expect(degradedRes.compaction?.notice.degraded).toBe(true)
+    expect(degradedEvents.some((e) => e.type === 'compacted' && e.notice.degraded === true)).toBe(true)
   })
 })

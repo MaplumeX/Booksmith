@@ -86,7 +86,14 @@ import {
 } from 'lucide-react'
 import { Popover } from 'radix-ui'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { ApiError, api, downloadUrl, type AgentProfileDto, type AgentUserSettingsDto } from '../api/client'
+import {
+  ApiError,
+  api,
+  downloadUrl,
+  type AgentProfileDto,
+  type AgentProposalResolution,
+  type AgentUserSettingsDto,
+} from '../api/client'
 import {
   insertAnchorId,
   insertHorizontalRule,
@@ -415,7 +422,36 @@ export function Editor({ bookId }: { bookId: string }) {
   const [agentProfiles, setAgentProfiles] = useState<AgentProfileDto[]>([])
   const [agentProfilesLoading, setAgentProfilesLoading] = useState(true)
   const [agentUserSettings, setAgentUserSettings] = useState<AgentUserSettingsDto | null>(null)
-  const [selectionText, setSelectionText] = useState('')
+  const [editorSelection, setEditorSelection] = useState<{
+    text: string
+    path: string | null
+    startLine: number | null
+    endLine: number | null
+    source: 'code' | 'wysiwyg' | 'preview' | 'review'
+  } | null>(null)
+  const selectionText = editorSelection?.text ?? ''
+  const updateSelection = useCallback(
+    (
+      source: 'code' | 'wysiwyg' | 'preview' | 'review',
+      text: string,
+      options?: { path?: string | null; startLine?: number | null; endLine?: number | null },
+    ) => {
+      const hasText = text.trim().length > 0
+      setEditorSelection((current) => {
+        if (!hasText) {
+          return current && current.source === source ? null : current
+        }
+        return {
+          text,
+          path: options?.path !== undefined ? options.path : activeRef.current,
+          startLine: options?.startLine ?? null,
+          endLine: options?.endLine ?? null,
+          source,
+        }
+      })
+    },
+    [],
+  )
   const agentUndoRef = useRef<{ messageId: string; snapshot: WorkspaceSnapshot } | null>(null)
   const [agentUndoMessageId, setAgentUndoMessageId] = useState<string | null>(null)
   // In-canvas Agent proposal review state & per-message skipped-hunk memory draft.
@@ -434,7 +470,14 @@ export function Editor({ bookId }: { bookId: string }) {
     driftedPaths: string[]
   } | null>(null)
   const activeRef = useRef<string | null>(null)
-  activeRef.current = active
+  useEffect(() => {
+    activeRef.current = active
+    setEditorSelection((current) => {
+      if (!current) return null
+      if (current.source === 'review') return current
+      return current.path === active ? current : null
+    })
+  }, [active])
   const textListeners = useRef(new Set<(path: string, value: string) => void>())
 
   const subscribeTextChange = useCallback((listener: (path: string, value: string) => void) => {
@@ -695,6 +738,7 @@ export function Editor({ bookId }: { bookId: string }) {
 
       let selectedPaths: Set<string> | undefined
       let composedTexts: Map<string, string> | undefined
+      let resolution: AgentProposalResolution | undefined
 
       if (!options?.rawAutoApply && !proposal.isStructural) {
         const msgSkipped = skippedHunksRef.current[messageId] ?? {}
@@ -710,6 +754,16 @@ export function Editor({ bookId }: { bookId: string }) {
         selectedPaths = plan.selectedPaths
         composedTexts = plan.composedTexts
         if (selectedPaths.size === 0) return false
+        if (plan.totalHunks > 0 && plan.keptHunks < plan.totalHunks) {
+          const skippedPaths = Array.from(plan.fileStates.entries())
+            .filter(([, st]) => st.kept < st.total)
+            .map(([path]) => path)
+          resolution = {
+            keptHunks: plan.keptHunks,
+            totalHunks: plan.totalHunks,
+            ...(skippedPaths.length > 0 ? { skippedPaths } : {}),
+          }
+        }
       }
 
       if (!options?.rawAutoApply && !options?.forceApplyStale) {
@@ -758,7 +812,7 @@ export function Editor({ bookId }: { bookId: string }) {
         closeProposalReview(messageId)
         setProposalStatusSync({ messageId, status: 'applied', seq: Date.now() })
 
-        await api.updateProposalStatus(current.id, messageId, 'applied').catch(() => {})
+        await api.updateProposalStatus(current.id, messageId, 'applied', resolution).catch(() => {})
         return true
       } catch (error) {
         setSaveError(error instanceof Error ? error.message : '应用变更提案失败')
@@ -825,6 +879,8 @@ export function Editor({ bookId }: { bookId: string }) {
       setAgentUndoMessageId(null)
       const summary = syncDirtyFromBaseline(snapshot.book)
       syncDurability(summary)
+      setProposalStatusSync({ messageId, status: 'reverted', seq: Date.now() })
+      void api.updateProposalStatus(snapshot.book.id, messageId, 'reverted').catch(() => {})
     },
     [syncDirtyFromBaseline, syncDurability],
   )
@@ -2768,6 +2824,7 @@ export function Editor({ bookId }: { bookId: string }) {
               onApply={() => void handleApplyAgentProposal(activeReview.messageId, activeReview.proposal)}
               onDismiss={() => void handleDismissAgentProposal(activeReview.messageId)}
               onExit={() => setActiveReview(null)}
+              onSelectionChange={(text, selPath) => updateSelection('review', text, { path: selPath })}
             />
           ) : null}
 
@@ -2849,7 +2906,13 @@ export function Editor({ bookId }: { bookId: string }) {
                     resetVersion={externalResetVersion}
                     contextMenuItems={codeContextItems}
                     onNavigate={navigateTo}
-                    onSelectionChange={setSelectionText}
+                    onSelectionChange={(text, range) =>
+                      updateSelection('code', text, {
+                        path: active,
+                        startLine: range?.startLine ?? null,
+                        endLine: range?.endLine ?? null,
+                      })
+                    }
                     onSplitAtCursor={previewable ? (offset) => handleSplitAtCursor(offset) : undefined}
                     onInsertSplitMarker={previewable ? handleInsertSplitMarker : undefined}
                     onFormatDocument={activeFileKind !== 'other' ? handleFormatDocument : undefined}
@@ -2870,6 +2933,7 @@ export function Editor({ bookId }: { bookId: string }) {
                       onNavigateLink={navigateTo}
                       onSplitAtCursor={(xhtml, offset) => handleSplitAtCursor(offset, xhtml)}
                       onShortcut={handleWysiwygShortcut}
+                      onSelectionChange={(text) => updateSelection('wysiwyg', text, { path: active })}
                     />
                   ) : null}
                 </>
@@ -2902,62 +2966,76 @@ export function Editor({ bookId }: { bookId: string }) {
                 resolveAsset={resolveAsset}
                 revealFragment={revealFragment}
                 subscribeTextChange={subscribeTextChange}
+                onSelectionChange={(text) => updateSelection('preview', text, { path: active })}
               />
             </section>
           ) : null}
         </div>
 
-        {agentOpen ? (
-          <>
-            <div
-              className="splitter"
-              role="separator"
-              aria-orientation="vertical"
-              aria-label="调整助手栏宽度"
-              onPointerDown={startResize}
-            />
-            <aside className="sidebar is-agent" style={{ width: sidebarWidth }} aria-label="EPUB 编辑助手">
-              <AgentPanel
-                bookId={book.id}
-                bookTitle={book.pkg.metadata.title || '未命名'}
-                bookVersion={book.version}
-                activePath={active}
-                selectionText={selectionText}
-                profiles={agentProfiles}
-                profilesLoading={agentProfilesLoading}
-                defaultApprovalMode={agentUserSettings?.defaultApprovalMode ?? 'review'}
-                undoMessageId={agentUndoMessageId}
-                activeReview={
-                  activeReview
-                    ? {
-                        messageId: activeReview.messageId,
-                        selectedPath: activeReview.selectedPath,
-                        readOnly: activeReview.readOnly,
-                      }
-                    : null
-                }
-                skippedHunksByMessage={skippedHunksByMessage}
-                proposalStatusSync={proposalStatusSync}
-                getOverlay={() => {
-                  wysiwygFlushRef.current?.()
-                  const current = bookRef.current ?? book
-                  return {
-                    dirtyTexts: collectDirtyTexts(texts.current, dirtyRef.current, current),
-                    deletedPaths: computeDeletedPaths(current),
+        {/* Keep AgentPanel mounted across collapse/expand so hiding the sidebar never aborts streaming
+            or resets the active thread. See ADR 2026-11-21-agent-session-continuity. */}
+        <div
+          className="splitter"
+          role="separator"
+          aria-orientation="vertical"
+          aria-label="调整助手栏宽度"
+          hidden={!agentOpen}
+          onPointerDown={startResize}
+        />
+        <aside
+          className="sidebar is-agent"
+          hidden={!agentOpen}
+          style={{ width: sidebarWidth }}
+          aria-label="EPUB 编辑助手"
+        >
+          <AgentPanel
+            bookId={book.id}
+            bookTitle={book.pkg.metadata.title || '未命名'}
+            bookVersion={book.version}
+            activePath={active}
+            selectionText={selectionText}
+            selectionPath={editorSelection?.path ?? null}
+            selectionRange={
+              editorSelection?.startLine
+                ? {
+                    startLine: editorSelection.startLine,
+                    endLine: editorSelection.endLine ?? editorSelection.startLine,
                   }
-                }}
-                onOpenSettings={() => setSettingsTab('agent')}
-                onClose={() => setAgentOpen(false)}
-                onReloadBook={() => void reload()}
-                onOpenProposalReview={openProposalReview}
-                onCloseProposalReview={closeProposalReview}
-                onApplyProposal={handleApplyAgentProposal}
-                onDismissProposal={handleDismissAgentProposal}
-                onUndoProposal={handleUndoAgentProposal}
-              />
-            </aside>
-          </>
-        ) : null}
+                : null
+            }
+            profiles={agentProfiles}
+            profilesLoading={agentProfilesLoading}
+            defaultApprovalMode={agentUserSettings?.defaultApprovalMode ?? 'review'}
+            undoMessageId={agentUndoMessageId}
+            activeReview={
+              activeReview
+                ? {
+                    messageId: activeReview.messageId,
+                    selectedPath: activeReview.selectedPath,
+                    readOnly: activeReview.readOnly,
+                  }
+                : null
+            }
+            skippedHunksByMessage={skippedHunksByMessage}
+            proposalStatusSync={proposalStatusSync}
+            getOverlay={() => {
+              wysiwygFlushRef.current?.()
+              const current = bookRef.current ?? book
+              return {
+                dirtyTexts: collectDirtyTexts(texts.current, dirtyRef.current, current),
+                deletedPaths: computeDeletedPaths(current),
+              }
+            }}
+            onOpenSettings={() => setSettingsTab('agent')}
+            onClose={() => setAgentOpen(false)}
+            onReloadBook={() => void reload()}
+            onOpenProposalReview={openProposalReview}
+            onCloseProposalReview={closeProposalReview}
+            onApplyProposal={handleApplyAgentProposal}
+            onDismissProposal={handleDismissAgentProposal}
+            onUndoProposal={handleUndoAgentProposal}
+          />
+        </aside>
       </div>
 
       <Dialog

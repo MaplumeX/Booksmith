@@ -69,3 +69,4 @@ Status: implemented
 - **推理字段方言差异**：依赖 Vercel AI SDK `fullStream` 将 OpenAI-compatible `reasoning_content`/`reasoning` 与 Anthropic `thinking_delta` 统一映射为 `reasoning-delta`；未采用标准流式字段的中转站会平滑降级为不展示思考块。
 - **无上限步数的停止依赖**：当用户将单轮最大工具步数留空（不限制）或设得极大时，若模型陷入重复调用循环，需要用户主动点击输入卡右下角的停止按钮中止生成。
 - **纯增量数据表演进**：迁移 `0007_uneven_doctor_octopus.sql` 为纯增量加列与新增 `agent_user_settings` 表，不破坏存量预设与历史会话。
+- **后续会话连续性演进（2026-11-21）**：本文档中历史回放仅保留纯文本、不带工具轨迹与提案处置状态的条款已由 [continuous multi-turn Agent sessions](2026-11-21-agent-session-continuity.md) 部分替代；三档审批模式、同供应商多模型、云端运行偏好、流式思考块与末条重试机制保持有效。

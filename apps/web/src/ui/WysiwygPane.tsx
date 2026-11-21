@@ -76,6 +76,7 @@ export interface WysiwygPaneProps {
   onShortcut?: (action: WysiwygShortcut) => void
   onNavigateLink?: (target: { path: string; fragment: string }) => void
   onSplitAtCursor?: (xhtml: string, offset: number) => void
+  onSelectionChange?: (selection: string) => void
 }
 
 type SelectionContext =
@@ -155,6 +156,7 @@ export function WysiwygPane({
   onShortcut,
   onNavigateLink,
   onSplitAtCursor,
+  onSelectionChange,
 }: WysiwygPaneProps) {
   const [xmlError, setXmlError] = useState<string | null>(() => {
     const check = checkXmlWellFormed(content, browserXmlParser)
@@ -178,6 +180,8 @@ export function WysiwygPane({
   const savedRange = useRef<Range | null>(null)
   const revealRef = useRef(revealFragment ?? null)
   revealRef.current = revealFragment ?? null
+  const onSelectionChangeRef = useRef(onSelectionChange)
+  onSelectionChangeRef.current = onSelectionChange
   const appliedRevealKey = useRef<number | null>(null)
 
   const syncTimer = useRef<number | null>(null)
@@ -490,6 +494,9 @@ export function WysiwygPane({
 
       const onSelectionChange = () => {
         refreshToolbar()
+        const sel = doc.defaultView?.getSelection()
+        const text = sel && !sel.isCollapsed ? sel.toString() : ''
+        onSelectionChangeRef.current?.(text)
       }
 
       const onClick = (event: MouseEvent) => {

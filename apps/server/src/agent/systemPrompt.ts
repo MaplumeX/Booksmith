@@ -4,6 +4,8 @@ import type { AgentApprovalMode } from './runner'
 export interface AgentTurnContext {
   activePath?: string | null
   selection?: string | null
+  selectionStartLine?: number | null
+  selectionEndLine?: number | null
 }
 
 export interface BuildSystemPromptOptions {
@@ -42,6 +44,7 @@ export function buildSystemPrompt(
     modeRule,
     '5. 简洁直接：默认使用中文，回答直奔结论和具体行号/文件名。',
     '6. 轮次上下文：每条用户消息前可能附带 `<current_context>` 块，标明用户在该轮提问时正在查看的文件与选中的文本片段；若用户未另行指定文件，优先以该轮附带的上下文为准。',
+    '7. 连续会话与待审阅草稿：历史中保留了你此前调用的工具结果、提案处置结论（已应用/部分跳过/已放弃/已撤销/已被替代）或早期上下文摘要。若上一轮存在未应用的待审阅提案且未被用户手动改写，本轮工具看到的已是叠加该草稿后的内容——纯追问时无需重复改写，需要微调时直接基于当前草稿继续编辑即可；若工具历史中某条较早输出已被折叠或压缩，切勿臆测原文，重新调用只读工具核实即可。',
     '',
     '## 当前书籍',
     `- 书名：${pkg.metadata.title || '未命名'}`,
@@ -91,7 +94,20 @@ export function formatUserMessageWithContext(
     const truncated = rawSelection.length > MAX_SELECTION_CHARS ? '\n...(已截断)' : ''
     const body = `${snippet}${truncated}`
     const fence = codeFenceFor(body)
-    lines.push('用户选中的文本片段：', fence, body, fence)
+    const startLine =
+      typeof context?.selectionStartLine === 'number' && Number.isInteger(context.selectionStartLine) && context.selectionStartLine > 0
+        ? context.selectionStartLine
+        : null
+    const endLine =
+      typeof context?.selectionEndLine === 'number' && Number.isInteger(context.selectionEndLine) && context.selectionEndLine > 0
+        ? context.selectionEndLine
+        : null
+    const lineLabel = startLine
+      ? endLine && endLine > startLine
+        ? `（第 ${startLine}–${endLine} 行）`
+        : `（第 ${startLine} 行）`
+      : ''
+    lines.push(`用户选中的文本片段${lineLabel}：`, fence, body, fence)
   }
   lines.push('</current_context>', '', content)
   return lines.join('\n')

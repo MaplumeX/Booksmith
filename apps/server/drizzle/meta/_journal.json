@@ -64,6 +64,13 @@
       "when": 1795191536538,
       "tag": "0008_wooden_magik",
       "breakpoints": true
+    },
+    {
+      "idx": 9,
+      "version": "7",
+      "when": 1795273532880,
+      "tag": "0009_sharp_ravenous",
+      "breakpoints": true
     }
   ]
 }

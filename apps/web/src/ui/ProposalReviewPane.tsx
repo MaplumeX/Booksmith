@@ -63,6 +63,7 @@ export interface ProposalReviewPaneProps {
   onApply: () => void
   onDismiss: () => void
   onExit: () => void
+  onSelectionChange?: (selection: string, path: string) => void
 }
 
 const KIND_LABELS: Record<AgentProposalFile['kind'], string> = {
@@ -116,6 +117,7 @@ interface ReviewBookIframeProps {
   scrollSeq?: number
   onToggleHunk?: (hunkId: string) => void
   onGotoSourceHunk?: (hunkId: string) => void
+  onSelectionChange?: (selection: string) => void
   title: string
 }
 
@@ -130,6 +132,7 @@ function ReviewBookIframe({
   scrollSeq = 0,
   onToggleHunk,
   onGotoSourceHunk,
+  onSelectionChange,
   title,
 }: ReviewBookIframeProps) {
   const theme = useResolvedTheme()
@@ -137,8 +140,8 @@ function ReviewBookIframe({
   const blobCacheRef = useRef<PreviewBlobCache>(new PreviewBlobCache())
   const readyDocsRef = useRef<WeakSet<Document>>(new WeakSet())
   const [error, setError] = useState<string | null>(null)
-  const callbacksRef = useRef({ onToggleHunk, onGotoSourceHunk })
-  callbacksRef.current = { onToggleHunk, onGotoSourceHunk }
+  const callbacksRef = useRef({ onToggleHunk, onGotoSourceHunk, onSelectionChange })
+  callbacksRef.current = { onToggleHunk, onGotoSourceHunk, onSelectionChange }
 
   const isDocReady = useCallback((): boolean => {
     const doc = frameRef.current?.contentDocument
@@ -221,8 +224,21 @@ function ReviewBookIframe({
         callbacksRef.current.onGotoSourceHunk?.(hunkId)
       }
     }
+    const onSelection = () => {
+      const sel = doc.defaultView?.getSelection()
+      const text = sel && !sel.isCollapsed ? sel.toString() : ''
+      callbacksRef.current.onSelectionChange?.(text)
+    }
     doc.addEventListener('click', onClick)
-    return () => doc.removeEventListener('click', onClick)
+    doc.addEventListener('selectionchange', onSelection)
+    doc.addEventListener('mouseup', onSelection)
+    doc.addEventListener('keyup', onSelection)
+    return () => {
+      doc.removeEventListener('click', onClick)
+      doc.removeEventListener('selectionchange', onSelection)
+      doc.removeEventListener('mouseup', onSelection)
+      doc.removeEventListener('keyup', onSelection)
+    }
   }, [])
 
   const cleanupClickRef = useRef<(() => void) | null>(null)
@@ -391,6 +407,7 @@ export function ProposalReviewPane({
   onApply,
   onDismiss,
   onExit,
+  onSelectionChange,
 }: ProposalReviewPaneProps) {
   const theme = useResolvedTheme()
 
@@ -914,6 +931,7 @@ export function ProposalReviewPane({
             pkg={virtualBook.pkg}
             resolveAsset={resolveAsset}
             extraCss={paperCss}
+            onSelectionChange={(text) => onSelectionChange?.(text, cssPreviewChapter)}
             title={`样式终稿预览：${basename(cssPreviewChapter)}`}
           />
         ) : activeFile.kind === 'rename' && activeModel.isNoopText ? (
@@ -935,6 +953,7 @@ export function ProposalReviewPane({
             scrollSeq={scrollSeq}
             onToggleHunk={allowHunkToggle ? (hunkId) => onToggleHunk(activeFile.path, hunkId) : undefined}
             onGotoSourceHunk={handleGotoSourceHunk}
+            onSelectionChange={(text) => onSelectionChange?.(text, activeFile.path)}
             title={`书页修订视图：${basename(activeFile.path)}`}
           />
         ) : isChapter && viewMode === 'final' ? (
@@ -945,10 +964,24 @@ export function ProposalReviewPane({
             pkg={virtualBook.pkg}
             resolveAsset={resolveAsset}
             extraCss={paperCss}
+            onSelectionChange={(text) => onSelectionChange?.(text, activeFile.path)}
             title={`书页终稿预览：${basename(activeFile.path)}`}
           />
         ) : (
-          <div className="review-source-scroll" ref={sourceContainerRef}>
+          <div
+            className="review-source-scroll"
+            ref={sourceContainerRef}
+            onMouseUp={() => {
+              const sel = window.getSelection()
+              const text = sel && !sel.isCollapsed ? sel.toString() : ''
+              onSelectionChange?.(text, activeFile.path)
+            }}
+            onKeyUp={() => {
+              const sel = window.getSelection()
+              const text = sel && !sel.isCollapsed ? sel.toString() : ''
+              onSelectionChange?.(text, activeFile.path)
+            }}
+          >
             <div className="review-source-sheet">
               {sourceSegments.length === 0 ? (
                 <div className="review-empty">
