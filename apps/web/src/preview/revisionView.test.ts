@@ -37,25 +37,50 @@ describe('revisionView XHTML annotator', () => {
     expect(res.xhtml).toContain('<del class="bs-rev-del">错</del><ins class="bs-rev-ins">正</ins>')
     expect(res.xhtml).toContain('data-bs-hunk="hunk-0"')
     expect(res.xhtml).toContain('data-bs-active="true"')
-    expect(res.xhtml).toContain('data-bs-action="toggle-hunk"')
+    expect(res.xhtml).toContain('data-bs-action="accept-hunk"')
+    expect(res.xhtml).toContain('data-bs-action="reject-hunk"')
   })
 
-  it('reverts skipped hunks to original prose with a restore pill', () => {
-    const before = '<html><body>\n<p>原句甲</p>\n<p>原句乙</p>\n</body></html>'
-    const after = '<html><body>\n<p>改句甲</p>\n<p>改句乙</p>\n</body></html>'
+  it('collapses accepted hunks in-place into clean prose and reverts rejected hunks to original prose', () => {
+    const before = [
+      '<html><body>',
+      '<p>原句甲</p>',
+      '<p>不变段</p>',
+      '<p>原句乙</p>',
+      '</body></html>',
+    ].join('\n')
+    const after = [
+      '<html><body>',
+      '<p>改句甲</p>',
+      '<p>不变段</p>',
+      '<p>改句乙</p>',
+      '</body></html>',
+    ].join('\n')
     const model = buildFileHunks({ path: 'ch001.xhtml', kind: 'update', beforeText: before, afterText: after })
     const res = buildRevisionXhtml({
       model,
-      skippedHunkIds: new Set(['hunk-0']),
+      decisions: { 'hunk-0': 'accepted', 'hunk-1': 'rejected' },
       allowHunkToggle: true,
     })
 
-    expect(res.xhtml).toContain('原句甲')
-    expect(res.xhtml).toContain('恢复保留')
-    expect(res.xhtml).not.toContain('改句甲')
+    // Accepted hunk-0 renders clean final prose without <del>/<ins> highlights, plus undo button.
+    expect(res.xhtml).toContain('data-bs-rev="accepted"')
+    expect(res.xhtml).toContain('改句甲')
+    expect(res.xhtml).not.toContain('原句甲')
+    expect(res.xhtml).not.toContain('<del class="bs-rev-del">')
+    expect(res.xhtml).not.toContain('<ins class="bs-rev-ins">')
+    expect(res.xhtml).toContain('已保留')
+    expect(res.xhtml).toContain('data-bs-action="reset-hunk"')
+
+    // Rejected hunk-1 reverts to original prose with restore button.
+    expect(res.xhtml).toContain('data-bs-rev="rejected"')
+    expect(res.xhtml).toContain('原句乙')
+    expect(res.xhtml).not.toContain('改句乙')
+    expect(res.xhtml).toContain('已拒绝')
+    expect(res.xhtml).toContain('恢复')
   })
 
-  it('protects MathML islands with clean before/after comparison blocks', () => {
+  it('protects MathML islands with clean before/after comparison blocks and collapses cleanly when accepted', () => {
     const before = '<html><body>\n<p>公式 <math><mi>x</mi></math> 成立。</p>\n</body></html>'
     const after = '<html><body>\n<p>公式 <math><mi>y</mi></math> 成立。</p>\n</body></html>'
     const model = buildFileHunks({ path: 'ch001.xhtml', kind: 'update', beforeText: before, afterText: after })
@@ -66,6 +91,15 @@ describe('revisionView XHTML annotator', () => {
     expect(res.xhtml).toContain('<math><mi>x</mi></math>')
     expect(res.xhtml).toContain('<math><mi>y</mi></math>')
     expect(res.xhtml).toContain('公式/媒体结构变更')
+
+    const accepted = buildRevisionXhtml({
+      model,
+      decisions: { 'hunk-0': 'accepted' },
+      allowHunkToggle: true,
+    })
+    expect(accepted.xhtml).toContain('<math><mi>y</mi></math>')
+    expect(accepted.xhtml).not.toContain('bs-rev-compare-before')
+    expect(accepted.xhtml).toContain('is-accepted')
   })
 
   it('marks pure attribute/class changes and tracks head-only hunks separately', () => {
@@ -104,7 +138,7 @@ describe('revisionView XHTML annotator', () => {
     })
     const createdRes = buildRevisionXhtml({ model: createdModel, allowHunkToggle: false })
     expect(createdRes.xhtml).toContain('+ 新增章节')
-    expect(createdRes.xhtml).not.toContain('data-bs-action="toggle-hunk"')
+    expect(createdRes.xhtml).not.toContain('data-bs-action="accept-hunk"')
 
     const singleLineModel = buildFileHunks({
       path: 'EPUB/text/ch001.xhtml',

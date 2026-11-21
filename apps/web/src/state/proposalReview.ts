@@ -3,6 +3,7 @@ import {
   getLinkedStylesheets,
   parsePackage,
   type AgentProposal,
+  type AgentProposalDelta,
   type AgentProposalFile,
   type EpubArchive,
   type EpubPackage,
@@ -14,19 +15,28 @@ import { checkXmlWellFormed } from '../editor/wysiwygXhtml'
 import { extensionOf, type LoadedBook } from './bookStore'
 
 /**
- * Pure per-hunk diff, selective recomposition, XML validation, and read-only virtual book overlay
- * for in-canvas Agent proposal review.
+ * Pure per-hunk diff, 3-state Cursor-style decision engine (`pending | accepted | rejected`),
+ * content-fingerprint reconciliation across live streaming updates, XML validation, and read-only
+ * virtual book overlay for in-canvas Agent proposal review.
  *
- * Keeps review state isolated from the live workspace so browsing, toggling hunks, or previewing
- * styles never mutates dirty state, drafts, or autosave timers.
- * See ADR 2026-11-21-in-canvas-agent-proposal-review.
+ * Keeps review state isolated from the live workspace so browsing, accepting/rejecting hunks,
+ * or previewing styles never mutates dirty state, drafts, or autosave timers.
+ * See ADR 2026-11-21-in-canvas-agent-proposal-review, ADR 2026-11-22-live-streaming-agent-review.
  */
 
 const encoder = new TextEncoder()
 
+export type HunkDecision = 'pending' | 'accepted' | 'rejected'
+export type FileHunkDecisions = Readonly<Record<string, HunkDecision>>
+export type ProposalHunkDecisions = Readonly<Record<string, FileHunkDecisions>>
+export type LegacySkippedSet = ReadonlySet<string>
+
 export interface ProposalHunk {
   id: string
   index: number
+  /** Stable content + per-file occurrence fingerprint so user decisions survive live re-edits.
+   * See ADR 2026-11-22-live-streaming-agent-review. */
+  fingerprint: string
   beforeStart: number
   beforeCount: number
   afterStart: number
@@ -59,6 +69,9 @@ export interface FileDiffModel {
 export interface FileHunkSelectionSummary {
   total: number
   kept: number
+  accepted: number
+  rejected: number
+  pending: number
 }
 
 export interface ComposedProposalPlan {
@@ -66,7 +79,30 @@ export interface ComposedProposalPlan {
   composedTexts: Map<string, string>
   totalHunks: number
   keptHunks: number
+  acceptedHunks: number
+  rejectedHunks: number
+  pendingHunks: number
   fileStates: Map<string, FileHunkSelectionSummary>
+}
+
+export function getHunkDecision(
+  decisions: FileHunkDecisions | LegacySkippedSet | undefined,
+  hunkId: string,
+): HunkDecision {
+  if (!decisions) return 'pending'
+  if (decisions instanceof Set) return decisions.has(hunkId) ? 'rejected' : 'pending'
+  return (decisions as FileHunkDecisions)[hunkId] ?? 'pending'
+}
+
+function makeHunkFingerprint(
+  beforeLines: readonly string[],
+  afterLines: readonly string[],
+  counts: Map<string, number>,
+): string {
+  const sig = `${beforeLines.join('\n')}\u0000${afterLines.join('\n')}`
+  const occ = counts.get(sig) ?? 0
+  counts.set(sig, occ + 1)
+  return `${occ}:${sig}`
 }
 
 export interface XmlValidationFailure {
@@ -120,6 +156,7 @@ export function buildFileHunks(file: AgentProposalFile): FileDiffModel {
     const hunk: ProposalHunk = {
       id: hunkId,
       index: 0,
+      fingerprint: makeHunkFingerprint([], afterLines, new Map()),
       beforeStart: 1,
       beforeCount: 0,
       afterStart: 1,
@@ -158,6 +195,7 @@ export function buildFileHunks(file: AgentProposalFile): FileDiffModel {
     const hunk: ProposalHunk = {
       id: hunkId,
       index: 0,
+      fingerprint: makeHunkFingerprint(beforeLines, [], new Map()),
       beforeStart: 1,
       beforeCount: beforeLines.length,
       afterStart: 1,
@@ -196,6 +234,7 @@ export function buildFileHunks(file: AgentProposalFile): FileDiffModel {
   const rawLines = diffLines(beforeNorm, afterNorm)
   const allLines: NumberedDiffLine[] = []
   const hunks: ProposalHunk[] = []
+  const sigCounts = new Map<string, number>()
 
   let beforeCursor = 1
   let afterCursor = 1
@@ -285,6 +324,7 @@ export function buildFileHunks(file: AgentProposalFile): FileDiffModel {
     hunks.push({
       id: hunkId,
       index: hunkIndex,
+      fingerprint: makeHunkFingerprint(beforeLines, afterLines, sigCounts),
       beforeStart,
       beforeCount: beforeLines.length,
       afterStart,
@@ -308,19 +348,132 @@ export function buildFileHunks(file: AgentProposalFile): FileDiffModel {
   }
 }
 
+/**
+ * Merges a streaming `AgentProposalDelta` into the current live proposal in-place by path order.
+ * Returns null when all changes have been reverted back to baseline.
+ * See ADR 2026-11-22-live-streaming-agent-review.
+ */
+export function applyProposalDelta(
+  current: AgentProposal | null,
+  delta: AgentProposalDelta,
+): AgentProposal | null {
+  const removed = new Set(delta.removedPaths)
+  const changedByPath = new Map(delta.changedFiles.map((file) => [file.path, file]))
+  const nextFiles: AgentProposalFile[] = []
+  const seen = new Set<string>()
+
+  for (const existing of current?.files ?? []) {
+    if (removed.has(existing.path)) continue
+    const updated = changedByPath.get(existing.path)
+    nextFiles.push(updated ?? existing)
+    seen.add(existing.path)
+  }
+  for (const file of delta.changedFiles) {
+    if (removed.has(file.path) || seen.has(file.path)) continue
+    nextFiles.push(file)
+    seen.add(file.path)
+  }
+
+  if (nextFiles.length === 0) return null
+  return {
+    id: delta.proposalId || current?.id || 'live',
+    isStructural: delta.isStructural,
+    validationIssues: current?.validationIssues ?? [],
+    files: nextFiles,
+  }
+}
+
+/**
+ * Reconciles user per-hunk decisions across live edits to the same file by matching content
+ * fingerprints, so earlier accept/reject choices never drift when new hunks are inserted above.
+ * See ADR 2026-11-22-live-streaming-agent-review.
+ */
+export function reconcileHunkDecisions(
+  prevModel: FileDiffModel | undefined,
+  nextModel: FileDiffModel,
+  prevDecisions: FileHunkDecisions | undefined,
+): FileHunkDecisions {
+  if (!prevModel || !prevDecisions) return {}
+  const byFingerprint = new Map<string, HunkDecision>()
+  for (const hunk of prevModel.hunks) {
+    const decision = prevDecisions[hunk.id]
+    if (decision === 'accepted' || decision === 'rejected') {
+      byFingerprint.set(hunk.fingerprint, decision)
+    }
+  }
+  if (byFingerprint.size === 0) return {}
+
+  const next: Record<string, HunkDecision> = {}
+  for (const hunk of nextModel.hunks) {
+    const matched = byFingerprint.get(hunk.fingerprint)
+    if (matched) next[hunk.id] = matched
+  }
+  return next
+}
+
+export function reconcileProposalDecisions(
+  prevProposal: AgentProposal | null,
+  nextProposal: AgentProposal | null,
+  prevByPath: ProposalHunkDecisions,
+): ProposalHunkDecisions {
+  if (!nextProposal) return {}
+  const prevFiles = new Map((prevProposal?.files ?? []).map((file) => [file.path, file]))
+  const nextByPath: Record<string, FileHunkDecisions> = {}
+
+  for (const file of nextProposal.files) {
+    const prevDec = prevByPath[file.path]
+    if (!prevDec || Object.keys(prevDec).length === 0) continue
+    const prevFile = prevFiles.get(file.path)
+    if (!prevFile) continue
+    if (
+      prevFile.kind === file.kind &&
+      prevFile.beforeText === file.beforeText &&
+      prevFile.afterText === file.afterText
+    ) {
+      nextByPath[file.path] = prevDec
+      continue
+    }
+    const reconciled = reconcileHunkDecisions(buildFileHunks(prevFile), buildFileHunks(file), prevDec)
+    if (Object.keys(reconciled).length > 0) {
+      nextByPath[file.path] = reconciled
+    }
+  }
+  return nextByPath
+}
+
+/** Finds the newest introduced/modified hunk index when a file updates live during streaming. */
+export function findNewestChangedHunkIndex(
+  prevModel: FileDiffModel | null | undefined,
+  nextModel: FileDiffModel,
+): number {
+  if (nextModel.hunks.length === 0) return -1
+  if (!prevModel || prevModel.hunks.length === 0) return 0
+  const prevFingerprints = new Set(prevModel.hunks.map((h) => h.fingerprint))
+  for (let i = nextModel.hunks.length - 1; i >= 0; i -= 1) {
+    if (!prevFingerprints.has(nextModel.hunks[i]!.fingerprint)) return i
+  }
+  return 0
+}
+
 export function composeFileFromHunks(
   model: FileDiffModel,
-  skippedHunkIds: ReadonlySet<string> | undefined,
+  decisions: FileHunkDecisions | LegacySkippedSet | undefined,
 ): string {
-  if (!skippedHunkIds || skippedHunkIds.size === 0) {
+  if (!decisions) {
     return model.file.afterText ?? ''
   }
   if (model.hunks.length === 0) {
     return model.file.afterText ?? model.file.beforeText ?? ''
   }
 
-  const allSkipped = model.hunks.every((hunk) => skippedHunkIds.has(hunk.id))
-  if (allSkipped) {
+  let rejectedCount = 0
+  for (const hunk of model.hunks) {
+    if (getHunkDecision(decisions, hunk.id) === 'rejected') rejectedCount += 1
+  }
+  if (rejectedCount === 0) {
+    return model.file.afterText ?? ''
+  }
+  if (rejectedCount === model.hunks.length) {
     return model.file.beforeText ?? ''
   }
 
@@ -337,7 +490,7 @@ export function composeFileFromHunks(
     emittedHunks.add(row.hunkId)
     const hunk = hunkById.get(row.hunkId)
     if (!hunk) continue
-    if (skippedHunkIds.has(hunk.id)) {
+    if (getHunkDecision(decisions, hunk.id) === 'rejected') {
       outLines.push(...hunk.beforeLines)
     } else {
       outLines.push(...hunk.afterLines)
@@ -350,13 +503,16 @@ export function composeFileFromHunks(
 export function buildComposedProposalPlan(
   proposal: AgentProposal,
   modelsByPath: ReadonlyMap<string, FileDiffModel>,
-  skippedByPath: Readonly<Record<string, ReadonlySet<string>>>,
+  decisionsByPath: Readonly<Record<string, FileHunkDecisions | LegacySkippedSet>>,
 ): ComposedProposalPlan {
   const selectedPaths = new Set<string>()
   const composedTexts = new Map<string, string>()
   const fileStates = new Map<string, FileHunkSelectionSummary>()
   let totalHunks = 0
   let keptHunks = 0
+  let acceptedHunks = 0
+  let rejectedHunks = 0
+  let pendingHunks = 0
 
   for (const file of proposal.files) {
     const model = modelsByPath.get(file.path) ?? buildFileHunks(file)
@@ -365,15 +521,40 @@ export function buildComposedProposalPlan(
 
     if (proposal.isStructural) {
       keptHunks += fileTotal
-      fileStates.set(file.path, { total: fileTotal, kept: fileTotal })
+      pendingHunks += fileTotal
+      fileStates.set(file.path, {
+        total: fileTotal,
+        kept: fileTotal,
+        accepted: 0,
+        rejected: 0,
+        pending: fileTotal,
+      })
       selectedPaths.add(file.path)
       continue
     }
 
-    const skipped = skippedByPath[file.path]
-    const fileKept = model.hunks.reduce((acc, hunk) => acc + (skipped?.has(hunk.id) ? 0 : 1), 0)
+    const decisions = decisionsByPath[file.path]
+    let fileAccepted = 0
+    let fileRejected = 0
+    let filePending = 0
+    for (const hunk of model.hunks) {
+      const dec = getHunkDecision(decisions, hunk.id)
+      if (dec === 'accepted') fileAccepted += 1
+      else if (dec === 'rejected') fileRejected += 1
+      else filePending += 1
+    }
+    const fileKept = fileTotal - fileRejected
     keptHunks += fileKept
-    fileStates.set(file.path, { total: fileTotal, kept: fileKept })
+    acceptedHunks += fileAccepted
+    rejectedHunks += fileRejected
+    pendingHunks += filePending
+    fileStates.set(file.path, {
+      total: fileTotal,
+      kept: fileKept,
+      accepted: fileAccepted,
+      rejected: fileRejected,
+      pending: filePending,
+    })
 
     if (fileTotal === 0) {
       // No-op text files need not block or mutate anything.
@@ -383,12 +564,21 @@ export function buildComposedProposalPlan(
     if (fileKept === 0) continue
 
     selectedPaths.add(file.path)
-    if (fileKept < fileTotal) {
-      composedTexts.set(file.path, composeFileFromHunks(model, skipped))
+    if (fileRejected > 0) {
+      composedTexts.set(file.path, composeFileFromHunks(model, decisions))
     }
   }
 
-  return { selectedPaths, composedTexts, totalHunks, keptHunks, fileStates }
+  return {
+    selectedPaths,
+    composedTexts,
+    totalHunks,
+    keptHunks,
+    acceptedHunks,
+    rejectedHunks,
+    pendingHunks,
+    fileStates,
+  }
 }
 
 /**
@@ -444,7 +634,8 @@ export function buildVirtualReviewBook(args: {
   texts: ReadonlyMap<string, string>
   proposal: AgentProposal
   modelsByPath?: ReadonlyMap<string, FileDiffModel>
-  skippedByPath?: Readonly<Record<string, ReadonlySet<string>>>
+  skippedByPath?: Readonly<Record<string, FileHunkDecisions | LegacySkippedSet>>
+  decisionsByPath?: ProposalHunkDecisions
   readOnly?: boolean
   cssOverride?: { path: string; mode: 'before' | 'after' } | null
   parseXml?: XmlDocumentParser
@@ -455,10 +646,12 @@ export function buildVirtualReviewBook(args: {
     proposal,
     modelsByPath,
     skippedByPath = {},
+    decisionsByPath,
     readOnly = false,
     cssOverride = null,
     parseXml = browserXmlParser,
   } = args
+  const activeDecisions = decisionsByPath ?? skippedByPath
 
   const nextEntries = new Map(book.archive.entries)
   let nextOrder = [...book.archive.order]
@@ -491,7 +684,7 @@ export function buildVirtualReviewBook(args: {
     let nextText = file.afterText
     if (!readOnly && !proposal.isStructural && file.kind === 'update') {
       const model = modelsByPath?.get(file.path) ?? buildFileHunks(file)
-      nextText = composeFileFromHunks(model, skippedByPath[file.path])
+      nextText = composeFileFromHunks(model, activeDecisions[file.path])
     }
     if (cssOverride && cssOverride.path === file.path && cssOverride.mode === 'before') {
       nextText = file.beforeText ?? ''

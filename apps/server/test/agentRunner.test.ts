@@ -653,8 +653,37 @@ describe('agent providers & runner with local mock LLM servers', () => {
     expect(result.proposal!.isStructural).toBe(false)
     expect(result.proposal!.validationIssues).toEqual([])
     expect(result.proposal!.files[0]!.afterText).toContain('已经校对完成的正文。')
+    // Failed first edit_file must NOT emit proposal_update; successful second edit_file emits live proposal_update before final proposal.
+    const updates = events.filter((e) => e.type === 'proposal_update')
+    expect(updates).toHaveLength(1)
+    expect(updates[0]!.delta.proposalId).toBe(result.proposal!.id)
+    expect(updates[0]!.delta.focusPath).toBe('EPUB/text/ch001.xhtml')
+    expect(updates[0]!.delta.changedFiles).toHaveLength(1)
+    expect(events.findIndex((e) => e.type === 'proposal_update')).toBeLessThan(
+      events.findIndex((e) => e.type === 'proposal'),
+    )
     expect(events.some((e) => e.type === 'proposal')).toBe(true)
     expect(events.at(-1)?.type).toBe('done')
+
+    // Auto mode must NOT emit mid-turn proposal_update events (only end-of-turn proposal).
+    openAiStep = 0
+    const autoEvents: AgentStreamEvent[] = []
+    const autoRes = await runAgentTurn({
+      archive,
+      provider: {
+        provider: 'openai-compatible',
+        baseUrl: `${mockUrl}/openai/v1`,
+        model: 'mock-oai',
+        apiKey: 'sk-test',
+      },
+      history: [],
+      userMessage: '自动校对第一章',
+      approvalMode: 'auto',
+      onEvent: (event) => autoEvents.push(event),
+    })
+    expect(autoRes.proposal).not.toBeNull()
+    expect(autoEvents.some((e) => e.type === 'proposal_update')).toBe(false)
+    expect(autoEvents.some((e) => e.type === 'proposal')).toBe(true)
   })
 
   it('runs Anthropic tool loop on real MathML fixture and preserves EPUB validity & untouched chapters', async () => {
@@ -1187,5 +1216,62 @@ describe('agent providers & runner with local mock LLM servers', () => {
     expect(degradedRes.content).toBe('仅给出只读校对建议。')
     expect(degradedRes.compaction?.notice.degraded).toBe(true)
     expect(degradedEvents.some((e) => e.type === 'compacted' && e.notice.degraded === true)).toBe(true)
+  })
+
+  it('preserves completed write tool edits on soft-stop in review mode while discarding them in auto mode', async () => {
+    const { archive } = openEpub(createEmptyEpub({ title: '中止保留测试书' }), nodeXmlCodec.parse)
+
+    // Review mode: abort right after the successful second edit_file -> preserves partial validated proposal
+    openAiStep = 0
+    const reviewAc = new AbortController()
+    const reviewEvents: AgentStreamEvent[] = []
+    const reviewRes = await runAgentTurn({
+      archive,
+      provider: {
+        provider: 'openai-compatible',
+        baseUrl: `${mockUrl}/openai/v1`,
+        model: 'mock-oai',
+        apiKey: 'sk-test',
+      },
+      history: [],
+      userMessage: '校对第一章后停止',
+      approvalMode: 'review',
+      abortSignal: reviewAc.signal,
+      onEvent: (event) => {
+        reviewEvents.push(event)
+        if (event.type === 'proposal_update') reviewAc.abort()
+      },
+    })
+    expect(reviewRes.stopped).toBe(true)
+    expect(reviewRes.proposal).not.toBeNull()
+    expect(reviewRes.proposal!.files[0]?.afterText).toContain('已经校对完成的正文。')
+    expect(reviewEvents.some((e) => e.type === 'proposal_update')).toBe(true)
+    expect(reviewEvents.some((e) => e.type === 'proposal')).toBe(true)
+    expect(reviewEvents.at(-1)).toEqual({ type: 'done', stopped: true })
+
+    // Auto mode: abort right after successful edit_file -> discards partial proposal
+    openAiStep = 0
+    const autoAc = new AbortController()
+    const autoEvents: AgentStreamEvent[] = []
+    const autoRes = await runAgentTurn({
+      archive,
+      provider: {
+        provider: 'openai-compatible',
+        baseUrl: `${mockUrl}/openai/v1`,
+        model: 'mock-oai',
+        apiKey: 'sk-test',
+      },
+      history: [],
+      userMessage: '自动校对后停止',
+      approvalMode: 'auto',
+      abortSignal: autoAc.signal,
+      onEvent: (event) => {
+        autoEvents.push(event)
+        if (event.type === 'tool_end' && event.ok) autoAc.abort()
+      },
+    })
+    expect(autoRes.stopped).toBe(true)
+    expect(autoRes.proposal).toBeNull()
+    expect(autoEvents.some((e) => e.type === 'proposal')).toBe(false)
   })
 })

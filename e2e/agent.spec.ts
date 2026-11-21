@@ -45,10 +45,17 @@ let mode:
   | 'retry-ok'
   | 'continuity-t1'
   | 'continuity-t2'
-  | 'continuity-t3' = 'proofread'
+  | 'continuity-t3'
+  | 'live-stream'
+  | 'live-soft-stop' = 'proofread'
 let turnStep = 0
 let releaseSecondReasoning: (() => void) | null = null
 let secondReasoningFlushed: (() => void) | null = null
+let releaseLiveStep2: (() => void) | null = null
+let liveStep2Entered: (() => void) | null = null
+let releaseLiveStep3: (() => void) | null = null
+let liveStep3Entered: (() => void) | null = null
+let liveStopStep2Entered: (() => void) | null = null
 let lastModelSeen = ''
 let lastToolCountSeen = 0
 let lastSystemPromptSeen = ''
@@ -119,6 +126,187 @@ test.beforeAll(async () => {
             choices: [{ index: 0, message: { role: 'assistant', content: 'OK' }, finish_reason: 'stop' }],
           }),
         )
+        return
+      }
+
+      if (mode === 'live-stream') {
+        turnStep += 1
+        if (turnStep === 1) {
+          writeOpenAiSse(res, [
+            {
+              id: 'ls-1',
+              object: 'chat.completion.chunk',
+              created: 1,
+              model: 'mock-fast',
+              choices: [
+                {
+                  index: 0,
+                  delta: {
+                    role: 'assistant',
+                    tool_calls: [
+                      {
+                        index: 0,
+                        id: 'call_ls_1',
+                        type: 'function',
+                        function: {
+                          name: 'edit_file',
+                          arguments: JSON.stringify({
+                            path: 'EPUB/text/ch001.xhtml',
+                            oldText: '<p>中间保持原样的段落</p>',
+                            newText: '<p>实时第一步已校对</p>',
+                          }),
+                        },
+                      },
+                    ],
+                  },
+                  finish_reason: null,
+                },
+              ],
+            },
+            {
+              id: 'ls-1',
+              object: 'chat.completion.chunk',
+              created: 1,
+              model: 'mock-fast',
+              choices: [{ index: 0, delta: {}, finish_reason: 'tool_calls' }],
+            },
+          ])
+          return
+        }
+        if (turnStep === 2) {
+          liveStep2Entered?.()
+          await new Promise<void>((resolve) => {
+            releaseLiveStep2 = resolve
+          })
+          writeOpenAiSse(res, [
+            {
+              id: 'ls-2',
+              object: 'chat.completion.chunk',
+              created: 1,
+              model: 'mock-fast',
+              choices: [
+                {
+                  index: 0,
+                  delta: {
+                    role: 'assistant',
+                    tool_calls: [
+                      {
+                        index: 0,
+                        id: 'call_ls_2a',
+                        type: 'function',
+                        function: {
+                          name: 'edit_file',
+                          arguments: JSON.stringify({
+                            path: 'EPUB/text/ch001.xhtml',
+                            oldText: '<p>首段待校对</p>',
+                            newText: '<p>首段实时新增改动</p>',
+                          }),
+                        },
+                      },
+                      {
+                        index: 1,
+                        id: 'call_ls_2b',
+                        type: 'function',
+                        function: {
+                          name: 'write_file',
+                          arguments: JSON.stringify({
+                            path: 'EPUB/styles/stylesheet1.css',
+                            content: 'body { line-height: 1.9; }\n',
+                          }),
+                        },
+                      },
+                    ],
+                  },
+                  finish_reason: null,
+                },
+              ],
+            },
+            {
+              id: 'ls-2',
+              object: 'chat.completion.chunk',
+              created: 1,
+              model: 'mock-fast',
+              choices: [{ index: 0, delta: {}, finish_reason: 'tool_calls' }],
+            },
+          ])
+          return
+        }
+        liveStep3Entered?.()
+        await new Promise<void>((resolve) => {
+          releaseLiveStep3 = resolve
+        })
+        writeOpenAiSse(res, [
+          {
+            id: 'ls-3',
+            object: 'chat.completion.chunk',
+            created: 1,
+            model: 'mock-fast',
+            choices: [
+              {
+                index: 0,
+                delta: { role: 'assistant', content: '实时多步校对已完成，请确认最终应用。' },
+                finish_reason: 'stop',
+              },
+            ],
+          },
+        ])
+        return
+      }
+
+      if (mode === 'live-soft-stop') {
+        turnStep += 1
+        if (turnStep === 1) {
+          writeOpenAiSse(res, [
+            {
+              id: 'lss-1',
+              object: 'chat.completion.chunk',
+              created: 1,
+              model: 'mock-fast',
+              choices: [
+                {
+                  index: 0,
+                  delta: {
+                    role: 'assistant',
+                    tool_calls: [
+                      {
+                        index: 0,
+                        id: 'call_lss_1',
+                        type: 'function',
+                        function: {
+                          name: 'edit_file',
+                          arguments: JSON.stringify({
+                            path: 'EPUB/text/ch001.xhtml',
+                            oldText: '<p>第三段待停止测试</p>',
+                            newText: '<p>停止前已完成的修改</p>',
+                          }),
+                        },
+                      },
+                    ],
+                  },
+                  finish_reason: null,
+                },
+              ],
+            },
+            {
+              id: 'lss-1',
+              object: 'chat.completion.chunk',
+              created: 1,
+              model: 'mock-fast',
+              choices: [{ index: 0, delta: {}, finish_reason: 'tool_calls' }],
+            },
+          ])
+          return
+        }
+        res.writeHead(200, { 'content-type': 'text/event-stream; charset=utf-8' })
+        res.flushHeaders?.()
+        liveStopStep2Entered?.()
+        const ping = setInterval(() => {
+          if (!res.writableEnded && !res.destroyed) res.write(': keepalive\n\n')
+        }, 50)
+        req.on('close', () => {
+          clearInterval(ping)
+          if (!res.writableEnded) res.end()
+        })
         return
       }
 
@@ -854,22 +1042,29 @@ test('multi-model provider fetch, approval modes (ask/review/auto), reasoning, c
   await expect(revFrame.locator('.bs-rev-ins').first()).toContainText('已校对正确文本')
   await expect(revFrame.locator('.bs-rev-del').first()).toContainText('未保存测试错字')
 
-  // Skip the 2nd hunk directly inside the book-page revision view
-  await revFrame.locator('[data-bs-action="toggle-hunk"][data-bs-target-hunk="hunk-1"]').click()
+  // Accept the 1st hunk (collapses diff highlight in-place) and reject the 2nd hunk directly inside the book-page revision view
+  await revFrame.locator('[data-bs-action="accept-hunk"][data-bs-target-hunk="hunk-0"]').click()
+  await expect(revFrame.locator('[data-bs-hunk="hunk-0"]')).toHaveAttribute('data-bs-rev', 'accepted')
+  await expect(revFrame.locator('[data-bs-hunk="hunk-0"]')).toContainText('已校对正确文本')
+  await expect(revFrame.locator('[data-bs-hunk="hunk-0"] .bs-rev-del')).toHaveCount(0)
+
+  await revFrame.locator('[data-bs-action="reject-hunk"][data-bs-target-hunk="hunk-1"]').click()
+  await expect(revFrame.locator('[data-bs-hunk="hunk-1"]')).toHaveAttribute('data-bs-rev', 'rejected')
   await expect(revFrame.locator('[data-bs-hunk="hunk-1"]')).toContainText('第二处待定措辞')
   await expect(reviewPane.getByRole('button', { name: '应用已选（1/2 处）' })).toBeVisible()
 
-  // Switch to "终稿" view and verify skipped hunk stays original while kept hunk is updated
+  // Switch to "终稿" view and verify rejected hunk stays original while accepted hunk is updated
   await reviewPane.getByRole('button', { name: '终稿' }).click()
   const finalFrame = reviewPane.frameLocator('.review-book-frame')
   await expect(finalFrame.locator('body')).toContainText('已校对正确文本')
   await expect(finalFrame.locator('body')).toContainText('第二处待定措辞')
   await expect(finalFrame.locator('body')).not.toContainText('第二处改写措辞')
 
-  // Switch to "源码" view and verify line numbers & shared skipped hunk state
+  // Switch to "源码" view and verify line numbers & shared 3-state accepted/rejected hunk states
   await reviewPane.getByRole('button', { name: '源码' }).click()
   await expect(reviewPane.locator('.review-src-hunk')).toHaveCount(2)
-  await expect(reviewPane.locator('.review-src-hunk.is-skipped')).toHaveCount(1)
+  await expect(reviewPane.locator('.review-src-hunk.is-accepted')).toHaveCount(1)
+  await expect(reviewPane.locator('.review-src-hunk.is-rejected')).toHaveCount(1)
 
   // Exit review and re-enter via sidebar card: skipped hunk draft is preserved in memory
   await reviewPane.getByRole('button', { name: '退出审阅' }).click()
@@ -1161,4 +1356,145 @@ test('multi-step reasoning isolates per-block thinking status and collapses proc
   await page.getByRole('button', { name: '助手' }).click()
   await expect(page.getByTestId('agent-assistant-reply')).toContainText('双阶段推理完成：第一章结构正常。')
   await expect(page.getByTestId('agent-process-toggle').last()).toContainText('思考 2 次 · 调用 1 个工具')
+})
+
+test('real-time streaming review: live tool updates, fingerprint-preserved pre-decisions, smart follow, and soft-stop preservation', async ({
+  page,
+}) => {
+  const bookId = await seedBook()
+  await resetAgentState()
+
+  await login(page)
+  await expectLoggedIn(page)
+  await page.goto(`/books/${bookId}`)
+  await page.waitForSelector('.cm-content')
+
+  await page.getByRole('button', { name: '助手' }).click()
+  await page.getByRole('button', { name: '配置模型预设' }).click()
+  const dialog = page.getByRole('dialog', { name: '应用设置' })
+  await dialog.getByLabel('预设名称').fill('实时审阅测试')
+  await dialog.getByLabel('Base URL').fill(`${mockUrl}/v1`)
+  await dialog.getByLabel('模型名称').fill('mock-fast')
+  await dialog.getByRole('button', { name: '添加预设' }).click()
+  await expect(dialog.getByText('预设已保存')).toBeVisible()
+  await dialog.getByRole('button', { name: '关闭', exact: true }).click()
+
+  // Seed ch001.xhtml with 3 distinct paragraphs
+  await page.getByRole('button', { name: 'ch001.xhtml', exact: true }).click()
+  const initialChapter = [
+    '<?xml version="1.0" encoding="UTF-8"?>',
+    '<!DOCTYPE html>',
+    '<html xmlns="http://www.w3.org/1999/xhtml">',
+    '<head><title>第一章</title><link rel="stylesheet" type="text/css" href="../styles/stylesheet1.css" /></head>',
+    '<body>',
+    '<p>首段待校对</p>',
+    '<p>保留分隔段</p>',
+    '<p>中间保持原样的段落</p>',
+    '<p>第三段待停止测试</p>',
+    '</body>',
+    '</html>',
+  ].join('\n')
+  await page.locator('.cm-content').click()
+  await page.keyboard.press('Control+a')
+  await page.keyboard.insertText(initialChapter)
+  await expect(page.locator('.cm-content')).toContainText('中间保持原样的段落')
+
+  // Part 1: Controlled 2-stage live streaming turn
+  mode = 'live-stream'
+  turnStep = 0
+  releaseLiveStep2 = null
+  releaseLiveStep3 = null
+  const reachedStep2 = new Promise<void>((resolve) => {
+    liveStep2Entered = resolve
+  })
+  const reachedStep3 = new Promise<void>((resolve) => {
+    liveStep3Entered = resolve
+  })
+
+  await page.getByLabel('向助手输入指令').fill('分步实时校对第一章并调整样式')
+  await page.getByRole('button', { name: '发送' }).click()
+  await reachedStep2
+
+  // Main canvas opens immediately on first write tool while turn is still streaming!
+  const reviewPane = page.locator('.review-pane')
+  await expect(reviewPane).toBeVisible()
+  await expect(reviewPane.getByTestId('review-live-pill')).toContainText('实时更新中')
+  await expect(page.getByTestId('agent-live-proposal-card')).toBeVisible()
+  await expect(reviewPane.getByRole('button', { name: '生成中…' })).toBeDisabled()
+
+  // Pre-decide mid-stream: reject hunk-0 inside book-page revision view, then switch to 源码 (pauses auto-follow)
+  const liveFrame = reviewPane.frameLocator('.review-book-frame')
+  await expect(liveFrame.locator('.bs-rev-ins').first()).toContainText('实时第一步已校对')
+  await liveFrame.locator('[data-bs-action="reject-hunk"][data-bs-target-hunk="hunk-0"]').click()
+  await expect(liveFrame.locator('[data-bs-hunk="hunk-0"]')).toHaveAttribute('data-bs-rev', 'rejected')
+  await reviewPane.getByRole('button', { name: '源码' }).click()
+
+  // Release Step 2: inserts a new edit ABOVE the rejected hunk in ch001.xhtml AND edits stylesheet1.css
+  releaseLiveStep2?.()
+  await reachedStep3
+
+  // Because user manually switched view mode, auto-follow paused (stays on ch001.xhtml) and shows follow-resume pill!
+  await expect(reviewPane.locator('.review-file-trigger-name')).toHaveText('ch001.xhtml')
+  await expect(reviewPane.getByTestId('review-follow-pill')).toContainText('stylesheet1.css')
+
+  // Fingerprint reconciliation preserved the earlier rejection on the now-shifted hunk-1, while new hunk-0 is pending!
+  await expect(reviewPane.locator('.review-src-hunk')).toHaveCount(2)
+  await expect(reviewPane.locator('[data-review-source-hunk="hunk-0"]')).toHaveAttribute('data-decision', 'pending')
+  await expect(reviewPane.locator('[data-review-source-hunk="hunk-1"]')).toHaveAttribute('data-decision', 'rejected')
+
+  // Click follow-resume pill -> jumps cleanly to latest touched file (stylesheet1.css)
+  await reviewPane.getByTestId('review-follow-pill').click()
+  await expect(reviewPane.locator('.review-file-trigger-name')).toHaveText('stylesheet1.css')
+
+  // Release Step 3 -> turn settles, unlocks Apply button keeping 2/3 hunks (1 rejected in ch001)
+  releaseLiveStep3?.()
+  await expect(page.getByText('实时多步校对已完成，请确认最终应用。')).toBeVisible()
+  await expect(reviewPane.getByTestId('review-live-pill')).toHaveCount(0)
+  await expect(reviewPane.getByRole('button', { name: '应用已选（2/3 处）' })).toBeEnabled()
+
+  await reviewPane.getByRole('button', { name: '应用已选（2/3 处）' }).click()
+  await expect(reviewPane).toBeHidden()
+  await expect(page.locator('.cm-content')).toContainText('首段实时新增改动')
+  await expect(page.locator('.cm-content')).toContainText('中间保持原样的段落')
+  await expect(page.locator('.cm-content')).not.toContainText('实时第一步已校对')
+
+  // Save changes so next soft-stop test starts on clean synced version
+  await page.getByRole('button', { name: '保存' }).click()
+  await expect(page.locator('.appbar-save.is-saved')).toBeVisible()
+
+  // Part 2: Mid-turn soft stop preserves completed step-1 edit as a persisted pending proposal!
+  mode = 'live-soft-stop'
+  turnStep = 0
+  const reachedStopStep2 = new Promise<void>((resolve) => {
+    liveStopStep2Entered = resolve
+  })
+
+  await page.getByLabel('向助手输入指令').fill('修改第三段然后测试中途停止')
+  await page.getByRole('button', { name: '发送' }).click()
+  await reachedStopStep2
+
+  await expect(reviewPane).toBeVisible()
+  await expect(reviewPane.getByTestId('review-live-pill')).toBeVisible()
+  await expect(reviewPane.frameLocator('.review-book-frame').locator('[data-bs-hunk="hunk-0"]')).toContainText(
+    '前已完成的修改',
+  )
+
+  // Click soft-stop button right inside the review footer bar
+  await reviewPane.getByTestId('review-stop-live-btn').click()
+
+  // Turn settles with preserved pending proposal and unlocks Apply!
+  await expect(reviewPane.getByTestId('review-live-pill')).toHaveCount(0)
+  await expect(reviewPane.getByRole('button', { name: '应用变更' })).toBeEnabled()
+
+  // Reload page -> verify the soft-stopped partial proposal persisted in Postgres and can be applied
+  await page.reload()
+  await page.waitForSelector('.cm-content')
+  await page.getByRole('button', { name: '助手' }).click()
+  await expect(page.getByRole('button', { name: '审阅变更' }).last()).toBeVisible()
+  await page.getByRole('button', { name: '审阅变更' }).last().click()
+  await expect(reviewPane).toBeVisible()
+  await reviewPane.getByRole('button', { name: '应用变更' }).click()
+  await expect(reviewPane).toBeHidden()
+  await page.getByRole('button', { name: 'ch001.xhtml', exact: true }).click()
+  await expect(page.locator('.cm-content')).toContainText('停止前已完成的修改')
 })

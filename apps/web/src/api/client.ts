@@ -1,4 +1,4 @@
-import type { AgentProposal, AgentToolName } from '@booksmith/core'
+import type { AgentProposal, AgentProposalDelta, AgentToolName } from '@booksmith/core'
 
 export interface UserDto {
   id: string
@@ -199,6 +199,7 @@ export type AgentSseEvent =
   | { type: 'text_delta'; text: string }
   | { type: 'tool_start'; id: string; name: AgentToolName; argsSummary: string }
   | { type: 'tool_end'; id: string; name: AgentToolName; ok: boolean; summary: string }
+  | { type: 'proposal_update'; delta: AgentProposalDelta }
   | { type: 'proposal'; proposal: AgentProposal }
   | {
       type: 'done'

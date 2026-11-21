@@ -1,8 +1,10 @@
 import { randomUUID } from 'node:crypto'
 import {
   AgentWorkspace,
+  diffProposalSnapshots,
   isReadOnlyAgentTool,
   type AgentProposal,
+  type AgentProposalDelta,
   type AgentToolName,
   type AgentToolResult,
   type AgentWorkspaceOverlay,
@@ -162,6 +164,7 @@ export type AgentStreamEvent =
   | { type: 'text_delta'; text: string }
   | { type: 'tool_start'; id: string; name: AgentToolName; argsSummary: string }
   | { type: 'tool_end'; id: string; name: AgentToolName; ok: boolean; summary: string }
+  | { type: 'proposal_update'; delta: AgentProposalDelta }
   | { type: 'proposal'; proposal: AgentProposal }
   | { type: 'done'; messageId?: string; stopped: boolean }
   | { type: 'error'; code: string; message: string }
@@ -772,6 +775,33 @@ function createAbortError(): Error {
   return error
 }
 
+function extractToolHintPaths(
+  args: Record<string, unknown>,
+  data: unknown,
+): string[] {
+  const hints: string[] = []
+  const pushStr = (value: unknown) => {
+    if (typeof value === 'string' && value.trim()) hints.push(value.trim())
+  }
+  const pushArr = (value: unknown) => {
+    if (!Array.isArray(value)) return
+    for (const item of value) pushStr(item)
+  }
+
+  if (data && typeof data === 'object') {
+    const rec = data as Record<string, unknown>
+    pushStr(rec.path)
+    pushStr(rec.primaryPath)
+    pushArr(rec.createdPaths)
+    pushArr(rec.changedPaths)
+    pushStr(rec.deletedPath)
+  }
+  pushStr(args.path)
+  pushArr(args.chapterPaths)
+  pushArr(args.paths)
+  return hints
+}
+
 function buildSdkTools(
   workspace: AgentWorkspace,
   records: ToolCallSummary[],
@@ -779,6 +809,7 @@ function buildSdkTools(
   emit: (event: AgentStreamEvent) => void,
   approvalMode: AgentApprovalMode,
   abortSignal?: AbortSignal,
+  onWriteSuccess?: (name: AgentToolName, args: Record<string, unknown>, result: AgentToolResult) => void,
 ) {
   function run(name: AgentToolName, args: Record<string, unknown>, toolCallId?: string) {
     if (abortSignal?.aborted) throw createAbortError()
@@ -801,6 +832,9 @@ function buildSdkTools(
       result: capToolResultForStorage(result),
     })
     emit({ type: 'tool_end', id, name, ok: result.ok, summary })
+    if (result.ok && !isReadOnlyAgentTool(name)) {
+      onWriteSuccess?.(name, args, result)
+    }
     return result
   }
 
@@ -1086,10 +1120,53 @@ export async function runAgentTurn(options: RunAgentTurnOptions): Promise<RunAge
 
   const toolCalls: ToolCallSummary[] = []
   const steps: AgentStepRecord[] = []
+  const proposalId = randomUUID()
+  let lastLiveProposal: AgentProposal | null = null
   let content = ''
   let reasoning = ''
   let compactionResult: RunAgentTurnResult['compaction'] = null
   let reportedInputTokens = 0
+
+  // Emits incremental live proposal updates after each successful write tool in `review` mode only;
+  // `auto` and `ask` modes stay silent until settlement. See ADR 2026-11-22-live-streaming-agent-review.
+  const handleWriteSuccess = (
+    _name: AgentToolName,
+    args: Record<string, unknown>,
+    result: AgentToolResult,
+  ) => {
+    if (approvalMode !== 'review') return
+    const nextSnapshot = workspace.buildProposal(proposalId, { validate: false })
+    const delta = diffProposalSnapshots(lastLiveProposal, nextSnapshot, {
+      proposalId,
+      hintPaths: extractToolHintPaths(args, result.data),
+      opfPath: workspace.getPackage().opfPath,
+    })
+    lastLiveProposal = nextSnapshot
+    if (delta) {
+      emit({ type: 'proposal_update', delta })
+    }
+  }
+
+  // Soft-stop in `review` mode preserves completed sandbox writes as a validated pending proposal
+  // rather than discarding prior tool steps. See ADR 2026-11-22-live-streaming-agent-review.
+  const finalizeProposal = (stopped: boolean): {
+    proposal: AgentProposal | null
+    supersededProposalMessageId: string | null
+  } => {
+    if (approvalMode === 'ask') {
+      return { proposal: null, supersededProposalMessageId: null }
+    }
+    if (stopped && approvalMode !== 'review') {
+      return { proposal: null, supersededProposalMessageId: null }
+    }
+    const proposal = workspace.buildProposal(proposalId, { validate: true })
+    const supersededProposalMessageId =
+      pendingState?.seeded && workspace.hasNewMutations() ? pendingState.messageId : null
+    if (proposal) {
+      emit({ type: 'proposal', proposal })
+    }
+    return { proposal, supersededProposalMessageId }
+  }
 
   try {
     if (options.abortSignal?.aborted) {
@@ -1300,7 +1377,7 @@ export async function runAgentTurn(options: RunAgentTurnOptions): Promise<RunAge
       model,
       system: systemPrompt,
       messages,
-      tools: buildSdkTools(workspace, toolCalls, steps, emit, approvalMode, options.abortSignal),
+      tools: buildSdkTools(workspace, toolCalls, steps, emit, approvalMode, options.abortSignal, handleWriteSuccess),
       stopWhen: maxSteps > 0 ? stepCountIs(maxSteps) : () => false,
       prepareStep: ({ messages: stepMessages, stepNumber }) => {
         if (stepNumber < 2) return undefined
@@ -1345,14 +1422,15 @@ export async function runAgentTurn(options: RunAgentTurnOptions): Promise<RunAge
     }
 
     if (options.abortSignal?.aborted) {
+      const { proposal, supersededProposalMessageId } = finalizeProposal(true)
       emit({ type: 'done', stopped: true })
       return {
         content,
         reasoning,
         steps,
         toolCalls,
-        proposal: null,
-        supersededProposalMessageId: null,
+        proposal,
+        supersededProposalMessageId,
         compaction: compactionResult,
         usage: { inputTokens: finalInputTokens, contextWindow },
         stopped: true,
@@ -1360,13 +1438,7 @@ export async function runAgentTurn(options: RunAgentTurnOptions): Promise<RunAge
       }
     }
 
-    const proposal = approvalMode === 'ask' ? null : workspace.buildProposal(randomUUID())
-    const supersededProposalMessageId =
-      pendingState?.seeded && workspace.hasNewMutations() ? pendingState.messageId : null
-
-    if (proposal) {
-      emit({ type: 'proposal', proposal })
-    }
+    const { proposal, supersededProposalMessageId } = finalizeProposal(false)
     emit({ type: 'done', stopped: false })
     return {
       content,
@@ -1382,14 +1454,15 @@ export async function runAgentTurn(options: RunAgentTurnOptions): Promise<RunAge
     }
   } catch (error) {
     if (options.abortSignal?.aborted) {
+      const { proposal, supersededProposalMessageId } = finalizeProposal(true)
       emit({ type: 'done', stopped: true })
       return {
         content,
         reasoning,
         steps,
         toolCalls,
-        proposal: null,
-        supersededProposalMessageId: null,
+        proposal,
+        supersededProposalMessageId,
         compaction: compactionResult,
         usage: { inputTokens: reportedInputTokens, contextWindow },
         stopped: true,

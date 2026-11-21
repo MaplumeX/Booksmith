@@ -119,8 +119,12 @@ import {
   buildComposedProposalPlan,
   buildFileHunks,
   detectProposalStaleness,
+  findNewestChangedHunkIndex,
+  reconcileProposalDecisions,
   validateComposedProposal,
   type FileDiffModel,
+  type HunkDecision,
+  type ProposalHunkDecisions,
 } from '../state/proposalReview'
 import {
   basename,
@@ -181,6 +185,11 @@ interface ActiveProposalReview {
   proposal: AgentProposal
   selectedPath: string
   readOnly: boolean
+  isLive?: boolean
+  autoFollow?: boolean
+  latestTouchedPath?: string | null
+  focusHunkIndex?: number | null
+  focusSeq?: number
   autoDowngradeReason?: string | null
 }
 
@@ -454,15 +463,16 @@ export function Editor({ bookId }: { bookId: string }) {
   )
   const agentUndoRef = useRef<{ messageId: string; snapshot: WorkspaceSnapshot } | null>(null)
   const [agentUndoMessageId, setAgentUndoMessageId] = useState<string | null>(null)
-  // In-canvas Agent proposal review state & per-message skipped-hunk memory draft.
-  // See ADR 2026-11-21-in-canvas-agent-proposal-review.
+  // In-canvas Agent proposal review state & per-message 3-state hunk decision draft.
+  // See ADR 2026-11-21-in-canvas-agent-proposal-review, ADR 2026-11-22-live-streaming-agent-review.
   const [activeReview, setActiveReview] = useState<ActiveProposalReview | null>(null)
   const [reviewBusy, setReviewBusy] = useState(false)
-  const [skippedHunksByMessage, setSkippedHunksByMessage] = useState<
-    Record<string, Record<string, Set<string>>>
-  >({})
-  const skippedHunksRef = useRef(skippedHunksByMessage)
-  skippedHunksRef.current = skippedHunksByMessage
+  const [decisionsByMessage, setDecisionsByMessage] = useState<Record<string, ProposalHunkDecisions>>({})
+  const decisionsRef = useRef(decisionsByMessage)
+  decisionsRef.current = decisionsByMessage
+  const liveProposalsRef = useRef<Record<string, AgentProposal>>({})
+  const exitedLiveKeyRef = useRef<string | null>(null)
+  const stopLiveTurnRef = useRef<(() => void) | null>(null)
   const [proposalStatusSync, setProposalStatusSync] = useState<ProposalStatusSyncEvent | null>(null)
   const [staleApplyConfirm, setStaleApplyConfirm] = useState<{
     messageId: string
@@ -508,7 +518,9 @@ export function Editor({ bookId }: { bookId: string }) {
     setTabs(initial ? [initial] : [])
     setActive(initial)
     setActiveReview(null)
-    setSkippedHunksByMessage({})
+    setDecisionsByMessage({})
+    liveProposalsRef.current = {}
+    exitedLiveKeyRef.current = null
     setStaleApplyConfirm(null)
   }, [])
 
@@ -668,18 +680,183 @@ export function Editor({ bookId }: { bookId: string }) {
       proposal: AgentProposal
       path?: string
       readOnly?: boolean
+      isLive?: boolean
       autoDowngradeReason?: string | null
     }) => {
       const targetPath =
         (args.path && args.proposal.files.some((f) => f.path === args.path) ? args.path : null) ??
         args.proposal.files[0]?.path
       if (!targetPath) return
-      setActiveReview({
-        messageId: args.messageId,
-        proposal: args.proposal,
-        selectedPath: targetPath,
-        readOnly: Boolean(args.readOnly),
-        autoDowngradeReason: args.autoDowngradeReason ?? null,
+      if (args.isLive && exitedLiveKeyRef.current === args.messageId) {
+        exitedLiveKeyRef.current = null
+      }
+      setActiveReview((cur) => {
+        const isLive = Boolean(args.isLive)
+        const latestTouched = isLive
+          ? (cur && cur.messageId === args.messageId ? cur.latestTouchedPath : targetPath)
+          : null
+        const keepFollow = isLive ? (!args.path || args.path === latestTouched) : false
+        return {
+          messageId: args.messageId,
+          proposal: args.proposal,
+          selectedPath: targetPath,
+          readOnly: Boolean(args.readOnly),
+          isLive,
+          autoFollow: keepFollow,
+          latestTouchedPath: latestTouched,
+          focusHunkIndex: 0,
+          focusSeq: Date.now(),
+          autoDowngradeReason: args.autoDowngradeReason ?? null,
+        }
+      })
+    },
+    [],
+  )
+
+  const handleLiveProposalUpdate = useCallback(
+    (args: { liveKey: string; proposal: AgentProposal | null; focusPath: string | null }) => {
+      const { liveKey, proposal, focusPath } = args
+      const prevProposal = liveProposalsRef.current[liveKey] ?? null
+      if (proposal) liveProposalsRef.current[liveKey] = proposal
+      else delete liveProposalsRef.current[liveKey]
+
+      setDecisionsByMessage((prev) => {
+        const existing = prev[liveKey]
+        if (!existing || Object.keys(existing).length === 0) return prev
+        const reconciled = reconcileProposalDecisions(prevProposal, proposal, existing)
+        const next = { ...prev }
+        if (Object.keys(reconciled).length === 0) delete next[liveKey]
+        else next[liveKey] = reconciled
+        return next
+      })
+
+      if (!proposal) {
+        setActiveReview((cur) => (cur?.messageId === liveKey ? null : cur))
+        return
+      }
+
+      if (exitedLiveKeyRef.current === liveKey) {
+        return
+      }
+
+      const targetPath =
+        (focusPath && proposal.files.some((f) => f.path === focusPath) ? focusPath : null) ??
+        proposal.files[0]?.path
+      if (!targetPath) return
+
+      const prevFile = prevProposal?.files.find((f) => f.path === targetPath) ?? null
+      const nextFile = proposal.files.find((f) => f.path === targetPath) ?? null
+      const newestHunkIdx = nextFile
+        ? findNewestChangedHunkIndex(prevFile ? buildFileHunks(prevFile) : null, buildFileHunks(nextFile))
+        : 0
+
+      setActiveReview((cur) => {
+        if (cur && cur.messageId === liveKey) {
+          const curStillExists = proposal.files.some((f) => f.path === cur.selectedPath)
+          if (cur.autoFollow || !curStillExists) {
+            return {
+              ...cur,
+              proposal,
+              selectedPath: targetPath,
+              isLive: true,
+              latestTouchedPath: targetPath,
+              focusHunkIndex: newestHunkIdx >= 0 ? newestHunkIdx : 0,
+              focusSeq: Date.now(),
+            }
+          }
+          return {
+            ...cur,
+            proposal,
+            isLive: true,
+            latestTouchedPath: targetPath,
+          }
+        }
+        return {
+          messageId: liveKey,
+          proposal,
+          selectedPath: targetPath,
+          readOnly: false,
+          isLive: true,
+          autoFollow: true,
+          latestTouchedPath: targetPath,
+          focusHunkIndex: newestHunkIdx >= 0 ? newestHunkIdx : 0,
+          focusSeq: Date.now(),
+          autoDowngradeReason: null,
+        }
+      })
+    },
+    [],
+  )
+
+  const handleLiveProposalSettle = useCallback(
+    (args: {
+      liveKey: string
+      messageId: string
+      proposal: AgentProposal | null
+      autoOpen: boolean
+      autoDowngradeReason?: string | null
+    }) => {
+      const { liveKey, messageId, proposal, autoOpen, autoDowngradeReason = null } = args
+      const prevProposal = liveProposalsRef.current[liveKey] ?? null
+      delete liveProposalsRef.current[liveKey]
+
+      const wasExited = exitedLiveKeyRef.current === liveKey
+      if (wasExited) exitedLiveKeyRef.current = null
+
+      setDecisionsByMessage((prev) => {
+        const existing = prev[liveKey]
+        if (!existing || Object.keys(existing).length === 0) {
+          if (liveKey !== messageId && liveKey in prev) {
+            const copy = { ...prev }
+            delete copy[liveKey]
+            return copy
+          }
+          return prev
+        }
+        const reconciled = reconcileProposalDecisions(prevProposal, proposal, existing)
+        const next = { ...prev }
+        if (liveKey !== messageId) delete next[liveKey]
+        if (proposal && Object.keys(reconciled).length > 0) next[messageId] = reconciled
+        else delete next[messageId]
+        return next
+      })
+
+      setActiveReview((cur) => {
+        if (!proposal) {
+          return cur?.messageId === liveKey ? null : cur
+        }
+        if (cur && cur.messageId === liveKey) {
+          const keepPath = proposal.files.some((f) => f.path === cur.selectedPath)
+            ? cur.selectedPath
+            : proposal.files[0]?.path
+          if (!keepPath) return null
+          return {
+            ...cur,
+            messageId,
+            proposal,
+            selectedPath: keepPath,
+            readOnly: false,
+            isLive: false,
+            autoFollow: false,
+            latestTouchedPath: null,
+            autoDowngradeReason,
+          }
+        }
+        if (autoOpen && !wasExited && proposal.files[0]?.path) {
+          return {
+            messageId,
+            proposal,
+            selectedPath: proposal.files[0].path,
+            readOnly: false,
+            isLive: false,
+            autoFollow: false,
+            latestTouchedPath: null,
+            focusHunkIndex: 0,
+            focusSeq: Date.now(),
+            autoDowngradeReason,
+          }
+        }
+        return cur
       })
     },
     [],
@@ -693,22 +870,42 @@ export function Editor({ bookId }: { bookId: string }) {
     })
   }, [])
 
-  const toggleReviewHunk = useCallback((messageId: string, path: string, hunkId: string) => {
-    setSkippedHunksByMessage((prev) => {
-      const msgMap = prev[messageId] ?? {}
-      const existing = msgMap[path] ?? new Set<string>()
-      const nextSet = new Set(existing)
-      if (nextSet.has(hunkId)) nextSet.delete(hunkId)
-      else nextSet.add(hunkId)
-      const nextMsgMap = { ...msgMap }
-      if (nextSet.size === 0) delete nextMsgMap[path]
-      else nextMsgMap[path] = nextSet
-      return { ...prev, [messageId]: nextMsgMap }
-    })
-  }, [])
+  const setReviewHunkDecision = useCallback(
+    (messageId: string, path: string, hunkId: string, decision: HunkDecision) => {
+      setDecisionsByMessage((prev) => {
+        const msgMap = prev[messageId] ?? {}
+        const fileMap = { ...(msgMap[path] ?? {}) }
+        if (decision === 'pending') delete fileMap[hunkId]
+        else fileMap[hunkId] = decision
+        const nextMsgMap = { ...msgMap }
+        if (Object.keys(fileMap).length === 0) delete nextMsgMap[path]
+        else nextMsgMap[path] = fileMap
+        return { ...prev, [messageId]: nextMsgMap }
+      })
+    },
+    [],
+  )
+
+  const setReviewFileDecision = useCallback(
+    (messageId: string, path: string, hunkIds: string[], decision: HunkDecision) => {
+      setDecisionsByMessage((prev) => {
+        const msgMap = prev[messageId] ?? {}
+        const nextMsgMap = { ...msgMap }
+        if (decision === 'pending' || hunkIds.length === 0) {
+          delete nextMsgMap[path]
+        } else {
+          const fileMap: Record<string, HunkDecision> = {}
+          for (const id of hunkIds) fileMap[id] = decision
+          nextMsgMap[path] = fileMap
+        }
+        return { ...prev, [messageId]: nextMsgMap }
+      })
+    },
+    [],
+  )
 
   const resetReviewFileHunks = useCallback((messageId: string, path: string) => {
-    setSkippedHunksByMessage((prev) => {
+    setDecisionsByMessage((prev) => {
       const msgMap = prev[messageId]
       if (!msgMap || !(path in msgMap)) return prev
       const nextMsgMap = { ...msgMap }
@@ -718,7 +915,7 @@ export function Editor({ bookId }: { bookId: string }) {
   }, [])
 
   const clearReviewDraftForMessage = useCallback((messageId: string) => {
-    setSkippedHunksByMessage((prev) => {
+    setDecisionsByMessage((prev) => {
       if (!(messageId in prev)) return prev
       const next = { ...prev }
       delete next[messageId]
@@ -741,10 +938,10 @@ export function Editor({ bookId }: { bookId: string }) {
       let resolution: AgentProposalResolution | undefined
 
       if (!options?.rawAutoApply && !proposal.isStructural) {
-        const msgSkipped = skippedHunksRef.current[messageId] ?? {}
+        const msgDecisions = decisionsRef.current[messageId] ?? {}
         const models = new Map<string, FileDiffModel>()
         for (const file of proposal.files) models.set(file.path, buildFileHunks(file))
-        const plan = buildComposedProposalPlan(proposal, models, msgSkipped)
+        const plan = buildComposedProposalPlan(proposal, models, msgDecisions)
         const xmlFailures = validateComposedProposal(proposal, plan)
         if (xmlFailures.length > 0) {
           setSaveError(xmlFailures[0]!.message)
@@ -2719,10 +2916,19 @@ export function Editor({ bookId }: { bookId: string }) {
                       (file) => file.path === path || file.previousPath === path,
                     )
                     if (matched) {
-                      setActiveReview((cur) => (cur ? { ...cur, selectedPath: matched.path } : null))
+                      setActiveReview((cur) =>
+                        cur
+                          ? {
+                              ...cur,
+                              selectedPath: matched.path,
+                              autoFollow: cur.isLive ? false : cur.autoFollow,
+                            }
+                          : null,
+                      )
                       setTreeOpen(false)
                       return
                     }
+                    if (activeReview.isLive) exitedLiveKeyRef.current = activeReview.messageId
                     setActiveReview(null)
                   }
                   open(path)
@@ -2812,18 +3018,58 @@ export function Editor({ bookId }: { bookId: string }) {
               proposal={activeReview.proposal}
               selectedPath={activeReview.selectedPath}
               readOnly={activeReview.readOnly}
+              isLive={activeReview.isLive}
+              autoFollow={activeReview.autoFollow}
+              latestTouchedPath={activeReview.latestTouchedPath}
+              focusHunkIndex={activeReview.focusHunkIndex}
+              focusSeq={activeReview.focusSeq}
               busy={reviewBusy}
               autoDowngradeReason={activeReview.autoDowngradeReason}
-              skippedByPath={skippedHunksByMessage[activeReview.messageId] ?? {}}
+              decisionsByPath={decisionsByMessage[activeReview.messageId] ?? {}}
               resolveAsset={resolveAsset}
-              onSelectPath={(nextPath) =>
-                setActiveReview((cur) => (cur ? { ...cur, selectedPath: nextPath } : null))
+              onSelectPath={(nextPath, opts) =>
+                setActiveReview((cur) =>
+                  cur
+                    ? {
+                        ...cur,
+                        selectedPath: nextPath,
+                        autoFollow: cur.isLive && opts?.userInitiated ? false : cur.autoFollow,
+                      }
+                    : null,
+                )
               }
-              onToggleHunk={(filePath, hunkId) => toggleReviewHunk(activeReview.messageId, filePath, hunkId)}
+              onResumeFollow={() =>
+                setActiveReview((cur) => {
+                  if (!cur || !cur.isLive) return cur
+                  const target = cur.latestTouchedPath ?? cur.selectedPath
+                  const file = cur.proposal.files.find((f) => f.path === target)
+                  const hunkCount = file ? buildFileHunks(file).hunks.length : 0
+                  return {
+                    ...cur,
+                    selectedPath: target,
+                    autoFollow: true,
+                    focusHunkIndex: Math.max(0, hunkCount - 1),
+                    focusSeq: Date.now(),
+                  }
+                })
+              }
+              onPauseFollow={() =>
+                setActiveReview((cur) => (cur && cur.isLive && cur.autoFollow ? { ...cur, autoFollow: false } : cur))
+              }
+              onSetHunkDecision={(filePath, hunkId, decision) =>
+                setReviewHunkDecision(activeReview.messageId, filePath, hunkId, decision)
+              }
+              onSetFileDecision={(filePath, hunkIds, decision) =>
+                setReviewFileDecision(activeReview.messageId, filePath, hunkIds, decision)
+              }
               onResetFileHunks={(filePath) => resetReviewFileHunks(activeReview.messageId, filePath)}
               onApply={() => void handleApplyAgentProposal(activeReview.messageId, activeReview.proposal)}
               onDismiss={() => void handleDismissAgentProposal(activeReview.messageId)}
-              onExit={() => setActiveReview(null)}
+              onStopLive={activeReview.isLive ? () => stopLiveTurnRef.current?.() : undefined}
+              onExit={() => {
+                if (activeReview.isLive) exitedLiveKeyRef.current = activeReview.messageId
+                setActiveReview(null)
+              }}
               onSelectionChange={(text, selPath) => updateSelection('review', text, { path: selPath })}
             />
           ) : null}
@@ -3016,8 +3262,9 @@ export function Editor({ bookId }: { bookId: string }) {
                   }
                 : null
             }
-            skippedHunksByMessage={skippedHunksByMessage}
+            decisionsByMessage={decisionsByMessage}
             proposalStatusSync={proposalStatusSync}
+            stopLiveTurnRef={stopLiveTurnRef}
             getOverlay={() => {
               wysiwygFlushRef.current?.()
               const current = bookRef.current ?? book
@@ -3030,6 +3277,8 @@ export function Editor({ bookId }: { bookId: string }) {
             onClose={() => setAgentOpen(false)}
             onReloadBook={() => void reload()}
             onOpenProposalReview={openProposalReview}
+            onLiveProposalUpdate={handleLiveProposalUpdate}
+            onLiveProposalSettle={handleLiveProposalSettle}
             onCloseProposalReview={closeProposalReview}
             onApplyProposal={handleApplyAgentProposal}
             onDismissProposal={handleDismissAgentProposal}

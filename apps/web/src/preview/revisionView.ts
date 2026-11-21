@@ -1,20 +1,28 @@
 import { diffChars } from '../diff/document'
 import { normalizeEol } from '../editor/eol'
 import { extractBodyRange } from '../editor/wysiwygXhtml'
-import type { FileDiffModel, ProposalHunk } from '../state/proposalReview'
+import {
+  getHunkDecision,
+  type FileDiffModel,
+  type FileHunkDecisions,
+  type HunkDecision,
+  type ProposalHunk,
+} from '../state/proposalReview'
 
 /**
  * Pure XHTML revision annotator for real book-page review rendering.
  *
- * Maps source-level `ProposalHunk`s directly onto the chapter's rendered `<body>` so the
- * book-page "修订" view and source diff view share identical hunk IDs and skip states,
- * while feeding back into `buildPreviewDocument` to preserve author CSS, images, fonts,
- * MathML islands, and dark-mode adaptation.
- * See ADR 2026-11-21-in-canvas-agent-proposal-review.
+ * Maps source-level `ProposalHunk`s directly onto the chapter's rendered `<body>` with
+ * Cursor-style 3-state approval (`pending | accepted | rejected`): `accepted` collapses
+ * diff highlights in-place into clean final prose, while `rejected` reverts to original prose.
+ * Feeds back into `buildPreviewDocument` to preserve author CSS, images, fonts, MathML islands,
+ * and dark-mode adaptation.
+ * See ADR 2026-11-21-in-canvas-agent-proposal-review, ADR 2026-11-22-live-streaming-agent-review.
  */
 
 export interface RevisionXhtmlOptions {
   model: FileDiffModel
+  decisions?: FileHunkDecisions
   skippedHunkIds?: ReadonlySet<string>
   allowHunkToggle: boolean
   activeHunkId?: string | null
@@ -262,8 +270,14 @@ function tryInlineTagAlignedDiff(beforeInner: string, afterInner: string): strin
 
 function renderControlCluster(
   hunkId: string,
-  options: { allowToggle: boolean; skipped?: boolean; badge?: { kind: string; label: string }; showSourceBtn?: boolean },
+  options: {
+    allowToggle: boolean
+    decision?: HunkDecision
+    badge?: { kind: string; label: string }
+    showSourceBtn?: boolean
+  },
 ): string {
+  const decision = options.decision ?? 'pending'
   const parts: string[] = []
   if (options.badge) {
     parts.push(`<span class="bs-rev-badge is-${options.badge.kind}">${options.badge.label}</span>`)
@@ -274,11 +288,20 @@ function renderControlCluster(
     )
   }
   if (options.allowToggle) {
-    parts.push(
-      options.skipped
-        ? `<button type="button" class="bs-rev-btn is-restore" data-bs-action="toggle-hunk" data-bs-target-hunk="${hunkId}">恢复保留</button>`
-        : `<button type="button" class="bs-rev-btn is-skip" data-bs-action="toggle-hunk" data-bs-target-hunk="${hunkId}">跳过</button>`,
-    )
+    if (decision === 'accepted') {
+      parts.push(
+        `<button type="button" class="bs-rev-btn is-undo" data-bs-action="reset-hunk" data-bs-target-hunk="${hunkId}">撤销</button>`,
+      )
+    } else if (decision === 'rejected') {
+      parts.push(
+        `<button type="button" class="bs-rev-btn is-restore" data-bs-action="reset-hunk" data-bs-target-hunk="${hunkId}">恢复</button>`,
+      )
+    } else {
+      parts.push(
+        `<button type="button" class="bs-rev-btn is-accept" data-bs-action="accept-hunk" data-bs-target-hunk="${hunkId}">保留</button>`,
+        `<button type="button" class="bs-rev-btn is-reject" data-bs-action="reject-hunk" data-bs-target-hunk="${hunkId}">拒绝</button>`,
+      )
+    }
   }
   if (parts.length === 0) return ''
   return `<span class="bs-rev-controls" data-bs-ui="true">${parts.join('')}</span>`
@@ -331,33 +354,60 @@ function renderSingleElementPair(
 
 function renderHunkInBody(
   hunk: ProposalHunk,
-  options: { skipped: boolean; allowToggle: boolean; isActive: boolean },
+  options: { decision: HunkDecision; allowToggle: boolean; isActive: boolean },
 ): string {
-  const { skipped, allowToggle, isActive } = options
+  const { decision, allowToggle, isActive } = options
   const beforeFrag = hunk.beforeLines.join('\n')
   const afterFrag = hunk.afterLines.join('\n')
   const activeAttr = isActive ? ' data-bs-active="true"' : ''
 
-  // Skipped state: restore original book prose with a subtle restore pill.
-  if (skipped) {
+  // Accepted state: collapse red/green highlights in-place into clean final prose with a quiet undo pill.
+  if (decision === 'accepted') {
+    const controls = renderControlCluster(hunk.id, {
+      allowToggle,
+      decision: 'accepted',
+      badge: { kind: 'accepted', label: '已保留' },
+    })
+    if (!afterFrag.trim()) {
+      return `<div class="bs-rev-resolved-placeholder is-accepted" data-bs-hunk="${hunk.id}" data-bs-rev="accepted"${activeAttr} data-bs-ui="true"><span>已保留此处删除</span>${controls}</div>`
+    }
+    const singleAfter = parseSingleElement(afterFrag)
+    if (singleAfter && SIMPLE_BLOCK_TAGS.has(singleAfter.tag) && !ISLAND_TAG_RE.test(singleAfter.inner)) {
+      const open = injectAttrsIntoOpenTag(
+        singleAfter.openTag,
+        `data-bs-hunk="${hunk.id}" data-bs-rev="accepted"${activeAttr}`,
+      )
+      return `${open}${singleAfter.inner}${controls}${singleAfter.closeTag}`
+    }
+    if (isBalancedMarkup(afterFrag) && !/^<tr[\s>]/i.test(afterFrag.trim())) {
+      return `<div class="bs-rev-block is-accepted" data-bs-hunk="${hunk.id}" data-bs-rev="accepted"${activeAttr}><div class="bs-rev-block-bar" data-bs-ui="true">${controls}</div>${afterFrag}</div>`
+    }
+    if (!hasAnyTag(afterFrag)) {
+      return `<span class="bs-rev-inline-wrap" data-bs-hunk="${hunk.id}" data-bs-rev="accepted"${activeAttr}>${escapeHtml(afterFrag)}${controls}</span>`
+    }
+    return `${afterFrag}${controls}`
+  }
+
+  // Rejected state: restore original book prose with a subtle restore pill.
+  if (decision === 'rejected') {
     if (!beforeFrag.trim()) {
-      return `<div class="bs-rev-skipped-placeholder" data-bs-hunk="${hunk.id}"${activeAttr} data-bs-ui="true"><span>已跳过此处新增内容</span>${renderControlCluster(hunk.id, { allowToggle, skipped: true })}</div>`
+      return `<div class="bs-rev-skipped-placeholder" data-bs-hunk="${hunk.id}" data-bs-rev="rejected"${activeAttr} data-bs-ui="true"><span>已拒绝此处新增内容</span>${renderControlCluster(hunk.id, { allowToggle, decision: 'rejected' })}</div>`
     }
     const singleBefore = parseSingleElement(beforeFrag)
     if (singleBefore && SIMPLE_BLOCK_TAGS.has(singleBefore.tag)) {
       const open = injectAttrsIntoOpenTag(
         singleBefore.openTag,
-        `data-bs-hunk="${hunk.id}" data-bs-rev="skipped"${activeAttr}`,
+        `data-bs-hunk="${hunk.id}" data-bs-rev="rejected"${activeAttr}`,
       )
       const controls = renderControlCluster(hunk.id, {
         allowToggle,
-        skipped: true,
-        badge: { kind: 'skipped', label: '已跳过' },
+        decision: 'rejected',
+        badge: { kind: 'rejected', label: '已拒绝' },
       })
       return `${open}${singleBefore.inner}${controls}${singleBefore.closeTag}`
     }
     if (isBalancedMarkup(beforeFrag) && !/^<tr[\s>]/i.test(beforeFrag.trim())) {
-      return `<div class="bs-rev-block is-skipped" data-bs-hunk="${hunk.id}"${activeAttr}><div class="bs-rev-block-bar" data-bs-ui="true">${renderControlCluster(hunk.id, { allowToggle, skipped: true, badge: { kind: 'skipped', label: '已跳过 · 保留原文' } })}</div>${beforeFrag}</div>`
+      return `<div class="bs-rev-block is-skipped" data-bs-hunk="${hunk.id}" data-bs-rev="rejected"${activeAttr}><div class="bs-rev-block-bar" data-bs-ui="true">${renderControlCluster(hunk.id, { allowToggle, decision: 'rejected', badge: { kind: 'rejected', label: '已拒绝 · 保留原文' } })}</div>${beforeFrag}</div>`
     }
     return beforeFrag
   }
@@ -477,7 +527,8 @@ function lineNumberAtOffset(text: string, offset: number): number {
 }
 
 export function buildRevisionXhtml(options: RevisionXhtmlOptions): RevisionXhtmlResult {
-  const { model, skippedHunkIds, allowHunkToggle, activeHunkId = null } = options
+  const { model, decisions, skippedHunkIds, allowHunkToggle, activeHunkId = null } = options
+  const activeDecisions = decisions ?? skippedHunkIds
   const hunkLocations = new Map<string, 'body' | 'head'>()
   const headHunkIds: string[] = []
 
@@ -549,7 +600,7 @@ export function buildRevisionXhtml(options: RevisionXhtmlOptions): RevisionXhtml
         afterLines: [bodyAfter],
       }
       const renderedBody = renderHunkInBody(syntheticHunk, {
-        skipped: Boolean(skippedHunkIds?.has(hunk.id)),
+        decision: getHunkDecision(activeDecisions, hunk.id),
         allowToggle: allowHunkToggle,
         isActive: activeHunkId === hunk.id,
       })
@@ -603,7 +654,7 @@ export function buildRevisionXhtml(options: RevisionXhtmlOptions): RevisionXhtml
     hunkLocations.set(hunk.id, 'body')
     bodyLinesOut.push(
       renderHunkInBody(hunk, {
-        skipped: Boolean(skippedHunkIds?.has(hunk.id)),
+        decision: getHunkDecision(activeDecisions, hunk.id),
         allowToggle: allowHunkToggle,
         isActive: activeHunkId === hunk.id,
       }),
@@ -717,11 +768,15 @@ body {
   outline-offset: 3px;
   border-radius: 6px;
 }
-[data-bs-rev="skipped"] {
+[data-bs-rev="skipped"],
+[data-bs-rev="rejected"] {
   background: ${c.surfaceRaised};
   border-radius: 6px;
   padding: 4px 8px !important;
   color: ${c.textMuted};
+}
+[data-bs-rev="accepted"] {
+  border-radius: 6px;
 }
 [data-bs-hunk][data-bs-active="true"] {
   outline: 2px solid ${c.accent} !important;
@@ -746,6 +801,10 @@ body {
   background: ${c.surfaceRaised};
   border-color: ${c.border};
   color: ${c.textMuted};
+}
+.bs-rev-block.is-accepted {
+  background: ${c.paperBg};
+  border-color: ${c.border};
 }
 .bs-rev-block.is-replaced {
   background: ${c.surfaceRaised};
@@ -832,10 +891,15 @@ body {
   background: ${c.warnBg};
   color: ${c.warnFg};
 }
-.bs-rev-badge.is-skipped {
+.bs-rev-badge.is-skipped,
+.bs-rev-badge.is-rejected {
   background: ${c.surfaceRaised};
   color: ${c.textMuted};
   border: 1px solid ${c.border};
+}
+.bs-rev-badge.is-accepted {
+  background: ${c.okBg};
+  color: ${c.okFg};
 }
 .bs-rev-btn {
   appearance: none;
@@ -854,12 +918,39 @@ body {
   border-color: ${c.accent};
   color: ${c.accent};
 }
+.bs-rev-btn.is-accept {
+  background: ${c.okBg};
+  border-color: ${c.okFg};
+  color: ${c.okFg};
+  font-weight: 600;
+}
+.bs-rev-btn.is-accept:hover {
+  filter: brightness(0.96);
+}
+.bs-rev-btn.is-reject {
+  background: ${c.errBg};
+  border-color: ${c.errFg};
+  color: ${c.errFg};
+}
+.bs-rev-btn.is-reject:hover {
+  filter: brightness(0.96);
+}
 .bs-rev-btn.is-restore {
   background: ${c.accentSubtle};
   border-color: ${c.accent};
   color: ${c.accent};
 }
-.bs-rev-skipped-placeholder {
+.bs-rev-btn.is-undo {
+  background: ${c.surfaceRaised};
+  border-color: ${c.border};
+  color: ${c.textMuted};
+}
+.bs-rev-btn.is-undo:hover {
+  border-color: ${c.accent};
+  color: ${c.accent};
+}
+.bs-rev-skipped-placeholder,
+.bs-rev-resolved-placeholder {
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -872,6 +963,11 @@ body {
   color: ${c.textMuted};
   font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "Noto Sans SC", sans-serif;
   font-size: 12px;
+}
+.bs-rev-resolved-placeholder.is-accepted {
+  border-style: solid;
+  border-color: ${c.border};
+  background: ${c.paperBg};
 }
 `
 }

@@ -2,12 +2,16 @@ import type { AgentProposal, EpubArchive, EpubPackage, XmlDocumentParser } from 
 import { describe, expect, it } from 'vitest'
 import { groupFiles, type LoadedBook } from './bookStore'
 import {
+  applyProposalDelta,
   buildComposedProposalPlan,
   buildFileHunks,
   buildVirtualReviewBook,
   composeFileFromHunks,
   detectProposalStaleness,
+  findNewestChangedHunkIndex,
   findReferencingChaptersForCss,
+  reconcileHunkDecisions,
+  reconcileProposalDecisions,
   summarizeStructuralProposal,
   validateComposedProposal,
 } from './proposalReview'
@@ -214,5 +218,136 @@ describe('proposalReview engine', () => {
 
     expect(summarizeStructuralProposal(proposal, book.pkg)).toEqual(['新增 1 章', '同步目录与 OPF'])
     expect(detectProposalStaleness(proposal, texts)).toEqual(['EPUB/nav.xhtml'])
+  })
+
+  it('merges incremental streaming deltas and drops reverted files cleanly', () => {
+    const p1 = applyProposalDelta(null, {
+      proposalId: 'live-1',
+      isStructural: false,
+      changedFiles: [
+        { path: 'EPUB/text/ch001.xhtml', kind: 'update', beforeText: '<p>原1</p>', afterText: '<p>改1</p>' },
+      ],
+      removedPaths: [],
+      focusPath: 'EPUB/text/ch001.xhtml',
+    })!
+    expect(p1.files).toHaveLength(1)
+    expect(p1.id).toBe('live-1')
+
+    const p2 = applyProposalDelta(p1, {
+      proposalId: 'live-1',
+      isStructural: false,
+      changedFiles: [
+        { path: 'EPUB/text/ch002.xhtml', kind: 'update', beforeText: '<p>原2</p>', afterText: '<p>改2</p>' },
+      ],
+      removedPaths: [],
+      focusPath: 'EPUB/text/ch002.xhtml',
+    })!
+    expect(p2.files.map((f) => f.path)).toEqual(['EPUB/text/ch001.xhtml', 'EPUB/text/ch002.xhtml'])
+
+    // Updating ch001 in place preserves path ordering; removing ch002 drops it cleanly.
+    const p3 = applyProposalDelta(p2, {
+      proposalId: 'live-1',
+      isStructural: false,
+      changedFiles: [
+        { path: 'EPUB/text/ch001.xhtml', kind: 'update', beforeText: '<p>原1</p>', afterText: '<p>改1b</p>' },
+      ],
+      removedPaths: ['EPUB/text/ch002.xhtml'],
+      focusPath: 'EPUB/text/ch001.xhtml',
+    })!
+    expect(p3.files.map((f) => f.path)).toEqual(['EPUB/text/ch001.xhtml'])
+    expect(p3.files[0]!.afterText).toBe('<p>改1b</p>')
+
+    // Removing the last file yields null.
+    const empty = applyProposalDelta(p3, {
+      proposalId: 'live-1',
+      isStructural: false,
+      changedFiles: [],
+      removedPaths: ['EPUB/text/ch001.xhtml'],
+      focusPath: null,
+    })
+    expect(empty).toBeNull()
+  })
+
+  it('tracks 3-state decisions and reconciles accepted/rejected choices by fingerprint across live re-edits', () => {
+    const before = [
+      '<body>',
+      '<p>第一段原文</p>',
+      '<p>中间段落</p>',
+      '<p>第三段错字</p>',
+      '<p>重复错字</p>',
+      '<p>尾段</p>',
+      '<p>重复错字</p>',
+      '</body>',
+    ].join('\n')
+    const afterStep1 = [
+      '<body>',
+      '<p>第一段原文</p>',
+      '<p>中间段落</p>',
+      '<p>第三段正字</p>',
+      '<p>重复正字</p>',
+      '<p>尾段</p>',
+      '<p>重复正字</p>',
+      '</body>',
+    ].join('\n')
+    const afterStep2 = [
+      '<body>',
+      '<p>第一段新增修改</p>',
+      '<p>中间段落</p>',
+      '<p>第三段正字</p>',
+      '<p>重复正字</p>',
+      '<p>尾段</p>',
+      '<p>重复正字</p>',
+      '</body>',
+    ].join('\n')
+
+    const model1 = buildFileHunks({ path: 'ch1.xhtml', kind: 'update', beforeText: before, afterText: afterStep1 })
+    // model1 has 2 hunks: hunk-0 (lines 4-5 combined) and hunk-1 (line 7)
+    expect(model1.hunks).toHaveLength(2)
+    expect(model1.hunks[0]!.fingerprint).not.toBe(model1.hunks[1]!.fingerprint)
+
+    // User accepts hunk-0 and rejects hunk-1 during streaming
+    const decisions1 = { 'hunk-0': 'accepted' as const, 'hunk-1': 'rejected' as const }
+    const composed1 = composeFileFromHunks(model1, decisions1)
+    expect(composed1).toContain('<p>第三段正字</p>')
+    expect(composed1).toContain('<p>尾段</p>\n<p>重复错字</p>')
+
+    // Step 2 inserts a brand-new edit at line 2 -> shifts old hunk-0/hunk-1 to hunk-1/hunk-2!
+    const model2 = buildFileHunks({ path: 'ch1.xhtml', kind: 'update', beforeText: before, afterText: afterStep2 })
+    expect(model2.hunks).toHaveLength(3)
+
+    const reconciled = reconcileHunkDecisions(model1, model2, decisions1)
+    // Newly inserted top hunk starts as pending (absent), while prior decisions shift cleanly by fingerprint.
+    expect(reconciled['hunk-0']).toBeUndefined()
+    expect(reconciled['hunk-1']).toBe('accepted')
+    expect(reconciled['hunk-2']).toBe('rejected')
+
+    // Newest changed hunk locator points to index 0 (the newly introduced top edit).
+    expect(findNewestChangedHunkIndex(model1, model2)).toBe(0)
+
+    const proposal2: AgentProposal = {
+      id: 'p-3state',
+      isStructural: false,
+      validationIssues: [],
+      files: [model2.file],
+    }
+    const plan = buildComposedProposalPlan(proposal2, new Map([[model2.file.path, model2]]), {
+      [model2.file.path]: reconciled,
+    })
+    expect(plan.totalHunks).toBe(3)
+    expect(plan.pendingHunks).toBe(1)
+    expect(plan.acceptedHunks).toBe(1)
+    expect(plan.rejectedHunks).toBe(1)
+    expect(plan.keptHunks).toBe(2)
+
+    const proposal1: AgentProposal = {
+      id: 'p-3state',
+      isStructural: false,
+      validationIssues: [],
+      files: [model1.file],
+    }
+    const fullReconciled = reconcileProposalDecisions(proposal1, proposal2, {
+      'ch1.xhtml': decisions1,
+    })
+    expect(fullReconciled['ch1.xhtml']).toEqual(reconciled)
   })
 })

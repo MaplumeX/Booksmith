@@ -1,6 +1,14 @@
 import { DOMParser, XMLSerializer } from '@xmldom/xmldom'
 import { describe, expect, it } from 'vitest'
-import { AGENT_READ_ONLY_TOOL_NAMES, AGENT_TOOL_NAMES, AgentWorkspace, createEmptyEpub, isReadOnlyAgentTool, openEpub } from '../src'
+import {
+  AGENT_READ_ONLY_TOOL_NAMES,
+  AGENT_TOOL_NAMES,
+  AgentWorkspace,
+  createEmptyEpub,
+  diffProposalSnapshots,
+  isReadOnlyAgentTool,
+  openEpub,
+} from '../src'
 import type { XmlCodec } from '../src/xml'
 import { readFixture } from './helpers'
 
@@ -482,5 +490,82 @@ describe('AgentWorkspace structural tools (metadata, TOC, create, rename, delete
     expect(driftRes.driftedPaths).toEqual([ch1])
     expect(wsDrifted.hasSeededPendingProposal()).toBe(false)
     expect(wsDrifted.getText(ch1)).toContain('用户手改的内容。')
+  })
+
+  it('builds fast unvalidated snapshots and computes incremental deltas across edits, reverts, and hints', () => {
+    const ws = openEmptyWorkspace()
+    const ch1 = 'EPUB/text/ch001.xhtml'
+    const opfPath = ws.getPackage().opfPath
+
+    // Step 1: edit ch1
+    expect(
+      ws.executeTool('edit_file', {
+        path: ch1,
+        oldText: '<p>从这里开始写。</p>',
+        newText: '<p>实时第一处。</p>',
+      }).ok,
+    ).toBe(true)
+
+    const snap1 = ws.buildProposal('live-1', { validate: false })!
+    expect(snap1).not.toBeNull()
+    expect(snap1.validationIssues).toEqual([])
+    const delta1 = diffProposalSnapshots(null, snap1, { hintPaths: [ch1], opfPath })!
+    expect(delta1.proposalId).toBe('live-1')
+    expect(delta1.isStructural).toBe(false)
+    expect(delta1.changedFiles.map((f) => f.path)).toEqual([ch1])
+    expect(delta1.removedPaths).toEqual([])
+    expect(delta1.focusPath).toBe(ch1)
+
+    // No-op diff against identical snapshot returns null
+    expect(diffProposalSnapshots(snap1, snap1, { opfPath })).toBeNull()
+
+    // Step 2: create a second chapter -> structural delta only sends newly changed files, focuses new chapter over OPF
+    const created = ws.executeTool('create_chapter', { filename: 'ch002.xhtml', title: '第二章' })
+    expect(created.ok).toBe(true)
+    const ch2 = (created.data as { path: string }).path
+
+    const snap2 = ws.buildProposal('live-1', { validate: false })!
+    const delta2 = diffProposalSnapshots(snap1, snap2, { hintPaths: [opfPath, ch2], opfPath })!
+    expect(delta2.isStructural).toBe(true)
+    expect(delta2.changedFiles.map((f) => f.path)).toContain(ch2)
+    expect(delta2.changedFiles.map((f) => f.path)).toContain(opfPath)
+    // Untouched ch1 is not re-sent in delta2
+    expect(delta2.changedFiles.map((f) => f.path)).not.toContain(ch1)
+    expect(delta2.removedPaths).toEqual([])
+    expect(delta2.focusPath).toBe(ch2)
+
+    // Step 3: revert ch1 back to original -> appears in removedPaths
+    expect(
+      ws.executeTool('edit_file', {
+        path: ch1,
+        oldText: '<p>实时第一处。</p>',
+        newText: '<p>从这里开始写。</p>',
+      }).ok,
+    ).toBe(true)
+    const snap3 = ws.buildProposal('live-1', { validate: false })!
+    const delta3 = diffProposalSnapshots(snap2, snap3, { opfPath })!
+    expect(delta3.removedPaths).toEqual([ch1])
+    expect(delta3.changedFiles).toEqual([])
+
+    // Step 4: seeded pending proposal + edit on a new file -> hintPath keeps focus on newly touched file
+    const baseArchive = openEpub(createEmptyEpub({ title: '焦点测试', author: '作者' }), codec.parse).archive
+    const seedWs = AgentWorkspace.fromArchive(baseArchive, { codec, checkXml: strictCheckXml, now: FIXED_NOW })
+    expect(seedWs.executeTool('create_chapter', { filename: 'ch002.xhtml', title: '第二章' }).ok).toBe(true)
+    const seededProposal = seedWs.buildProposal('seed-1')!
+
+    const wsFollow = AgentWorkspace.fromArchive(baseArchive, { codec, checkXml: strictCheckXml, now: FIXED_NOW })
+    expect(wsFollow.seedPendingProposal(seededProposal).seeded).toBe(true)
+    expect(
+      wsFollow.executeTool('edit_file', {
+        path: ch1,
+        oldText: '<p>从这里开始写。</p>',
+        newText: '<p>续聊改动第一章。</p>',
+      }).ok,
+    ).toBe(true)
+    const snapFollow = wsFollow.buildProposal('live-2', { validate: false })!
+    const deltaFollow = diffProposalSnapshots(null, snapFollow, { hintPaths: [ch1], opfPath })!
+    expect(deltaFollow.focusPath).toBe(ch1)
+    expect(deltaFollow.changedFiles.map((f) => f.path)).toContain(ch1)
+    expect(deltaFollow.changedFiles.map((f) => f.path)).toContain('EPUB/text/ch002.xhtml')
   })
 })
