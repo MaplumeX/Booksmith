@@ -5,6 +5,7 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import { nodeXmlCodec } from '../src/agent/nodeXmlCodec'
 import { fetchProviderModels, testProfileConnection, validateBaseUrl } from '../src/agent/providers'
 import { normalizeMaxToolSteps, runAgentTurn, trimHistory, type AgentStreamEvent } from '../src/agent/runner'
+import { buildSystemPrompt, formatUserMessageWithContext } from '../src/agent/systemPrompt'
 import { ingestEpub, nodeXmlParser } from '../src/epub/ingest'
 
 function readBody(req: IncomingMessage): Promise<string> {
@@ -39,6 +40,7 @@ describe('agent providers & runner with local mock LLM servers', () => {
   let openAiStep = 0
   let anthropicStep = 0
   let lastAskRequest: Record<string, unknown> | null = null
+  let askRequests: Array<Record<string, unknown>> = []
 
   beforeAll(async () => {
     server = createServer(async (req, res) => {
@@ -170,6 +172,7 @@ describe('agent providers & runner with local mock LLM servers', () => {
       // Ask-mode inspection endpoint: captures registered tools & system prompt
       if (url.pathname === '/ask-check/v1/chat/completions') {
         lastAskRequest = body
+        askRequests.push(body)
         writeOpenAiSse(res, [
           {
             id: 'ask1',
@@ -738,5 +741,104 @@ describe('agent providers & runner with local mock LLM servers', () => {
     expect(anthResult.reasoning).toBe('分析目录层级。')
     expect(anthResult.content).toBe('目录层级清晰。')
     expect(anthEvents.some((e) => e.type === 'reasoning_delta')).toBe(true)
+  })
+
+  it('keeps system prompt identical across page switches and attaches per-turn context to user messages', async () => {
+    askRequests = []
+    const { archive, pkg } = openEpub(createEmptyEpub({ title: '缓存稳定测试书' }), nodeXmlCodec.parse)
+
+    // Pure formatting checks (including backtick fence escaping and truncation)
+    expect(formatUserMessageWithContext('纯文本提问')).toBe('纯文本提问')
+    expect(formatUserMessageWithContext('纯文本提问', { activePath: '  ', selection: '   ' })).toBe('纯文本提问')
+    const fenced = formatUserMessageWithContext('检查这段', {
+      activePath: 'EPUB/text/ch001.xhtml',
+      selection: '含```三重反引号```的选区',
+    })
+    expect(fenced).toContain('````\n含```三重反引号```的选区\n````')
+
+    const longSelection = '甲'.repeat(4100)
+    const truncated = formatUserMessageWithContext('检查超长选区', { selection: longSelection })
+    expect(truncated).toContain('...(已截断)')
+    expect(truncated.length).toBeLessThan(4100)
+
+    const systemPrompt = buildSystemPrompt(pkg, { approvalMode: 'ask', customInstructions: '保留术语。' })
+    expect(systemPrompt).not.toContain('ch001.xhtml')
+    expect(systemPrompt).toContain('保留术语。')
+
+    // trimHistory accounts for formatted user context length in its budget
+    const historyWithCtx = trimHistory(
+      [
+        { role: 'user', content: '第一轮', context: { activePath: 'EPUB/text/ch001.xhtml', selection: 'S'.repeat(120) } },
+        { role: 'assistant', content: '回复一' },
+        { role: 'user', content: '第二轮', context: { activePath: 'EPUB/text/ch002.xhtml' } },
+      ],
+      160,
+    )
+    expect(historyWithCtx).toHaveLength(2)
+    expect(historyWithCtx[0]!.content).toBe('回复一')
+    expect(historyWithCtx[1]!.content).toContain('EPUB/text/ch002.xhtml')
+
+    // Turn 1 on ch001.xhtml
+    const turn1Context = { activePath: 'EPUB/text/ch001.xhtml', selection: '第一章选中的片段' }
+    const turn1 = await runAgentTurn({
+      archive,
+      provider: {
+        provider: 'openai-compatible',
+        baseUrl: `${mockUrl}/ask-check/v1`,
+        model: 'mock-ask',
+        apiKey: null,
+      },
+      history: [],
+      userMessage: '帮我检查这一页',
+      context: turn1Context,
+      approvalMode: 'ask',
+      customInstructions: '保留学术术语。',
+    })
+    expect(turn1.error).toBeNull()
+
+    // Turn 2 after switching to ch002.xhtml with a different selection
+    const turn2Context = { activePath: 'EPUB/text/ch002.xhtml', selection: '第二章选中的片段' }
+    const turn2 = await runAgentTurn({
+      archive,
+      provider: {
+        provider: 'openai-compatible',
+        baseUrl: `${mockUrl}/ask-check/v1`,
+        model: 'mock-ask',
+        apiKey: null,
+      },
+      history: [
+        { role: 'user', content: '帮我检查这一页', context: turn1Context },
+        { role: 'assistant', content: turn1.content },
+      ],
+      userMessage: '再看看这一页',
+      context: turn2Context,
+      approvalMode: 'ask',
+      customInstructions: '保留学术术语。',
+    })
+    expect(turn2.error).toBeNull()
+
+    expect(askRequests).toHaveLength(2)
+    const req1Msgs = (askRequests[0]!.messages as Array<{ role: string; content: string }>) ?? []
+    const req2Msgs = (askRequests[1]!.messages as Array<{ role: string; content: string }>) ?? []
+
+    const sys1 = req1Msgs.find((m) => m.role === 'system')?.content ?? ''
+    const sys2 = req2Msgs.find((m) => m.role === 'system')?.content ?? ''
+    expect(sys1).toBe(sys2)
+    expect(sys1).not.toContain('ch001.xhtml')
+    expect(sys1).not.toContain('ch002.xhtml')
+    expect(sys1).not.toContain('第一章选中的片段')
+    expect(sys1).not.toContain('第二章选中的片段')
+
+    // Replayed turn-1 user message must be byte-identical to turn-1's original user message for prefix cache hits
+    expect(req2Msgs[1]).toEqual(req1Msgs[1])
+    expect(req1Msgs[1]!.content).toContain('EPUB/text/ch001.xhtml')
+    expect(req1Msgs[1]!.content).toContain('第一章选中的片段')
+    expect(req1Msgs[1]!.content).toContain('帮我检查这一页')
+
+    // Turn-2 user message carries the new active page & selection
+    expect(req2Msgs[3]!.role).toBe('user')
+    expect(req2Msgs[3]!.content).toContain('EPUB/text/ch002.xhtml')
+    expect(req2Msgs[3]!.content).toContain('第二章选中的片段')
+    expect(req2Msgs[3]!.content).toContain('再看看这一页')
   })
 })
