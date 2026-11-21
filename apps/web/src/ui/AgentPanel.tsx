@@ -378,9 +378,16 @@ export function AgentPanel({
   const [autoAppliedIds, setAutoAppliedIds] = useState<Set<string>>(() => new Set())
   const [downgradeReasons, setDowngradeReasons] = useState<Record<string, string>>({})
 
-  const abortRef = useRef<AbortController | null>(null)
+  const abortRef = useRef<{ controller: AbortController; bookId: string; threadId: string } | null>(null)
   const scrollRef = useRef<HTMLDivElement>(null)
   const textareaRef = useRef<HTMLTextAreaElement>(null)
+
+  const stopActiveTurn = useCallback(() => {
+    const active = abortRef.current
+    if (!active) return
+    active.controller.abort()
+    void api.abortAgentThread(active.bookId, active.threadId).catch(() => {})
+  }, [])
 
   // Keep selectedProfileId & selectedModel synced with available profiles & multi-model lists.
   useEffect(() => {
@@ -476,9 +483,9 @@ export function AgentPanel({
   useEffect(() => {
     void loadThreads()
     return () => {
-      abortRef.current?.abort()
+      stopActiveTurn()
     }
-  }, [bookId])
+  }, [bookId, stopActiveTurn])
 
   useEffect(() => {
     const el = scrollRef.current
@@ -680,7 +687,7 @@ export function AgentPanel({
     setMessages((current) => [...current, optimisticUser])
 
     const controller = new AbortController()
-    abortRef.current = controller
+    abortRef.current = { controller, bookId, threadId }
 
     const draft: StreamingState = {
       content: '',
@@ -694,7 +701,29 @@ export function AgentPanel({
     const { dirtyTexts, deletedPaths } = getOverlay()
 
     let finalMessageId: string | undefined
+    let streamStopped = false
     let streamError: { code: string; message: string } | null = null
+
+    const commitStoppedNewMessage = () => {
+      if (draft.content || draft.reasoning || draft.toolCalls.length > 0) {
+        setMessages((current) => [
+          ...current,
+          {
+            id: finalMessageId ?? `stopped-${Date.now()}`,
+            threadId: threadId!,
+            role: 'assistant',
+            content: draft.content || '已停止生成。',
+            reasoning: draft.reasoning.trim() ? draft.reasoning : null,
+            context: null,
+            toolCalls: draft.toolCalls,
+            proposal: null,
+            proposalStatus: null,
+            error: null,
+            createdAt: new Date().toISOString(),
+          },
+        ])
+      }
+    }
 
     try {
       await api.streamAgentMessage(
@@ -738,6 +767,7 @@ export function AgentPanel({
               streamError = { code: event.code, message: event.message }
             } else if (event.type === 'done') {
               finalMessageId = event.messageId
+              streamStopped = Boolean(event.stopped)
               if (event.threadTitle) {
                 setThreads((list) =>
                   list.map((t) =>
@@ -759,33 +789,20 @@ export function AgentPanel({
         },
       )
 
-      await finalizeAssistantTurn({
-        threadId,
-        messageId: finalMessageId ?? `assistant-${Date.now()}`,
-        draft,
-        streamError,
-        effectiveMode,
-      })
+      if (controller.signal.aborted || streamStopped) {
+        commitStoppedNewMessage()
+      } else {
+        await finalizeAssistantTurn({
+          threadId,
+          messageId: finalMessageId ?? `assistant-${Date.now()}`,
+          draft,
+          streamError,
+          effectiveMode,
+        })
+      }
     } catch (cause) {
       if (controller.signal.aborted) {
-        if (draft.content || draft.reasoning || draft.toolCalls.length > 0) {
-          setMessages((current) => [
-            ...current,
-            {
-              id: `stopped-${Date.now()}`,
-              threadId: threadId!,
-              role: 'assistant',
-              content: draft.content || '已停止生成。',
-              reasoning: draft.reasoning.trim() ? draft.reasoning : null,
-              context: null,
-              toolCalls: draft.toolCalls,
-              proposal: null,
-              proposalStatus: null,
-              error: null,
-              createdAt: new Date().toISOString(),
-            },
-          ])
-        }
+        commitStoppedNewMessage()
       } else if (cause instanceof ApiError) {
         const payload = cause.payload as { message?: string } | undefined
         setPanelError({
@@ -815,7 +832,7 @@ export function AgentPanel({
 
     const effectiveMode = approvalMode
     const controller = new AbortController()
-    abortRef.current = controller
+    abortRef.current = { controller, bookId, threadId: activeThreadId }
 
     const draft: StreamingState = {
       content: '',
@@ -829,7 +846,28 @@ export function AgentPanel({
 
     const { dirtyTexts, deletedPaths } = getOverlay()
     let finalMessageId: string | undefined
+    let streamStopped = false
     let streamError: { code: string; message: string } | null = null
+
+    const commitStoppedRetryMessage = () => {
+      if (draft.content || draft.reasoning || draft.toolCalls.length > 0) {
+        setMessages((current) =>
+          current.map((m) =>
+            m.id === messageId
+              ? {
+                  ...m,
+                  content: draft.content || '已停止生成。',
+                  reasoning: draft.reasoning.trim() ? draft.reasoning : null,
+                  toolCalls: draft.toolCalls,
+                  proposal: null,
+                  proposalStatus: null,
+                  error: null,
+                }
+              : m,
+          ),
+        )
+      }
+    }
 
     try {
       await api.retryAgentMessage(
@@ -872,6 +910,7 @@ export function AgentPanel({
               streamError = { code: event.code, message: event.message }
             } else if (event.type === 'done') {
               finalMessageId = event.messageId
+              streamStopped = Boolean(event.stopped)
               setThreads((list) =>
                 list.map((t) =>
                   t.id === activeThreadId
@@ -890,33 +929,21 @@ export function AgentPanel({
         },
       )
 
-      await finalizeAssistantTurn({
-        threadId: activeThreadId,
-        messageId: finalMessageId ?? messageId,
-        draft,
-        streamError,
-        effectiveMode,
-        replacingMessageId: messageId,
-      })
+      if (controller.signal.aborted || streamStopped) {
+        commitStoppedRetryMessage()
+      } else {
+        await finalizeAssistantTurn({
+          threadId: activeThreadId,
+          messageId: finalMessageId ?? messageId,
+          draft,
+          streamError,
+          effectiveMode,
+          replacingMessageId: messageId,
+        })
+      }
     } catch (cause) {
       if (controller.signal.aborted) {
-        if (draft.content || draft.reasoning || draft.toolCalls.length > 0) {
-          setMessages((current) =>
-            current.map((m) =>
-              m.id === messageId
-                ? {
-                    ...m,
-                    content: draft.content || '已停止生成。',
-                    reasoning: draft.reasoning.trim() ? draft.reasoning : null,
-                    toolCalls: draft.toolCalls,
-                    proposal: null,
-                    proposalStatus: null,
-                    error: null,
-                  }
-                : m,
-            ),
-          )
-        }
+        commitStoppedRetryMessage()
       } else if (cause instanceof ApiError) {
         const payload = cause.payload as { message?: string } | undefined
         setPanelError({
@@ -1693,7 +1720,7 @@ export function AgentPanel({
                     className="agent-send-btn is-stop"
                     aria-label="停止"
                     title="停止生成"
-                    onClick={() => abortRef.current?.abort()}
+                    onClick={stopActiveTurn}
                   >
                     <Square size={11} strokeWidth={2.2} fill="currentColor" aria-hidden="true" />
                   </button>

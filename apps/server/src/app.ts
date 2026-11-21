@@ -23,6 +23,8 @@ const MAX_UPLOAD_BYTES = 64 * 1024 * 1024
 export interface CreateAppOptions {
   config?: Config
   databaseUrl?: string
+  /** Interval in ms between SSE comment heartbeats on active Agent streams; defaults to 2000ms. */
+  agentSseHeartbeatMs?: number
 }
 
 export async function createApp(options: CreateAppOptions = {}): Promise<FastifyInstance> {
@@ -71,7 +73,12 @@ export async function createApp(options: CreateAppOptions = {}): Promise<Fastify
   registerAuthRoutes(app, { db, config, sessions, loginLimiter })
   registerBookRoutes(app, { db, fileStore })
   registerPageVersionRoutes(app, { db, fileStore })
-  registerAgentRoutes(app, { db, config, fileStore })
+  registerAgentRoutes(app, {
+    db,
+    config,
+    fileStore,
+    sseHeartbeatMs: options.agentSseHeartbeatMs,
+  })
 
   return app
 }

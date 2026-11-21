@@ -54,6 +54,10 @@ describe('agent REST & SSE routes', () => {
   let mockServer: ReturnType<typeof createServer>
   let mockUrl = ''
   let mockStep = 0
+  let slowToolStep = 0
+  let slowStep2Aborted = false
+  let slowStep2Completed = false
+  let slowEmptyAborted = false
   let lastSeenModel: string | null = null
   let lastSeenSystem: string | null = null
   let lastSeenToolCount = 0
@@ -151,6 +155,117 @@ describe('agent REST & SSE routes', () => {
           return
         }
 
+        if (body.model === 'mock-slow-tools') {
+          slowToolStep += 1
+          if (slowToolStep === 1) {
+            writeOpenAiSse(res, [
+              {
+                id: 'st1',
+                object: 'chat.completion.chunk',
+                created: 1,
+                model: 'mock-slow-tools',
+                choices: [
+                  {
+                    index: 0,
+                    delta: {
+                      role: 'assistant',
+                      tool_calls: [
+                        {
+                          index: 0,
+                          id: 'call_slow_1',
+                          type: 'function',
+                          function: {
+                            name: 'edit_file',
+                            arguments: JSON.stringify({
+                              path: 'EPUB/text/ch001.xhtml',
+                              oldText: '<p>从这里开始写。</p>',
+                              newText: '<p>中途被中断的修改。</p>',
+                            }),
+                          },
+                        },
+                      ],
+                    },
+                    finish_reason: null,
+                  },
+                ],
+              },
+              {
+                id: 'st1',
+                object: 'chat.completion.chunk',
+                created: 1,
+                model: 'mock-slow-tools',
+                choices: [{ index: 0, delta: {}, finish_reason: 'tool_calls' }],
+              },
+            ])
+            return
+          }
+
+          // Step 2 stays open long enough for the client to abort mid-turn, emitting SSE keepalives
+          // so Node's mock http.Server observes TCP RST as soon as Booksmith aborts the upstream fetch.
+          res.writeHead(200, { 'content-type': 'text/event-stream; charset=utf-8' })
+          res.flushHeaders?.()
+          const ping = setInterval(() => {
+            if (!res.writableEnded && !res.destroyed) res.write(': upstream-ping\n\n')
+          }, 40)
+          const timer = setTimeout(() => {
+            clearInterval(ping)
+            if (res.writableEnded || res.destroyed) return
+            slowStep2Completed = true
+            res.write(
+              `data: ${JSON.stringify({
+                id: 'st2',
+                object: 'chat.completion.chunk',
+                created: 1,
+                model: 'mock-slow-tools',
+                choices: [
+                  {
+                    index: 0,
+                    delta: { role: 'assistant', content: '如果未中断就会看到这段话。' },
+                    finish_reason: 'stop',
+                  },
+                ],
+              })}\n\n`,
+            )
+            res.write('data: [DONE]\n\n')
+            res.end()
+          }, 400)
+          res.on('close', () => {
+            clearInterval(ping)
+            clearTimeout(timer)
+            if (!res.writableEnded) slowStep2Aborted = true
+          })
+          return
+        }
+
+        if (body.model === 'mock-slow-empty') {
+          res.writeHead(200, { 'content-type': 'text/event-stream; charset=utf-8' })
+          res.flushHeaders?.()
+          const ping = setInterval(() => {
+            if (!res.writableEnded && !res.destroyed) res.write(': upstream-ping\n\n')
+          }, 40)
+          const timer = setTimeout(() => {
+            clearInterval(ping)
+            if (res.writableEnded || res.destroyed) return
+            res.write(
+              `data: ${JSON.stringify({
+                id: 'se1',
+                object: 'chat.completion.chunk',
+                created: 1,
+                model: 'mock-slow-empty',
+                choices: [{ index: 0, delta: { role: 'assistant', content: '太晚了。' }, finish_reason: 'stop' }],
+              })}\n\n`,
+            )
+            res.write('data: [DONE]\n\n')
+            res.end()
+          }, 400)
+          res.on('close', () => {
+            clearInterval(ping)
+            clearTimeout(timer)
+            if (!res.writableEnded) slowEmptyAborted = true
+          })
+          return
+        }
+
         mockStep += 1
         if (mockStep === 1) {
           writeOpenAiSse(res, [
@@ -221,6 +336,7 @@ describe('agent REST & SSE routes', () => {
 
     app = await createApp({
       databaseUrl: TEST_URL,
+      agentSseHeartbeatMs: 50,
       config: {
         databaseUrl: TEST_URL,
         allowedEmails: [emailA, emailB],
@@ -732,5 +848,191 @@ describe('agent REST & SSE routes', () => {
     expect(detail.messages[0]?.context).toEqual({ activePath: 'EPUB/text/ch001.xhtml', selection: '第一页摘录' })
     expect(detail.messages[2]?.content).toBe('帮我看第二页的标题')
     expect(detail.messages[2]?.context).toEqual({ activePath: 'EPUB/text/ch002.xhtml', selection: '第二页摘录' })
+  })
+
+  it('aborts running SSE turns and stops upstream multi-step tool execution on client disconnect and explicit abort', async () => {
+    const loginA = await fetch(`${appUrl}/api/auth/login`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ email: emailA, password: 'strong-password-123' }),
+    })
+    const cookieA = (loginA.headers.getSetCookie?.()[0] ?? '').split(';')[0]!
+    const loginB = await fetch(`${appUrl}/api/auth/login`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ email: emailB, password: 'strong-password-123' }),
+    })
+    const cookieB = (loginB.headers.getSetCookie?.()[0] ?? '').split(';')[0]!
+
+    const uploadRes = await fetch(`${appUrl}/api/books`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/epub+zip', cookie: cookieA },
+      body: Buffer.from(createEmptyEpub({ title: '中断测试书' })),
+    })
+    expect(uploadRes.status).toBe(201)
+    const { book } = (await uploadRes.json()) as { book: { id: string; currentVersion: number } }
+
+    const createThreadRes = await fetch(`${appUrl}/api/books/${book.id}/agent/threads`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', cookie: cookieA },
+      body: JSON.stringify({ model: 'mock-slow-tools', approvalMode: 'review' }),
+    })
+    expect(createThreadRes.status).toBe(201)
+    const { thread } = (await createThreadRes.json()) as { thread: { id: string } }
+
+    // Idle abort is idempotent and enforces cross-user isolation
+    const idleAbort = await fetch(`${appUrl}/api/books/${book.id}/agent/threads/${thread.id}/abort`, {
+      method: 'POST',
+      headers: { cookie: cookieA },
+    })
+    expect(idleAbort.status).toBe(200)
+    expect(await idleAbort.json()).toEqual({ aborted: false })
+
+    const crossUserAbort = await fetch(`${appUrl}/api/books/${book.id}/agent/threads/${thread.id}/abort`, {
+      method: 'POST',
+      headers: { cookie: cookieB },
+    })
+    expect(crossUserAbort.status).toBe(404)
+
+    // 1) Client HTTP disconnect (AbortController on fetch) must abort server-side run via reply.raw close
+    slowToolStep = 0
+    slowStep2Aborted = false
+    slowStep2Completed = false
+
+    const clientAc = new AbortController()
+    const disconnectRes = await fetch(`${appUrl}/api/books/${book.id}/agent/threads/${thread.id}/messages`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', cookie: cookieA },
+      body: JSON.stringify({
+        content: '执行多步修改并测试断连中断',
+        baseVersion: book.currentVersion,
+        model: 'mock-slow-tools',
+        approvalMode: 'review',
+      }),
+      signal: clientAc.signal,
+    })
+    expect(disconnectRes.status).toBe(200)
+
+    const reader = disconnectRes.body!.getReader()
+    const decoder = new TextDecoder()
+    let seenToolEnd = false
+    let buf = ''
+    try {
+      while (true) {
+        const { value, done } = await reader.read()
+        if (done) break
+        buf += decoder.decode(value, { stream: true })
+        if (!seenToolEnd && buf.includes('"type":"tool_end"')) {
+          seenToolEnd = true
+          // Abort while the next read is pending (matching browser consumeAgentSse) once step 2 is in-flight.
+          setTimeout(() => clientAc.abort(), 40)
+        }
+      }
+    } catch (error) {
+      expect((error as Error).name).toBe('AbortError')
+    }
+    expect(seenToolEnd).toBe(true)
+
+    // Wait past step 2's 400ms timer to prove server really aborted instead of completing in background.
+    await new Promise((r) => setTimeout(r, 500))
+    expect(slowStep2Aborted).toBe(true)
+    expect(slowStep2Completed).toBe(false)
+
+    const afterDisconnect = (await (
+      await fetch(`${appUrl}/api/books/${book.id}/agent/threads/${thread.id}`, { headers: { cookie: cookieA } })
+    ).json()) as {
+      messages: Array<{
+        role: string
+        content: string
+        toolCalls: Array<{ name: string }>
+        proposal: unknown
+      }>
+    }
+    expect(afterDisconnect.messages).toHaveLength(2)
+    expect(afterDisconnect.messages[1]?.content).toBe('已停止生成。')
+    expect(afterDisconnect.messages[1]?.toolCalls).toHaveLength(1)
+    expect(afterDisconnect.messages[1]?.proposal).toBeNull()
+
+    // 2) Explicit POST .../abort must halt an active turn even if the SSE socket stays open (e.g. behind a proxy)
+    slowToolStep = 0
+    slowStep2Aborted = false
+    slowStep2Completed = false
+
+    const explicitRes = await fetch(`${appUrl}/api/books/${book.id}/agent/threads/${thread.id}/messages`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', cookie: cookieA },
+      body: JSON.stringify({
+        content: '执行多步修改并测试显式中断接口',
+        baseVersion: book.currentVersion,
+        model: 'mock-slow-tools',
+        approvalMode: 'review',
+      }),
+    })
+    expect(explicitRes.status).toBe(200)
+
+    const explicitReader = explicitRes.body!.getReader()
+    let explicitRaw = ''
+    let triggeredAbort = false
+    while (true) {
+      const { value, done } = await explicitReader.read()
+      if (done) break
+      explicitRaw += decoder.decode(value, { stream: true })
+      if (!triggeredAbort && explicitRaw.includes('"type":"tool_end"')) {
+        triggeredAbort = true
+        await new Promise((r) => setTimeout(r, 40))
+        const abortRes = await fetch(`${appUrl}/api/books/${book.id}/agent/threads/${thread.id}/abort`, {
+          method: 'POST',
+          headers: { cookie: cookieA },
+        })
+        expect(abortRes.status).toBe(200)
+        expect(await abortRes.json()).toEqual({ aborted: true })
+      }
+    }
+    expect(triggeredAbort).toBe(true)
+
+    const explicitEvents = explicitRaw
+      .split('\n\n')
+      .filter((b) => b.startsWith('data: '))
+      .map((b) => JSON.parse(b.slice(6)) as Record<string, unknown>)
+    const explicitDone = explicitEvents.find((e) => e.type === 'done') as { stopped?: boolean; messageId?: string }
+    expect(explicitDone?.stopped).toBe(true)
+    expect(explicitDone?.messageId).toBeTruthy()
+    expect(explicitEvents.some((e) => e.type === 'proposal')).toBe(false)
+
+    await new Promise((r) => setTimeout(r, 500))
+    expect(slowStep2Aborted).toBe(true)
+    expect(slowStep2Completed).toBe(false)
+
+    // 3) Aborting before any output arrives must not insert a ghost empty assistant message
+    slowEmptyAborted = false
+    const emptyAc = new AbortController()
+    const emptyRes = await fetch(`${appUrl}/api/books/${book.id}/agent/threads/${thread.id}/messages`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', cookie: cookieA },
+      body: JSON.stringify({
+        content: '在无任何输出前立刻停止',
+        baseVersion: book.currentVersion,
+        model: 'mock-slow-empty',
+        approvalMode: 'ask',
+      }),
+      signal: emptyAc.signal,
+    })
+    expect(emptyRes.status).toBe(200)
+    const emptyReader = emptyRes.body!.getReader()
+    const readPending = emptyReader.read().catch(() => null)
+    await new Promise((r) => setTimeout(r, 50))
+    emptyAc.abort()
+    await readPending
+    await new Promise((r) => setTimeout(r, 500))
+    expect(slowEmptyAborted).toBe(true)
+
+    const afterEmptyAbort = (await (
+      await fetch(`${appUrl}/api/books/${book.id}/agent/threads/${thread.id}`, { headers: { cookie: cookieA } })
+    ).json()) as {
+      messages: Array<{ role: string; content: string }>
+    }
+    // Prior 4 messages (2 turns) + only the 1 new user message (no empty assistant bubble)
+    expect(afterEmptyAbort.messages).toHaveLength(5)
+    expect(afterEmptyAbort.messages.at(-1)?.role).toBe('user')
   })
 })
