@@ -7,7 +7,6 @@ export interface AgentTurnContext {
 }
 
 export interface BuildSystemPromptOptions {
-  context?: AgentTurnContext
   approvalMode?: AgentApprovalMode
   customInstructions?: string
 }
@@ -15,19 +14,16 @@ export interface BuildSystemPromptOptions {
 const MAX_SELECTION_CHARS = 4000
 export const MAX_CUSTOM_INSTRUCTIONS_CHARS = 4000
 
+/**
+ * Builds the session-stable system prompt for an EPUB book.
+ * Per-turn volatile editor state (active page path, text selection) is intentionally excluded
+ * so switching pages or selections never invalidates prompt-cache prefixes.
+ */
 export function buildSystemPrompt(
   pkg: EpubPackage,
-  contextOrOptions?: AgentTurnContext | BuildSystemPromptOptions,
+  options: BuildSystemPromptOptions = {},
 ): string {
-  const options: BuildSystemPromptOptions =
-    contextOrOptions &&
-    ('context' in contextOrOptions ||
-      'approvalMode' in contextOrOptions ||
-      'customInstructions' in contextOrOptions)
-      ? (contextOrOptions as BuildSystemPromptOptions)
-      : { context: contextOrOptions as AgentTurnContext | undefined }
-
-  const { context, approvalMode = 'review', customInstructions } = options
+  const { approvalMode = 'review', customInstructions } = options
 
   const modeRule =
     approvalMode === 'ask'
@@ -45,6 +41,7 @@ export function buildSystemPrompt(
     '3. 自动纠错：写工具会即时校验 XML 良构性；若工具返回 XML 错误或匹配失败，先读回上下文并自行修正后再结束本轮。',
     modeRule,
     '5. 简洁直接：默认使用中文，回答直奔结论和具体行号/文件名。',
+    '6. 轮次上下文：每条用户消息前可能附带 `<current_context>` 块，标明用户在该轮提问时正在查看的文件与选中的文本片段；若用户未另行指定文件，优先以该轮附带的上下文为准。',
     '',
     '## 当前书籍',
     `- 书名：${pkg.metadata.title || '未命名'}`,
@@ -55,19 +52,47 @@ export function buildSystemPrompt(
     `- 正文章节数：${pkg.spine.length}`,
   ]
 
-  if (context?.activePath) {
-    lines.push(`- 用户当前正在查看的文件：${context.activePath}`)
-  }
-  if (context?.selection && context.selection.trim()) {
-    const snippet = context.selection.slice(0, MAX_SELECTION_CHARS)
-    const truncated = context.selection.length > MAX_SELECTION_CHARS ? '\n...(已截断)' : ''
-    lines.push('', '## 用户选中的文本片段', '```', `${snippet}${truncated}`, '```')
-  }
-
   const trimmedCustom = customInstructions?.trim()
   if (trimmedCustom) {
     lines.push('', '## 用户自定义附加指令', trimmedCustom.slice(0, MAX_CUSTOM_INSTRUCTIONS_CHARS))
   }
 
+  return lines.join('\n')
+}
+
+function codeFenceFor(text: string): string {
+  let longest = 0
+  for (const match of text.matchAll(/`+/g)) {
+    if (match[0].length > longest) longest = match[0].length
+  }
+  return '`'.repeat(Math.max(3, longest + 1))
+}
+
+/**
+ * Formats a user message with its per-turn editor context (active file & selection).
+ * Used identically for both the active turn and replayed history turns so conversation
+ * prefixes stay byte-identical across page switches.
+ */
+export function formatUserMessageWithContext(
+  content: string,
+  context?: AgentTurnContext | null,
+): string {
+  const activePath = context?.activePath?.trim() || ''
+  const rawSelection = context?.selection ?? ''
+  const hasSelection = rawSelection.trim().length > 0
+  if (!activePath && !hasSelection) return content
+
+  const lines: string[] = ['<current_context>']
+  if (activePath) {
+    lines.push(`当前正在查看的文件：${activePath}`)
+  }
+  if (hasSelection) {
+    const snippet = rawSelection.slice(0, MAX_SELECTION_CHARS)
+    const truncated = rawSelection.length > MAX_SELECTION_CHARS ? '\n...(已截断)' : ''
+    const body = `${snippet}${truncated}`
+    const fence = codeFenceFor(body)
+    lines.push('用户选中的文本片段：', fence, body, fence)
+  }
+  lines.push('</current_context>', '', content)
   return lines.join('\n')
 }

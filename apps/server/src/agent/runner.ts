@@ -11,7 +11,7 @@ import { stepCountIs, streamText, tool, type ModelMessage } from 'ai'
 import { z } from 'zod'
 import { nodeCheckXml, nodeXmlCodec } from './nodeXmlCodec'
 import { classifyProviderError, createLanguageModel, type ResolvedProviderConfig } from './providers'
-import { buildSystemPrompt, type AgentTurnContext } from './systemPrompt'
+import { buildSystemPrompt, formatUserMessageWithContext, type AgentTurnContext } from './systemPrompt'
 
 /**
  * Server-side multi-step Agent turn executor bridging Vercel AI SDK `streamText`
@@ -40,6 +40,7 @@ export function normalizeMaxToolSteps(value: number | null | undefined): number 
 export interface HistoryTurn {
   role: 'user' | 'assistant'
   content: string
+  context?: AgentTurnContext | null
 }
 
 export interface ToolCallSummary {
@@ -88,8 +89,9 @@ export function trimHistory(history: HistoryTurn[], budget = HISTORY_CHAR_BUDGET
   let chars = 0
   for (let index = history.length - 1; index >= 0; index -= 1) {
     const turn = history[index]!
-    const text = turn.content.trim()
-    if (!text) continue
+    const trimmed = turn.content.trim()
+    if (!trimmed) continue
+    const text = turn.role === 'user' ? formatUserMessageWithContext(trimmed, turn.context) : trimmed
     if (kept.length > 0 && chars + text.length > budget) break
     kept.push({ role: turn.role, content: text })
     chars += text.length
@@ -424,16 +426,20 @@ export async function runAgentTurn(options: RunAgentTurnOptions): Promise<RunAge
 
   try {
     const model = createLanguageModel(options.provider)
+    const trimmedUserMessage = options.userMessage.trim()
+    const currentUserContent = formatUserMessageWithContext(
+      trimmedUserMessage || options.userMessage,
+      options.context,
+    )
     const messages: ModelMessage[] = [
       ...trimHistory(options.history),
-      { role: 'user', content: options.userMessage },
+      { role: 'user', content: currentUserContent },
     ]
 
     const maxSteps = normalizeMaxToolSteps(options.maxSteps)
     const result = streamText({
       model,
       system: buildSystemPrompt(workspace.getPackage(), {
-        context: options.context,
         approvalMode,
         customInstructions: options.customInstructions,
       }),

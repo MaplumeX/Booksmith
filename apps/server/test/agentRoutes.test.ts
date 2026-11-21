@@ -57,6 +57,7 @@ describe('agent REST & SSE routes', () => {
   let lastSeenModel: string | null = null
   let lastSeenSystem: string | null = null
   let lastSeenToolCount = 0
+  let capturedChatMessages: Array<Array<{ role?: string; content?: string }>> = []
   let store: ReturnType<typeof createDb>
 
   beforeAll(async () => {
@@ -81,6 +82,9 @@ describe('agent REST & SSE routes', () => {
         const msgs = Array.isArray(body.messages) ? (body.messages as Array<{ role?: string; content?: string }>) : []
         lastSeenSystem = msgs.find((m) => m.role === 'system')?.content ?? null
         lastSeenToolCount = Array.isArray(body.tools) ? body.tools.length : 0
+        if (body.stream === true) {
+          capturedChatMessages.push(msgs)
+        }
 
         if (body.stream !== true) {
           res.writeHead(200, { 'content-type': 'application/json' })
@@ -638,5 +642,95 @@ describe('agent REST & SSE routes', () => {
     expect(afterRetry.messages[1]!.reasoning).toBeNull()
     expect(afterRetry.thread.model).toBe('mock-retry-ok')
     expect(afterRetry.thread.approvalMode).toBe('auto')
+  })
+
+  it('preserves system prompt across page switches and replays stored per-turn context without mutating persisted message text', async () => {
+    const loginA = await fetch(`${appUrl}/api/auth/login`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ email: emailA, password: 'strong-password-123' }),
+    })
+    const cookieA = (loginA.headers.getSetCookie?.()[0] ?? '').split(';')[0]!
+
+    const uploadRes = await fetch(`${appUrl}/api/books`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/epub+zip', cookie: cookieA },
+      body: Buffer.from(createEmptyEpub({ title: '切页缓存稳定书' })),
+    })
+    expect(uploadRes.status).toBe(201)
+    const { book } = (await uploadRes.json()) as { book: { id: string; currentVersion: number } }
+
+    const createThreadRes = await fetch(`${appUrl}/api/books/${book.id}/agent/threads`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', cookie: cookieA },
+      body: JSON.stringify({ model: 'mock-retry-ok', approvalMode: 'ask' }),
+    })
+    expect(createThreadRes.status).toBe(201)
+    const { thread } = (await createThreadRes.json()) as { thread: { id: string } }
+
+    capturedChatMessages = []
+
+    const turn1Res = await fetch(`${appUrl}/api/books/${book.id}/agent/threads/${thread.id}/messages`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', cookie: cookieA },
+      body: JSON.stringify({
+        content: '帮我看第一页的标点',
+        baseVersion: book.currentVersion,
+        model: 'mock-retry-ok',
+        approvalMode: 'ask',
+        context: { activePath: 'EPUB/text/ch001.xhtml', selection: '第一页摘录' },
+      }),
+    })
+    expect(turn1Res.status).toBe(200)
+    await turn1Res.text()
+
+    const turn2Res = await fetch(`${appUrl}/api/books/${book.id}/agent/threads/${thread.id}/messages`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', cookie: cookieA },
+      body: JSON.stringify({
+        content: '帮我看第二页的标题',
+        baseVersion: book.currentVersion,
+        model: 'mock-retry-ok',
+        approvalMode: 'ask',
+        context: { activePath: 'EPUB/text/ch002.xhtml', selection: '第二页摘录' },
+      }),
+    })
+    expect(turn2Res.status).toBe(200)
+    await turn2Res.text()
+
+    expect(capturedChatMessages).toHaveLength(2)
+    const [req1, req2] = capturedChatMessages as [
+      Array<{ role?: string; content?: string }>,
+      Array<{ role?: string; content?: string }>,
+    ]
+    const sys1 = req1.find((m) => m.role === 'system')?.content ?? ''
+    const sys2 = req2.find((m) => m.role === 'system')?.content ?? ''
+    expect(sys1).toBe(sys2)
+    expect(sys1).not.toContain('ch001.xhtml')
+    expect(sys1).not.toContain('ch002.xhtml')
+
+    // Turn 1's user message is replayed identically on Turn 2
+    expect(req2[1]).toEqual(req1[1])
+    expect(req1[1]?.content).toContain('EPUB/text/ch001.xhtml')
+    expect(req1[1]?.content).toContain('第一页摘录')
+    expect(req2[3]?.content).toContain('EPUB/text/ch002.xhtml')
+    expect(req2[3]?.content).toContain('第二页摘录')
+
+    // Persisted user messages keep clean raw text and structured context separately for UI rendering
+    const detailRes = await fetch(`${appUrl}/api/books/${book.id}/agent/threads/${thread.id}`, {
+      headers: { cookie: cookieA },
+    })
+    expect(detailRes.status).toBe(200)
+    const detail = (await detailRes.json()) as {
+      messages: Array<{
+        role: string
+        content: string
+        context: { activePath?: string | null; selection?: string | null } | null
+      }>
+    }
+    expect(detail.messages[0]?.content).toBe('帮我看第一页的标点')
+    expect(detail.messages[0]?.context).toEqual({ activePath: 'EPUB/text/ch001.xhtml', selection: '第一页摘录' })
+    expect(detail.messages[2]?.content).toBe('帮我看第二页的标题')
+    expect(detail.messages[2]?.context).toEqual({ activePath: 'EPUB/text/ch002.xhtml', selection: '第二页摘录' })
   })
 })

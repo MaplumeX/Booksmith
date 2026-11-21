@@ -22,9 +22,10 @@ import {
   runAgentTurn,
   type AgentApprovalMode,
   type AgentStreamEvent,
+  type HistoryTurn,
   type ToolCallSummary,
 } from '../agent/runner'
-import { MAX_CUSTOM_INSTRUCTIONS_CHARS } from '../agent/systemPrompt'
+import { MAX_CUSTOM_INSTRUCTIONS_CHARS, type AgentTurnContext } from '../agent/systemPrompt'
 import type { Config } from '../config'
 import type { Db } from '../db/client'
 import {
@@ -803,8 +804,8 @@ export function registerAgentRoutes(app: FastifyInstance, deps: AgentDeps): void
     thread: AgentThread
     body: Record<string, unknown>
     userMessage: string
-    context: { activePath?: string | null; selection?: string | null } | undefined
-    history: Array<{ role: 'user' | 'assistant'; content: string }>
+    context: AgentTurnContext | undefined
+    history: HistoryTurn[]
     nextTitle: string
     persistUserMessage: boolean
     replaceMessageId?: string
@@ -1041,17 +1042,28 @@ export function registerAgentRoutes(app: FastifyInstance, deps: AgentDeps): void
         : undefined
 
       const priorMessages = await db
-        .select({ role: agentMessages.role, content: agentMessages.content })
+        .select({
+          role: agentMessages.role,
+          content: agentMessages.content,
+          contextJson: agentMessages.contextJson,
+        })
         .from(agentMessages)
         .where(eq(agentMessages.threadId, thread.id))
         .orderBy(asc(agentMessages.createdAt), asc(agentMessages.id))
 
-      // History intentionally omits stored reasoning traces to preserve the 24k char sliding window.
+      // History intentionally omits stored reasoning traces to preserve the 24k char sliding window,
+      // while replaying each user turn's saved page/selection context verbatim so conversation prefixes stay cache-stable.
       // See ADR 2026-11-20-agent-modes-and-multimodel.
-      const history = priorMessages.map((row) => ({
-        role: (row.role === 'assistant' ? 'assistant' : 'user') as 'user' | 'assistant',
-        content: row.content,
-      }))
+      const history: HistoryTurn[] = priorMessages.map((row) => {
+        const role = (row.role === 'assistant' ? 'assistant' : 'user') as 'user' | 'assistant'
+        return {
+          role,
+          content: row.content,
+          ...(role === 'user'
+            ? { context: safeJsonParse<AgentTurnContext | null>(row.contextJson, null) }
+            : {}),
+        }
+      })
 
       const nextTitle =
         priorMessages.length === 0 && thread.title === '新对话' ? autoTitleFromPrompt(content) : thread.title
@@ -1122,11 +1134,17 @@ export function registerAgentRoutes(app: FastifyInstance, deps: AgentDeps): void
       }
 
       const userTurn = allMessages[userTurnIndex]!
-      const history = allMessages.slice(0, userTurnIndex).map((row) => ({
-        role: (row.role === 'assistant' ? 'assistant' : 'user') as 'user' | 'assistant',
-        content: row.content,
-      }))
-      const savedContext = safeJsonParse<{ activePath?: string | null; selection?: string | null } | null>(
+      const history: HistoryTurn[] = allMessages.slice(0, userTurnIndex).map((row) => {
+        const role = (row.role === 'assistant' ? 'assistant' : 'user') as 'user' | 'assistant'
+        return {
+          role,
+          content: row.content,
+          ...(role === 'user'
+            ? { context: safeJsonParse<AgentTurnContext | null>(row.contextJson, null) }
+            : {}),
+        }
+      })
+      const savedContext = safeJsonParse<AgentTurnContext | null>(
         userTurn.contextJson,
         null,
       )
