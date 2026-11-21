@@ -53,10 +53,12 @@ import {
 } from '../state/agentTimeline'
 import { basename } from '../state/bookStore'
 import {
+  applyProposalDelta,
   buildComposedProposalPlan,
   buildFileHunks,
   validateComposedProposal,
   type FileDiffModel,
+  type ProposalHunkDecisions,
 } from '../state/proposalReview'
 import { AgentMarkdown } from './AgentMarkdown'
 import { AgentProposalCard } from './AgentProposalCard'
@@ -88,8 +90,9 @@ interface AgentPanelProps {
   defaultApprovalMode?: AgentApprovalMode
   undoMessageId: string | null
   activeReview: ActiveReviewRef | null
-  skippedHunksByMessage: Readonly<Record<string, Readonly<Record<string, ReadonlySet<string>>>>>
+  decisionsByMessage: Readonly<Record<string, ProposalHunkDecisions>>
   proposalStatusSync?: ProposalStatusSyncEvent | null
+  stopLiveTurnRef?: React.MutableRefObject<(() => void) | null>
   getOverlay: () => { dirtyTexts: Record<string, string>; deletedPaths: string[] }
   onOpenSettings: () => void
   onClose?: () => void
@@ -99,6 +102,19 @@ interface AgentPanelProps {
     proposal: AgentProposal
     path?: string
     readOnly?: boolean
+    isLive?: boolean
+    autoDowngradeReason?: string | null
+  }) => void
+  onLiveProposalUpdate: (args: {
+    liveKey: string
+    proposal: AgentProposal | null
+    focusPath: string | null
+  }) => void
+  onLiveProposalSettle: (args: {
+    liveKey: string
+    messageId: string
+    proposal: AgentProposal | null
+    autoOpen: boolean
     autoDowngradeReason?: string | null
   }) => void
   onCloseProposalReview: (messageId?: string) => void
@@ -112,6 +128,8 @@ interface AgentPanelProps {
 }
 
 interface StreamingState {
+  liveKey: string
+  approvalMode: AgentApprovalMode
   content: string
   reasoning: string
   timeline: AgentTimelineItem[]
@@ -456,13 +474,16 @@ export function AgentPanel({
   defaultApprovalMode = 'review',
   undoMessageId,
   activeReview,
-  skippedHunksByMessage,
+  decisionsByMessage,
   proposalStatusSync,
+  stopLiveTurnRef,
   getOverlay,
   onOpenSettings,
   onClose,
   onReloadBook,
   onOpenProposalReview,
+  onLiveProposalUpdate,
+  onLiveProposalSettle,
   onCloseProposalReview,
   onApplyProposal,
   onDismissProposal,
@@ -494,16 +515,53 @@ export function AgentPanel({
   const [autoAppliedIds, setAutoAppliedIds] = useState<Set<string>>(() => new Set())
   const [downgradeReasons, setDowngradeReasons] = useState<Record<string, string>>({})
 
-  const abortRef = useRef<{ controller: AbortController; bookId: string; threadId: string } | null>(null)
+  const abortRef = useRef<{
+    controller: AbortController
+    bookId: string
+    threadId: string
+    fallbackTimer: ReturnType<typeof setTimeout> | null
+    softStopping: boolean
+  } | null>(null)
   const scrollRef = useRef<HTMLDivElement>(null)
   const textareaRef = useRef<HTMLTextAreaElement>(null)
 
+  // Soft-stop signals the server via POST /abort while keeping the SSE stream open briefly so
+  // review mode receives the preserved partial proposal and persisted messageId; falls back to
+  // hard abort after 3s if the stream stalls. See ADR 2026-11-22-live-streaming-agent-review.
   const stopActiveTurn = useCallback(() => {
     const active = abortRef.current
+    if (!active || active.softStopping) return
+    active.softStopping = true
+    active.fallbackTimer = setTimeout(() => {
+      active.controller.abort()
+    }, 3000)
+    void api.abortAgentThread(active.bookId, active.threadId).catch(() => {
+      if (active.fallbackTimer) {
+        clearTimeout(active.fallbackTimer)
+        active.fallbackTimer = null
+      }
+      active.controller.abort()
+    })
+  }, [])
+
+  const hardAbortActiveTurn = useCallback(() => {
+    const active = abortRef.current
     if (!active) return
+    if (active.fallbackTimer) {
+      clearTimeout(active.fallbackTimer)
+      active.fallbackTimer = null
+    }
     active.controller.abort()
     void api.abortAgentThread(active.bookId, active.threadId).catch(() => {})
   }, [])
+
+  useEffect(() => {
+    if (!stopLiveTurnRef) return
+    stopLiveTurnRef.current = stopActiveTurn
+    return () => {
+      if (stopLiveTurnRef.current === stopActiveTurn) stopLiveTurnRef.current = null
+    }
+  }, [stopLiveTurnRef, stopActiveTurn])
 
   // Keep selectedProfileId & selectedModel synced with available profiles & multi-model lists.
   useEffect(() => {
@@ -599,9 +657,9 @@ export function AgentPanel({
   useEffect(() => {
     void loadThreads()
     return () => {
-      stopActiveTurn()
+      hardAbortActiveTurn()
     }
-  }, [bookId, stopActiveTurn])
+  }, [bookId, hardAbortActiveTurn])
 
   useEffect(() => {
     const el = scrollRef.current
@@ -790,16 +848,16 @@ export function AgentPanel({
       return [...current, finalized]
     })
 
-    // Automatically open the main-canvas book-page review when a new pending proposal arrives
-    // (including auto-mode proposals downgraded for manual review). See ADR 2026-11-21-in-canvas-agent-proposal-review.
-    if (draft.proposal && !streamError && proposalStatus === 'pending') {
-      onOpenProposalReview({
-        messageId,
-        proposal: draft.proposal,
-        readOnly: false,
-        autoDowngradeReason: downgradeReason,
-      })
-    }
+    // Settle live streaming review (migrating user decisions from liveKey -> real messageId)
+    // or open the main-canvas review when a new pending proposal arrives (including downgraded auto mode).
+    // See ADR 2026-11-21-in-canvas-agent-proposal-review, ADR 2026-11-22-live-streaming-agent-review.
+    onLiveProposalSettle({
+      liveKey: draft.liveKey,
+      messageId,
+      proposal: !streamError && proposalStatus === 'pending' ? draft.proposal : null,
+      autoOpen: Boolean(draft.proposal && !streamError && proposalStatus === 'pending'),
+      autoDowngradeReason: downgradeReason,
+    })
   }
 
   const sendPrompt = async (promptText: string) => {
@@ -849,9 +907,12 @@ export function AgentPanel({
     setMessages((current) => [...current, optimisticUser])
 
     const controller = new AbortController()
-    abortRef.current = { controller, bookId, threadId }
+    abortRef.current = { controller, bookId, threadId, fallbackTimer: null, softStopping: false }
 
+    const liveKey = `__live__:${Date.now()}`
     const draft: StreamingState = {
+      liveKey,
+      approvalMode: effectiveMode,
       content: '',
       reasoning: '',
       timeline: [],
@@ -869,12 +930,14 @@ export function AgentPanel({
     let streamStopped = false
     let streamError: { code: string; message: string } | null = null
 
-    const commitStoppedNewMessage = () => {
-      if (draft.content || draft.reasoning || draft.toolCalls.length > 0) {
+    const commitStoppedNewMessage = (preserveProposal: boolean) => {
+      const keptProposal = preserveProposal && effectiveMode === 'review' ? draft.proposal : null
+      const resolvedId = finalMessageId ?? `stopped-${Date.now()}`
+      if (draft.content || draft.reasoning || draft.toolCalls.length > 0 || keptProposal) {
         setMessages((current) => [
           ...current,
           {
-            id: finalMessageId ?? `stopped-${Date.now()}`,
+            id: resolvedId,
             threadId: threadId!,
             role: 'assistant',
             content: draft.content || '已停止生成。',
@@ -882,14 +945,20 @@ export function AgentPanel({
             context: null,
             timeline: draft.timeline,
             toolCalls: draft.toolCalls,
-            proposal: null,
-            proposalStatus: null,
+            proposal: keptProposal,
+            proposalStatus: keptProposal ? 'pending' : null,
             compactionNotice: draft.compactionNotice,
             error: null,
             createdAt: new Date().toISOString(),
           },
         ])
       }
+      onLiveProposalSettle({
+        liveKey,
+        messageId: resolvedId,
+        proposal: keptProposal,
+        autoOpen: Boolean(keptProposal),
+      })
     }
 
     try {
@@ -942,6 +1011,14 @@ export function AgentPanel({
               draft.toolCalls = [...draft.toolCalls, completedCall]
               draft.timeline = [...draft.timeline, { type: 'tool', ...completedCall }]
               setStreaming({ ...draft })
+            } else if (event.type === 'proposal_update') {
+              draft.proposal = applyProposalDelta(draft.proposal, event.delta)
+              setStreaming({ ...draft })
+              onLiveProposalUpdate({
+                liveKey,
+                proposal: draft.proposal,
+                focusPath: event.delta.focusPath,
+              })
             } else if (event.type === 'proposal') {
               draft.proposal = event.proposal
               setStreaming({ ...draft })
@@ -986,7 +1063,7 @@ export function AgentPanel({
       )
 
       if (controller.signal.aborted || streamStopped) {
-        commitStoppedNewMessage()
+        commitStoppedNewMessage(streamStopped && Boolean(finalMessageId))
       } else {
         await finalizeAssistantTurn({
           threadId,
@@ -998,7 +1075,7 @@ export function AgentPanel({
       }
     } catch (cause) {
       if (controller.signal.aborted) {
-        commitStoppedNewMessage()
+        commitStoppedNewMessage(false)
       } else if (cause instanceof ApiError) {
         const payload = cause.payload as { message?: string } | undefined
         setPanelError({
@@ -1007,10 +1084,15 @@ export function AgentPanel({
         })
         setMessages((current) => current.filter((m) => m.id !== optimisticUser.id))
         setInput(text)
+        onLiveProposalSettle({ liveKey, messageId: liveKey, proposal: null, autoOpen: false })
       } else {
         setPanelError({ code: 'network_error', message: '流式连接中断，请稍后重试。' })
+        onLiveProposalSettle({ liveKey, messageId: liveKey, proposal: null, autoOpen: false })
       }
     } finally {
+      if (abortRef.current?.fallbackTimer) {
+        clearTimeout(abortRef.current.fallbackTimer)
+      }
       abortRef.current = null
       setStreaming(null)
     }
@@ -1029,9 +1111,18 @@ export function AgentPanel({
 
     const effectiveMode = approvalMode
     const controller = new AbortController()
-    abortRef.current = { controller, bookId, threadId: activeThreadId }
+    abortRef.current = {
+      controller,
+      bookId,
+      threadId: activeThreadId,
+      fallbackTimer: null,
+      softStopping: false,
+    }
 
+    const liveKey = messageId
     const draft: StreamingState = {
+      liveKey,
+      approvalMode: effectiveMode,
       content: '',
       reasoning: '',
       timeline: [],
@@ -1049,8 +1140,10 @@ export function AgentPanel({
     let streamStopped = false
     let streamError: { code: string; message: string } | null = null
 
-    const commitStoppedRetryMessage = () => {
-      if (draft.content || draft.reasoning || draft.toolCalls.length > 0) {
+    const commitStoppedRetryMessage = (preserveProposal: boolean) => {
+      const keptProposal = preserveProposal && effectiveMode === 'review' ? draft.proposal : null
+      const resolvedId = finalMessageId ?? messageId
+      if (draft.content || draft.reasoning || draft.toolCalls.length > 0 || keptProposal) {
         setMessages((current) =>
           current.map((m) =>
             m.id === messageId
@@ -1060,8 +1153,8 @@ export function AgentPanel({
                   reasoning: draft.reasoning.trim() ? draft.reasoning : null,
                   timeline: draft.timeline,
                   toolCalls: draft.toolCalls,
-                  proposal: null,
-                  proposalStatus: null,
+                  proposal: keptProposal,
+                  proposalStatus: keptProposal ? 'pending' : null,
                   compactionNotice: draft.compactionNotice,
                   error: null,
                 }
@@ -1069,6 +1162,12 @@ export function AgentPanel({
           ),
         )
       }
+      onLiveProposalSettle({
+        liveKey,
+        messageId: resolvedId,
+        proposal: keptProposal,
+        autoOpen: Boolean(keptProposal),
+      })
     }
 
     try {
@@ -1120,6 +1219,14 @@ export function AgentPanel({
               draft.toolCalls = [...draft.toolCalls, completedCall]
               draft.timeline = [...draft.timeline, { type: 'tool', ...completedCall }]
               setStreaming({ ...draft })
+            } else if (event.type === 'proposal_update') {
+              draft.proposal = applyProposalDelta(draft.proposal, event.delta)
+              setStreaming({ ...draft })
+              onLiveProposalUpdate({
+                liveKey,
+                proposal: draft.proposal,
+                focusPath: event.delta.focusPath,
+              })
             } else if (event.type === 'proposal') {
               draft.proposal = event.proposal
               setStreaming({ ...draft })
@@ -1163,7 +1270,7 @@ export function AgentPanel({
       )
 
       if (controller.signal.aborted || streamStopped) {
-        commitStoppedRetryMessage()
+        commitStoppedRetryMessage(streamStopped && Boolean(finalMessageId))
       } else {
         await finalizeAssistantTurn({
           threadId: activeThreadId,
@@ -1176,17 +1283,22 @@ export function AgentPanel({
       }
     } catch (cause) {
       if (controller.signal.aborted) {
-        commitStoppedRetryMessage()
+        commitStoppedRetryMessage(false)
       } else if (cause instanceof ApiError) {
         const payload = cause.payload as { message?: string } | undefined
         setPanelError({
           code: cause.code,
           message: payload?.message ?? `重试失败（${cause.code}）`,
         })
+        onLiveProposalSettle({ liveKey, messageId, proposal: null, autoOpen: false })
       } else {
         setPanelError({ code: 'network_error', message: '重试连接中断，请稍后重试。' })
+        onLiveProposalSettle({ liveKey, messageId, proposal: null, autoOpen: false })
       }
     } finally {
+      if (abortRef.current?.fallbackTimer) {
+        clearTimeout(abortRef.current.fallbackTimer)
+      }
       abortRef.current = null
       setStreaming(null)
     }
@@ -1653,12 +1765,16 @@ export function AgentPanel({
 
                       {/* Slimmed summary card navigates directly into the main-canvas ProposalReviewPane. See ADR 2026-11-21-in-canvas-agent-proposal-review. */}
                       {msg.proposal && msg.proposalStatus ? (() => {
-                        const msgSkipped = skippedHunksByMessage[msg.id] ?? {}
+                        const msgDecisions = decisionsByMessage[msg.id] ?? {}
                         let xmlBlocked = false
-                        if (msg.proposalStatus === 'pending' && !msg.proposal.isStructural && Object.keys(msgSkipped).length > 0) {
+                        if (
+                          msg.proposalStatus === 'pending' &&
+                          !msg.proposal.isStructural &&
+                          Object.keys(msgDecisions).length > 0
+                        ) {
                           const models = new Map<string, FileDiffModel>()
                           for (const file of msg.proposal.files) models.set(file.path, buildFileHunks(file))
-                          const plan = buildComposedProposalPlan(msg.proposal, models, msgSkipped)
+                          const plan = buildComposedProposalPlan(msg.proposal, models, msgDecisions)
                           xmlBlocked = validateComposedProposal(msg.proposal, plan).length > 0
                         }
                         const isReviewingThis = activeReview?.messageId === msg.id
@@ -1672,7 +1788,7 @@ export function AgentPanel({
                             autoDowngradeReason={downgradeReasons[msg.id] ?? null}
                             isReviewing={isReviewingThis}
                             activeReviewPath={isReviewingThis ? activeReview.selectedPath : null}
-                            skippedByPath={msgSkipped}
+                            decisionsByPath={msgDecisions}
                             xmlBlocked={xmlBlocked}
                             onOpenReview={(targetPath) =>
                               onOpenProposalReview({
@@ -1699,6 +1815,7 @@ export function AgentPanel({
                     runningTools: streaming.runningTools,
                     isStreaming: true,
                   })
+                  const isReviewingLive = activeReview?.messageId === streaming.liveKey
                   return (
                     <article className="agent-turn is-assistant is-streaming" aria-live="polite">
                       {streaming.compactionNotice ? <CompactionDivider notice={streaming.compactionNotice} /> : null}
@@ -1707,6 +1824,31 @@ export function AgentPanel({
                         <div className="agent-reply is-streaming" data-testid="agent-assistant-reply">
                           <AgentMarkdown content={streamView.finalText} />
                         </div>
+                      ) : null}
+                      {streaming.approvalMode === 'review' &&
+                      streaming.proposal &&
+                      streaming.proposal.files.length > 0 ? (
+                        <AgentProposalCard
+                          proposal={streaming.proposal}
+                          status="pending"
+                          isLive
+                          canUndo={false}
+                          isReviewing={isReviewingLive}
+                          activeReviewPath={isReviewingLive ? activeReview.selectedPath : null}
+                          decisionsByPath={decisionsByMessage[streaming.liveKey] ?? {}}
+                          onOpenReview={(targetPath) =>
+                            onOpenProposalReview({
+                              messageId: streaming.liveKey,
+                              proposal: streaming.proposal!,
+                              path: targetPath,
+                              readOnly: false,
+                              isLive: true,
+                            })
+                          }
+                          onApply={() => {}}
+                          onDismiss={() => {}}
+                          onUndo={() => {}}
+                        />
                       ) : null}
                     </article>
                   )

@@ -152,6 +152,19 @@ export interface AgentProposal {
   files: AgentProposalFile[]
 }
 
+/**
+ * Incremental proposal delta emitted after each successful write tool in `review` mode so
+ * large chapters are not re-serialized on every step.
+ * See ADR 2026-11-22-live-streaming-agent-review.
+ */
+export interface AgentProposalDelta {
+  proposalId: string
+  isStructural: boolean
+  changedFiles: AgentProposalFile[]
+  removedPaths: string[]
+  focusPath: string | null
+}
+
 export interface AgentToolResult {
   ok: boolean
   data?: unknown
@@ -1730,11 +1743,15 @@ export class AgentWorkspace {
   /**
    * Compiles the net changes accumulated during a turn into a reviewable proposal.
    * Returns null when the Agent made no net changes (or made no new writes after seeding a pending proposal).
+   * Pass `validate: false` during mid-turn live streaming to skip full-book `validateStructure`
+   * until turn settlement; every write tool already validates XML on write.
+   * See ADR 2026-11-22-live-streaming-agent-review.
    */
-  buildProposal(id: string): AgentProposal | null {
+  buildProposal(id: string, options?: { validate?: boolean }): AgentProposal | null {
     if (this.seededPendingProposal && !this.mutatedSinceSeed) {
       return null
     }
+    const shouldValidate = options?.validate !== false
     const files: AgentProposalFile[] = []
     const survivingOrigins = new Set<string>()
 
@@ -1789,16 +1806,18 @@ export class AgentWorkspace {
 
     if (files.length === 0) return null
 
-    const validationIssues = validateStructure(this.archive, this.pkg)
-    for (const file of files) {
-      if (file.kind === 'delete' || file.afterText === undefined) continue
-      const xmlError = this.validateTextIfXml(file.path, file.afterText)
-      if (xmlError) {
-        validationIssues.push({
-          code: 'invalid-xml',
-          message: `${basenameOf(file.path)} XML 语法错误：${xmlError}`,
-          path: file.path,
-        })
+    const validationIssues: EpubIssue[] = shouldValidate ? validateStructure(this.archive, this.pkg) : []
+    if (shouldValidate) {
+      for (const file of files) {
+        if (file.kind === 'delete' || file.afterText === undefined) continue
+        const xmlError = this.validateTextIfXml(file.path, file.afterText)
+        if (xmlError) {
+          validationIssues.push({
+            code: 'invalid-xml',
+            message: `${basenameOf(file.path)} XML 语法错误：${xmlError}`,
+            path: file.path,
+          })
+        }
       }
     }
 
@@ -1812,5 +1831,95 @@ export class AgentWorkspace {
       validationIssues,
       files,
     }
+  }
+}
+
+function proposalFilesEqual(a: AgentProposalFile, b: AgentProposalFile): boolean {
+  if (
+    a.path !== b.path ||
+    a.kind !== b.kind ||
+    a.previousPath !== b.previousPath ||
+    a.beforeText !== b.beforeText ||
+    a.afterText !== b.afterText
+  ) {
+    return false
+  }
+  const refsA = a.referencesAffected ?? []
+  const refsB = b.referencesAffected ?? []
+  if (refsA.length !== refsB.length) return false
+  for (let i = 0; i < refsA.length; i += 1) {
+    if (refsA[i]!.from !== refsB[i]!.from || refsA[i]!.line !== refsB[i]!.line) return false
+  }
+  return true
+}
+
+function focusPriority(path: string, opfPath?: string): number {
+  if (opfPath && path === opfPath) return 4
+  const ext = extensionOf(path)
+  if (ext === 'xhtml' || ext === 'html' || ext === 'htm') return 0
+  if (ext === 'css') return 1
+  if (ext === 'ncx') return 3
+  return 2
+}
+
+/**
+ * Computes an incremental delta between two `AgentProposal` snapshots for real-time review streaming.
+ * Returns null when neither file entries nor structural status changed.
+ * See ADR 2026-11-22-live-streaming-agent-review.
+ */
+export function diffProposalSnapshots(
+  prev: AgentProposal | null,
+  next: AgentProposal | null,
+  options: { proposalId?: string; hintPaths?: readonly string[]; opfPath?: string } = {},
+): AgentProposalDelta | null {
+  const proposalId = next?.id ?? prev?.id ?? options.proposalId ?? ''
+  const prevByPath = new Map((prev?.files ?? []).map((file) => [file.path, file]))
+  const nextByPath = new Map((next?.files ?? []).map((file) => [file.path, file]))
+
+  const changedFiles: AgentProposalFile[] = []
+  for (const file of next?.files ?? []) {
+    const existing = prevByPath.get(file.path)
+    if (!existing || !proposalFilesEqual(existing, file)) {
+      changedFiles.push(file)
+    }
+  }
+
+  const removedPaths: string[] = []
+  for (const file of prev?.files ?? []) {
+    if (!nextByPath.has(file.path)) {
+      removedPaths.push(file.path)
+    }
+  }
+
+  const nextStructural = next?.isStructural ?? false
+  const prevStructural = prev?.isStructural ?? false
+  if (changedFiles.length === 0 && removedPaths.length === 0 && nextStructural === prevStructural) {
+    return null
+  }
+
+  let focusPath: string | null = null
+  if (options.hintPaths && options.hintPaths.length > 0) {
+    const validHints = options.hintPaths.filter((p) => nextByPath.has(p))
+    if (validHints.length > 0) {
+      validHints.sort((a, b) => focusPriority(a, options.opfPath) - focusPriority(b, options.opfPath))
+      focusPath = validHints[0] ?? null
+    }
+  }
+  if (!focusPath && changedFiles.length > 0) {
+    const sorted = [...changedFiles].sort(
+      (a, b) => focusPriority(a.path, options.opfPath) - focusPriority(b.path, options.opfPath),
+    )
+    focusPath = sorted[0]?.path ?? null
+  }
+  if (!focusPath && next && next.files.length > 0) {
+    focusPath = next.files[0]?.path ?? null
+  }
+
+  return {
+    proposalId,
+    isStructural: nextStructural,
+    changedFiles,
+    removedPaths,
+    focusPath,
   }
 }

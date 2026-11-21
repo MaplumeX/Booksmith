@@ -7,32 +7,39 @@ import {
   ChevronRight,
   Eye,
   FileDiff,
+  Loader2,
   RotateCcw,
   XCircle,
 } from 'lucide-react'
 import { useMemo } from 'react'
 import type { AgentProposalStatus } from '../api/client'
 import { basename } from '../state/bookStore'
-import { buildComposedProposalPlan, buildFileHunks, type FileDiffModel } from '../state/proposalReview'
+import {
+  buildComposedProposalPlan,
+  buildFileHunks,
+  type FileDiffModel,
+  type ProposalHunkDecisions,
+} from '../state/proposalReview'
 import { Button } from './Button'
 
 /**
- * Slimmed sidebar summary & navigation card for an Agent proposal.
+ * Slimmed sidebar summary & navigation card for an Agent proposal (both live streaming & settled).
  * Full book-page revision, final preview, and source diffs live in the main canvas `ProposalReviewPane`
  * rather than squeezing code diffs into the narrow sidebar.
- * See ADR 2026-11-21-in-canvas-agent-proposal-review, ADR 2026-11-21-agent-session-continuity.
+ * See ADR 2026-11-21-in-canvas-agent-proposal-review, ADR 2026-11-22-live-streaming-agent-review.
  */
 
 interface AgentProposalCardProps {
   proposal: AgentProposal
   status: AgentProposalStatus
   canUndo: boolean
+  isLive?: boolean
   busy?: boolean
   autoApplied?: boolean
   autoDowngradeReason?: string | null
   isReviewing?: boolean
   activeReviewPath?: string | null
-  skippedByPath?: Readonly<Record<string, ReadonlySet<string>>>
+  decisionsByPath?: ProposalHunkDecisions
   xmlBlocked?: boolean
   onOpenReview?: (path?: string) => void
   onApply: (selectedPaths?: Set<string>) => void
@@ -51,12 +58,13 @@ export function AgentProposalCard({
   proposal,
   status,
   canUndo,
+  isLive = false,
   busy = false,
   autoApplied = false,
   autoDowngradeReason = null,
   isReviewing = false,
   activeReviewPath = null,
-  skippedByPath = {},
+  decisionsByPath = {},
   xmlBlocked = false,
   onOpenReview,
   onApply,
@@ -82,8 +90,8 @@ export function AgentProposalCard({
   }, [modelsByPath])
 
   const plan = useMemo(
-    () => buildComposedProposalPlan(proposal, modelsByPath, skippedByPath),
-    [proposal, modelsByPath, skippedByPath],
+    () => buildComposedProposalPlan(proposal, modelsByPath, decisionsByPath),
+    [proposal, modelsByPath, decisionsByPath],
   )
 
   const hasIssues = proposal.validationIssues.length > 0
@@ -164,13 +172,18 @@ export function AgentProposalCard({
 
   return (
     <section
-      className={`agent-proposal-card${isReviewing ? ' is-reviewing' : ''}`}
-      aria-label="变更提案"
+      className={`agent-proposal-card${isReviewing ? ' is-reviewing' : ''}${isLive ? ' is-live' : ''}`}
+      data-testid={isLive ? 'agent-live-proposal-card' : 'agent-proposal-card'}
+      aria-label={isLive ? '实时变更提案' : '变更提案'}
     >
       <header className="agent-proposal-head">
         <div className="agent-proposal-title">
-          <FileDiff size={13} strokeWidth={1.75} aria-hidden="true" />
-          <span>变更提案 · {proposal.files.length} 个文件</span>
+          {isLive ? (
+            <Loader2 size={13} strokeWidth={1.85} className="spin agent-icon-accent" aria-hidden="true" />
+          ) : (
+            <FileDiff size={13} strokeWidth={1.75} aria-hidden="true" />
+          )}
+          <span>{isLive ? '实时变更' : '变更提案'} · {proposal.files.length} 个文件</span>
           {totalStats.added > 0 || totalStats.removed > 0 ? (
             <span
               className="agent-diff-stats"
@@ -181,7 +194,9 @@ export function AgentProposalCard({
             </span>
           ) : null}
         </div>
-        {isReviewing ? (
+        {isLive ? (
+          <span className="agent-proposal-live-pill">{isReviewing ? '实时审阅中' : '实时更新中'}</span>
+        ) : isReviewing ? (
           <span className="agent-proposal-reviewing-pill">审阅中</span>
         ) : (
           <span className={`agent-proposal-mode${proposal.isStructural ? ' is-structural' : ''}`}>
@@ -282,21 +297,25 @@ export function AgentProposalCard({
             onClick={() => onOpenReview()}
           >
             <BookOpen size={12} strokeWidth={1.8} aria-hidden="true" />
-            <span>{isReviewing ? '定位审阅' : '审阅变更'}</span>
+            <span>{isLive ? (isReviewing ? '正在审阅' : '查看实时审阅') : isReviewing ? '定位审阅' : '审阅变更'}</span>
           </Button>
         ) : null}
-        <Button variant="ghost" size="sm" type="button" disabled={busy} onClick={onDismiss}>
-          放弃
-        </Button>
-        <Button
-          variant="primary"
-          size="sm"
-          type="button"
-          disabled={applyDisabled}
-          onClick={() => onApply()}
-        >
-          {applyText}
-        </Button>
+        {!isLive ? (
+          <>
+            <Button variant="ghost" size="sm" type="button" disabled={busy} onClick={onDismiss}>
+              放弃
+            </Button>
+            <Button
+              variant="primary"
+              size="sm"
+              type="button"
+              disabled={applyDisabled}
+              onClick={() => onApply()}
+            >
+              {applyText}
+            </Button>
+          </>
+        ) : null}
       </footer>
     </section>
   )

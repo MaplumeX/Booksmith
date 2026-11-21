@@ -2,8 +2,10 @@ import type { AgentProposal, AgentProposalFile } from '@booksmith/core'
 import {
   AlertCircle,
   AlertTriangle,
+  ArrowDownRight,
   BookOpen,
   Check,
+  CheckCheck,
   CheckCircle2,
   ChevronDown,
   ChevronUp,
@@ -11,10 +13,14 @@ import {
   Eye,
   FileDiff,
   Info,
+  Loader2,
   Palette,
+  Radio,
   RotateCcw,
   SkipForward,
+  Square,
   X,
+  XCircle,
 } from 'lucide-react'
 import { DropdownMenu } from 'radix-ui'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
@@ -33,13 +39,16 @@ import {
   buildVirtualReviewBook,
   composeFileFromHunks,
   findReferencingChaptersForCss,
+  getHunkDecision,
   isChapterPath,
   isCssPath,
   summarizeStructuralProposal,
   validateComposedProposal,
   type FileDiffModel,
+  type HunkDecision,
   type NumberedDiffLine,
   type ProposalHunk,
+  type ProposalHunkDecisions,
 } from '../state/proposalReview'
 import { useResolvedTheme } from '../state/settingsStore'
 import { Button } from './Button'
@@ -53,15 +62,24 @@ export interface ProposalReviewPaneProps {
   proposal: AgentProposal
   selectedPath: string
   readOnly?: boolean
+  isLive?: boolean
+  autoFollow?: boolean
+  latestTouchedPath?: string | null
+  focusHunkIndex?: number | null
+  focusSeq?: number
   busy?: boolean
   autoDowngradeReason?: string | null
-  skippedByPath: Readonly<Record<string, ReadonlySet<string>>>
+  decisionsByPath: ProposalHunkDecisions
   resolveAsset?: PreviewAssetResolver
-  onSelectPath: (path: string) => void
-  onToggleHunk: (path: string, hunkId: string) => void
+  onSelectPath: (path: string, options?: { userInitiated?: boolean }) => void
+  onResumeFollow?: () => void
+  onPauseFollow?: () => void
+  onSetHunkDecision: (path: string, hunkId: string, decision: HunkDecision) => void
+  onSetFileDecision: (path: string, hunkIds: string[], decision: HunkDecision) => void
   onResetFileHunks: (path: string) => void
   onApply: () => void
   onDismiss: () => void
+  onStopLive?: () => void
   onExit: () => void
   onSelectionChange?: (selection: string, path: string) => void
 }
@@ -115,7 +133,7 @@ interface ReviewBookIframeProps {
   extraCss: string
   activeHunkId?: string | null
   scrollSeq?: number
-  onToggleHunk?: (hunkId: string) => void
+  onHunkAction?: (hunkId: string, decision: HunkDecision) => void
   onGotoSourceHunk?: (hunkId: string) => void
   onSelectionChange?: (selection: string) => void
   title: string
@@ -130,7 +148,7 @@ function ReviewBookIframe({
   extraCss,
   activeHunkId = null,
   scrollSeq = 0,
-  onToggleHunk,
+  onHunkAction,
   onGotoSourceHunk,
   onSelectionChange,
   title,
@@ -140,8 +158,8 @@ function ReviewBookIframe({
   const blobCacheRef = useRef<PreviewBlobCache>(new PreviewBlobCache())
   const readyDocsRef = useRef<WeakSet<Document>>(new WeakSet())
   const [error, setError] = useState<string | null>(null)
-  const callbacksRef = useRef({ onToggleHunk, onGotoSourceHunk, onSelectionChange })
-  callbacksRef.current = { onToggleHunk, onGotoSourceHunk, onSelectionChange }
+  const callbacksRef = useRef({ onHunkAction, onGotoSourceHunk, onSelectionChange })
+  callbacksRef.current = { onHunkAction, onGotoSourceHunk, onSelectionChange }
 
   const isDocReady = useCallback((): boolean => {
     const doc = frameRef.current?.contentDocument
@@ -218,8 +236,12 @@ function ReviewBookIframe({
       if (!hunkId) return
       event.preventDefault()
       event.stopPropagation()
-      if (action === 'toggle-hunk') {
-        callbacksRef.current.onToggleHunk?.(hunkId)
+      if (action === 'accept-hunk') {
+        callbacksRef.current.onHunkAction?.(hunkId, 'accepted')
+      } else if (action === 'reject-hunk') {
+        callbacksRef.current.onHunkAction?.(hunkId, 'rejected')
+      } else if (action === 'reset-hunk') {
+        callbacksRef.current.onHunkAction?.(hunkId, 'pending')
       } else if (action === 'goto-source') {
         callbacksRef.current.onGotoSourceHunk?.(hunkId)
       }
@@ -391,21 +413,57 @@ function renderSourceRow(row: NumberedDiffLine) {
   )
 }
 
+function renderAcceptedSourceRow(row: NumberedDiffLine) {
+  const entry = row.diff
+  if (entry.kind === 'removed') return null
+  if (entry.kind === 'changed') {
+    const afterText = entry.segments
+      .filter((seg) => seg.kind !== 'removed')
+      .map((seg) => seg.text)
+      .join('')
+    return (
+      <div className="review-src-row diff-same is-accepted-row" key={row.index}>
+        <span className="review-src-ln">{row.beforeLine ?? ''}</span>
+        <span className="review-src-ln">{row.afterLine ?? ''}</span>
+        <span className="diff-sign"> </span>
+        <span className="diff-code">{afterText || ' '}</span>
+      </div>
+    )
+  }
+  return (
+    <div className="review-src-row diff-same is-accepted-row" key={row.index}>
+      <span className="review-src-ln">{row.beforeLine ?? ''}</span>
+      <span className="review-src-ln">{row.afterLine ?? ''}</span>
+      <span className="diff-sign"> </span>
+      <span className="diff-code">{entry.text || ' '}</span>
+    </div>
+  )
+}
+
 export function ProposalReviewPane({
   book,
   texts,
   proposal,
   selectedPath,
   readOnly = false,
+  isLive = false,
+  autoFollow = false,
+  latestTouchedPath = null,
+  focusHunkIndex = null,
+  focusSeq = 0,
   busy = false,
   autoDowngradeReason = null,
-  skippedByPath,
+  decisionsByPath,
   resolveAsset,
   onSelectPath,
-  onToggleHunk,
+  onResumeFollow,
+  onPauseFollow,
+  onSetHunkDecision,
+  onSetFileDecision,
   onResetFileHunks,
   onApply,
   onDismiss,
+  onStopLive,
   onExit,
   onSelectionChange,
 }: ProposalReviewPaneProps) {
@@ -438,21 +496,38 @@ export function ProposalReviewPane({
   const [cssCompareMode, setCssCompareMode] = useState<'after' | 'before'>('after')
 
   const sourceContainerRef = useRef<HTMLDivElement>(null)
+  const lastProposalIdRef = useRef<string>(proposal.id)
+  const lastPathRef = useRef<string | undefined>(activeFile?.path)
 
-  // Reset per-file defaults when switching files inside the review pane.
+  // Reset per-file defaults only when switching files or opening a different proposal;
+  // live streaming updates to the same file preserve the user's view mode and expanded gaps.
   useEffect(() => {
     if (!activeFile) return
+    const pathChanged = lastPathRef.current !== activeFile.path
+    const proposalChanged = lastProposalIdRef.current !== proposal.id
+    if (!pathChanged && !proposalChanged) return
+    lastPathRef.current = activeFile.path
+    lastProposalIdRef.current = proposal.id
     setViewMode(isChapterPath(activeFile.path) ? 'revision' : 'source')
-    setActiveHunkIdx(0)
+    setActiveHunkIdx(typeof focusHunkIndex === 'number' && focusHunkIndex >= 0 ? focusHunkIndex : 0)
     setScrollSeq((v) => v + 1)
     setExpandedGaps(new Set())
     setCssPreviewChapter(null)
     setCssCompareMode('after')
-  }, [activeFile?.path, proposal.id])
+  }, [activeFile?.path, proposal.id, focusHunkIndex])
+
+  // Follow explicit focus jumps (auto-follow newest live hunk or cross-file next-pending navigation).
+  useEffect(() => {
+    if (!focusSeq) return
+    if (typeof focusHunkIndex === 'number' && focusHunkIndex >= 0) {
+      setActiveHunkIdx(focusHunkIndex)
+    }
+    setScrollSeq((v) => v + 1)
+  }, [focusSeq, focusHunkIndex])
 
   const plan = useMemo(
-    () => buildComposedProposalPlan(proposal, modelsByPath, skippedByPath),
-    [proposal, modelsByPath, skippedByPath],
+    () => buildComposedProposalPlan(proposal, modelsByPath, decisionsByPath),
+    [proposal, modelsByPath, decisionsByPath],
   )
 
   const xmlFailures = useMemo(
@@ -472,14 +547,14 @@ export function ProposalReviewPane({
         texts,
         proposal,
         modelsByPath,
-        skippedByPath,
+        decisionsByPath,
         readOnly,
         cssOverride:
           isCss && cssPreviewChapter && activeFile
             ? { path: activeFile.path, mode: cssCompareMode }
             : null,
       }),
-    [book, texts, proposal, modelsByPath, skippedByPath, readOnly, isCss, cssPreviewChapter, activeFile, cssCompareMode],
+    [book, texts, proposal, modelsByPath, decisionsByPath, readOnly, isCss, cssPreviewChapter, activeFile, cssCompareMode],
   )
 
   const cssReferencingChapters = useMemo(() => {
@@ -491,24 +566,24 @@ export function ProposalReviewPane({
   const clampedHunkIdx = hunks.length > 0 ? Math.min(activeHunkIdx, hunks.length - 1) : -1
   const activeHunk = clampedHunkIdx >= 0 ? hunks[clampedHunkIdx]! : null
 
-  const activeSkippedSet = activeFile ? skippedByPath[activeFile.path] : undefined
+  const activeDecisions = activeFile ? decisionsByPath[activeFile.path] : undefined
 
   const revisionResult = useMemo(() => {
     if (!activeModel || !isChapter) return null
     return buildRevisionXhtml({
       model: activeModel,
-      skippedHunkIds: readOnly ? undefined : activeSkippedSet,
+      decisions: readOnly ? undefined : activeDecisions,
       allowHunkToggle,
       activeHunkId: activeHunk?.id ?? null,
     })
-  }, [activeModel, isChapter, readOnly, activeSkippedSet, allowHunkToggle, activeHunk?.id])
+  }, [activeModel, isChapter, readOnly, activeDecisions, allowHunkToggle, activeHunk?.id])
 
   const finalChapterXhtml = useMemo(() => {
     if (!activeModel || !isChapter) return ''
     if (activeModel.file.kind === 'delete') return activeModel.file.beforeText ?? ''
     if (readOnly || proposal.isStructural) return activeModel.file.afterText ?? ''
-    return composeFileFromHunks(activeModel, activeSkippedSet)
-  }, [activeModel, isChapter, readOnly, proposal.isStructural, activeSkippedSet])
+    return composeFileFromHunks(activeModel, activeDecisions)
+  }, [activeModel, isChapter, readOnly, proposal.isStructural, activeDecisions])
 
   const sourceSegments = useMemo(
     () => (activeModel ? buildSourceSegments(activeModel) : []),
@@ -520,8 +595,38 @@ export function ProposalReviewPane({
 
   const jumpHunk = (delta: -1 | 1) => {
     if (hunks.length === 0) return
+    if (isLive) onPauseFollow?.()
     setActiveHunkIdx((cur) => (cur + delta + hunks.length) % hunks.length)
     setScrollSeq((v) => v + 1)
+  }
+
+  const jumpNextPending = () => {
+    if (!activeFile) return
+    if (isLive) onPauseFollow?.()
+    // 1. Search remaining pending hunks in the current file after current index, then wrap around.
+    if (hunks.length > 0) {
+      for (let offset = 1; offset <= hunks.length; offset += 1) {
+        const idx = (Math.max(clampedHunkIdx, 0) + offset) % hunks.length
+        const h = hunks[idx]!
+        if (getHunkDecision(activeDecisions, h.id) === 'pending') {
+          setActiveHunkIdx(idx)
+          setScrollSeq((v) => v + 1)
+          return
+        }
+      }
+    }
+    // 2. Otherwise jump to the next file containing a pending hunk.
+    if (proposal.files.length > 1) {
+      for (let step = 1; step < proposal.files.length; step += 1) {
+        const nextFile = proposal.files[(activeFileIndex + step) % proposal.files.length]!
+        const state = plan.fileStates.get(nextFile.path)
+        if (state && state.pending > 0) {
+          onSelectPath(nextFile.path, { userInitiated: true })
+          return
+        }
+      }
+    }
+    jumpHunk(1)
   }
 
   // Scroll active hunk into view when in source diff view.
@@ -537,12 +642,23 @@ export function ProposalReviewPane({
 
   const handleGotoSourceHunk = useCallback(
     (hunkId: string) => {
+      if (isLive) onPauseFollow?.()
       const idx = hunks.findIndex((h) => h.id === hunkId)
       if (idx >= 0) setActiveHunkIdx(idx)
       setViewMode('source')
       setScrollSeq((v) => v + 1)
     },
-    [hunks],
+    [hunks, isLive, onPauseFollow],
+  )
+
+  const handleHunkDecision = useCallback(
+    (filePath: string, hunkId: string, decision: HunkDecision) => {
+      if (isLive && latestTouchedPath && filePath !== latestTouchedPath) {
+        onPauseFollow?.()
+      }
+      onSetHunkDecision(filePath, hunkId, decision)
+    },
+    [isLive, latestTouchedPath, onPauseFollow, onSetHunkDecision],
   )
 
   if (!activeFile || !activeModel) {
@@ -561,6 +677,7 @@ export function ProposalReviewPane({
   const hasValidationIssues = proposal.validationIssues.length > 0
   const hasXmlFailures = xmlFailures.length > 0
   const applyDisabled =
+    isLive ||
     busy ||
     hasValidationIssues ||
     hasXmlFailures ||
@@ -573,11 +690,18 @@ export function ProposalReviewPane({
       : '应用变更'
 
   const fileSelectionState = plan.fileStates.get(activeFile.path)
-  const activeFileAllSkipped =
+  const activeFileAllRejected =
     !readOnly &&
     !proposal.isStructural &&
     activeModel.hunks.length > 0 &&
     (fileSelectionState?.kept ?? 0) === 0
+  const activeFileAllAccepted =
+    !readOnly &&
+    !proposal.isStructural &&
+    activeModel.hunks.length > 0 &&
+    (fileSelectionState?.accepted ?? 0) === activeModel.hunks.length
+
+  const showFollowResumePill = Boolean(isLive && !autoFollow && latestTouchedPath)
 
   return (
     <section className="review-pane" aria-label="书籍变更审阅">
@@ -587,6 +711,11 @@ export function ProposalReviewPane({
             <span className="review-readonly-pill">
               <CheckCircle2 size={12} strokeWidth={1.85} aria-hidden="true" />
               <span>已应用回看</span>
+            </span>
+          ) : isLive ? (
+            <span className="review-live-pill" data-testid="review-live-pill" role="status">
+              <Loader2 size={12} strokeWidth={1.9} className="spin" aria-hidden="true" />
+              <span>实时更新中</span>
             </span>
           ) : (
             <span className="review-mode-pill">
@@ -633,7 +762,7 @@ export function ProposalReviewPane({
                     <DropdownMenu.Item
                       key={`${file.kind}:${file.path}`}
                       className={`review-file-menu-item${isCurrent ? ' is-current' : ''}`}
-                      onSelect={() => onSelectPath(file.path)}
+                      onSelect={() => onSelectPath(file.path, { userInitiated: true })}
                     >
                       <span className="review-file-menu-check" aria-hidden="true">
                         {isCurrent ? <Check size={12} strokeWidth={2} /> : null}
@@ -650,10 +779,16 @@ export function ProposalReviewPane({
                           {m.removed > 0 ? <span className="is-del">-{m.removed}</span> : null}
                         </span>
                       ) : null}
-                      {!readOnly && !proposal.isStructural && state && state.total > 0 && state.kept < state.total ? (
-                        <span className="review-file-menu-kept">
-                          {state.kept}/{state.total}
-                        </span>
+                      {!readOnly && !proposal.isStructural && state && state.total > 0 ? (
+                        state.kept < state.total ? (
+                          <span className="review-file-menu-kept" title={`保留 ${state.kept}/${state.total} 处`}>
+                            {state.kept}/{state.total}
+                          </span>
+                        ) : state.accepted === state.total ? (
+                          <span className="review-file-menu-kept is-done" title="本文件已全部确认保留">
+                            已审
+                          </span>
+                        ) : null
                       ) : null}
                     </DropdownMenu.Item>
                   )
@@ -668,7 +803,10 @@ export function ProposalReviewPane({
                 type="button"
                 className={`review-view-btn${viewMode === 'revision' ? ' on' : ''}`}
                 aria-pressed={viewMode === 'revision'}
-                onClick={() => setViewMode('revision')}
+                onClick={() => {
+                  if (isLive) onPauseFollow?.()
+                  setViewMode('revision')
+                }}
               >
                 <BookOpen size={12} strokeWidth={1.8} aria-hidden="true" />
                 <span>修订</span>
@@ -677,7 +815,10 @@ export function ProposalReviewPane({
                 type="button"
                 className={`review-view-btn${viewMode === 'final' ? ' on' : ''}`}
                 aria-pressed={viewMode === 'final'}
-                onClick={() => setViewMode('final')}
+                onClick={() => {
+                  if (isLive) onPauseFollow?.()
+                  setViewMode('final')
+                }}
               >
                 <Eye size={12} strokeWidth={1.8} aria-hidden="true" />
                 <span>终稿</span>
@@ -686,16 +827,67 @@ export function ProposalReviewPane({
                 type="button"
                 className={`review-view-btn${viewMode === 'source' ? ' on' : ''}`}
                 aria-pressed={viewMode === 'source'}
-                onClick={() => setViewMode('source')}
+                onClick={() => {
+                  if (isLive) onPauseFollow?.()
+                  setViewMode('source')
+                }}
               >
                 <Code2 size={12} strokeWidth={1.8} aria-hidden="true" />
                 <span>源码</span>
               </button>
             </div>
           ) : null}
+
+          {showFollowResumePill && latestTouchedPath ? (
+            <button
+              type="button"
+              className="review-follow-pill"
+              data-testid="review-follow-pill"
+              title={`点击恢复自动跟随至 ${latestTouchedPath}`}
+              onClick={onResumeFollow}
+            >
+              <Radio size={11} strokeWidth={2} aria-hidden="true" />
+              <span>正在编辑 {basename(latestTouchedPath)} · 跟随</span>
+            </button>
+          ) : null}
         </div>
 
         <div className="review-toolbar-right">
+          {allowHunkToggle && hunks.length > 0 ? (
+            <div className="review-file-quick" role="group" aria-label="当前文件快捷审批">
+              <button
+                type="button"
+                className={`review-quick-btn is-accept${activeFileAllAccepted ? ' on' : ''}`}
+                title="将当前文件全部改动标记为保留"
+                onClick={() =>
+                  onSetFileDecision(
+                    activeFile.path,
+                    hunks.map((h) => h.id),
+                    activeFileAllAccepted ? 'pending' : 'accepted',
+                  )
+                }
+              >
+                <CheckCheck size={12} strokeWidth={1.9} aria-hidden="true" />
+                <span>保留本文件</span>
+              </button>
+              <button
+                type="button"
+                className={`review-quick-btn is-reject${activeFileAllRejected ? ' on' : ''}`}
+                title="拒绝当前文件全部改动，保持原文不变"
+                onClick={() =>
+                  onSetFileDecision(
+                    activeFile.path,
+                    hunks.map((h) => h.id),
+                    activeFileAllRejected ? 'pending' : 'rejected',
+                  )
+                }
+              >
+                <XCircle size={12} strokeWidth={1.85} aria-hidden="true" />
+                <span>拒绝本文件</span>
+              </button>
+            </div>
+          ) : null}
+
           {hunks.length > 0 && !cssPreviewChapter ? (
             <div className="review-hunk-nav" aria-label="变更定位">
               <button
@@ -721,17 +913,6 @@ export function ProposalReviewPane({
               >
                 <ChevronDown size={13} strokeWidth={1.85} aria-hidden="true" />
               </button>
-            </div>
-          ) : null}
-
-          {!readOnly ? (
-            <div className="review-actions">
-              <Button variant="ghost" size="sm" type="button" disabled={busy} onClick={onDismiss}>
-                放弃
-              </Button>
-              <Button variant="primary" size="sm" type="button" disabled={applyDisabled} onClick={onApply}>
-                {applyLabel}
-              </Button>
             </div>
           ) : null}
 
@@ -840,10 +1021,10 @@ export function ProposalReviewPane({
           </div>
         ) : null}
 
-        {activeFileAllSkipped ? (
+        {activeFileAllRejected ? (
           <div className="review-context-strip" role="status">
             <SkipForward size={13} strokeWidth={1.8} aria-hidden="true" />
-            <span>当前文件已跳过全部 {activeModel.hunks.length} 处改动，应用时将保持原文不变。</span>
+            <span>当前文件已拒绝全部 {activeModel.hunks.length} 处改动，应用时将保持原文不变。</span>
             <button
               type="button"
               className="review-inline-link"
@@ -951,7 +1132,11 @@ export function ProposalReviewPane({
             extraCss={revisionCss}
             activeHunkId={activeHunk?.id ?? null}
             scrollSeq={scrollSeq}
-            onToggleHunk={allowHunkToggle ? (hunkId) => onToggleHunk(activeFile.path, hunkId) : undefined}
+            onHunkAction={
+              allowHunkToggle
+                ? (hunkId, decision) => handleHunkDecision(activeFile.path, hunkId, decision)
+                : undefined
+            }
             onGotoSourceHunk={handleGotoSourceHunk}
             onSelectionChange={(text) => onSelectionChange?.(text, activeFile.path)}
             title={`书页修订视图：${basename(activeFile.path)}`}
@@ -1017,7 +1202,9 @@ export function ProposalReviewPane({
                   }
 
                   const hunk = seg.hunk!
-                  const isSkipped = Boolean(!readOnly && activeSkippedSet?.has(hunk.id))
+                  const decision: HunkDecision = readOnly ? 'pending' : getHunkDecision(activeDecisions, hunk.id)
+                  const isAccepted = decision === 'accepted'
+                  const isRejected = decision === 'rejected'
                   const isFocused = activeHunk?.id === hunk.id
                   const lineRange =
                     hunk.afterCount > 0
@@ -1028,7 +1215,8 @@ export function ProposalReviewPane({
                     <section
                       key={hunk.id}
                       data-review-source-hunk={hunk.id}
-                      className={`review-src-hunk${isFocused ? ' is-focused' : ''}${isSkipped ? ' is-skipped' : ''}`}
+                      data-decision={decision}
+                      className={`review-src-hunk${isFocused ? ' is-focused' : ''}${isAccepted ? ' is-accepted' : ''}${isRejected ? ' is-rejected is-skipped' : ''}`}
                     >
                       <div className="review-src-hunk-bar">
                         <span className="review-src-hunk-meta">
@@ -1037,25 +1225,57 @@ export function ProposalReviewPane({
                             {hunk.addedCount > 0 ? <span className="is-add">+{hunk.addedCount}</span> : null}
                             {hunk.removedCount > 0 ? <span className="is-del">-{hunk.removedCount}</span> : null}
                           </span>
+                          {isAccepted ? <span className="review-src-state-pill is-accepted">已保留</span> : null}
+                          {isRejected ? <span className="review-src-state-pill is-rejected">已拒绝</span> : null}
                         </span>
                         {allowHunkToggle ? (
-                          <button
-                            type="button"
-                            className={`review-src-hunk-toggle${isSkipped ? ' is-skipped' : ''}`}
-                            onClick={() => onToggleHunk(activeFile.path, hunk.id)}
-                          >
-                            {isSkipped ? (
-                              <>
+                          <div className="review-src-hunk-actions">
+                            {isAccepted ? (
+                              <button
+                                type="button"
+                                className="review-src-hunk-toggle is-undo"
+                                onClick={() => handleHunkDecision(activeFile.path, hunk.id, 'pending')}
+                              >
                                 <RotateCcw size={11} strokeWidth={1.85} aria-hidden="true" />
-                                <span>已跳过 · 恢复保留</span>
-                              </>
+                                <span>撤销</span>
+                              </button>
+                            ) : isRejected ? (
+                              <button
+                                type="button"
+                                className="review-src-hunk-toggle is-skipped"
+                                onClick={() => handleHunkDecision(activeFile.path, hunk.id, 'pending')}
+                              >
+                                <RotateCcw size={11} strokeWidth={1.85} aria-hidden="true" />
+                                <span>恢复</span>
+                              </button>
                             ) : (
-                              <span>跳过此处</span>
+                              <>
+                                <button
+                                  type="button"
+                                  className="review-src-hunk-toggle is-accept"
+                                  onClick={() => handleHunkDecision(activeFile.path, hunk.id, 'accepted')}
+                                >
+                                  <Check size={11} strokeWidth={2.1} aria-hidden="true" />
+                                  <span>保留</span>
+                                </button>
+                                <button
+                                  type="button"
+                                  className="review-src-hunk-toggle is-reject"
+                                  onClick={() => handleHunkDecision(activeFile.path, hunk.id, 'rejected')}
+                                >
+                                  <X size={11} strokeWidth={2} aria-hidden="true" />
+                                  <span>拒绝</span>
+                                </button>
+                              </>
                             )}
-                          </button>
+                          </div>
                         ) : null}
                       </div>
-                      <div className="review-src-hunk-lines">{seg.rows.map(renderSourceRow)}</div>
+                      <div className="review-src-hunk-lines">
+                        {isAccepted
+                          ? seg.rows.map(renderAcceptedSourceRow)
+                          : seg.rows.map(renderSourceRow)}
+                      </div>
                     </section>
                   )
                 })
@@ -1064,6 +1284,82 @@ export function ProposalReviewPane({
           </div>
         )}
       </div>
+
+      {/* Compact bottom review progression bar keeps the single primary Apply CTA grounded
+          and shows live streaming progress or 3-state hunk counts. See ADR 2026-11-22-live-streaming-agent-review. */}
+      {!readOnly ? (
+        <footer className="review-footer-bar" data-testid="review-footer-bar">
+          <div className="review-footer-status">
+            {isLive ? (
+              <>
+                <span className="review-live-dot" aria-hidden="true" />
+                <span>
+                  实时同步 · {proposal.files.length} 个文件
+                  {plan.totalHunks > 0 ? ` · ${plan.totalHunks} 处改动` : ''}
+                  {plan.acceptedHunks > 0 || plan.rejectedHunks > 0
+                    ? `（已保留 ${plan.acceptedHunks} · 已拒绝 ${plan.rejectedHunks}）`
+                    : ''}
+                </span>
+              </>
+            ) : proposal.isStructural ? (
+              <span>结构变更 · 共 {proposal.files.length} 个文件 · 整批原子应用</span>
+            ) : plan.pendingHunks > 0 ? (
+              <span>
+                待审 <strong>{plan.pendingHunks}</strong> 处
+                {plan.acceptedHunks > 0 ? ` · 已保留 ${plan.acceptedHunks}` : ''}
+                {plan.rejectedHunks > 0 ? ` · 已拒绝 ${plan.rejectedHunks}` : ''}
+              </span>
+            ) : (
+              <span>
+                全部 {plan.totalHunks} 处已审阅（保留 {plan.keptHunks} · 拒绝 {plan.rejectedHunks}）
+              </span>
+            )}
+          </div>
+
+          <div className="review-footer-actions">
+            {isLive ? (
+              <>
+                {plan.pendingHunks > 0 && (hunks.length > 1 || proposal.files.length > 1) ? (
+                  <Button variant="ghost" size="sm" type="button" onClick={jumpNextPending}>
+                    <ArrowDownRight size={13} strokeWidth={1.85} aria-hidden="true" />
+                    <span>下一处</span>
+                  </Button>
+                ) : null}
+                {onStopLive ? (
+                  <Button
+                    variant="secondary"
+                    size="sm"
+                    type="button"
+                    data-testid="review-stop-live-btn"
+                    onClick={onStopLive}
+                  >
+                    <Square size={11} strokeWidth={2.2} fill="currentColor" aria-hidden="true" />
+                    <span>停止并保留已改</span>
+                  </Button>
+                ) : null}
+                <Button variant="primary" size="sm" type="button" disabled>
+                  生成中…
+                </Button>
+              </>
+            ) : (
+              <>
+                {!proposal.isStructural && plan.pendingHunks > 0 ? (
+                  <Button variant="secondary" size="sm" type="button" onClick={jumpNextPending}>
+                    <ArrowDownRight size={13} strokeWidth={1.85} aria-hidden="true" />
+                    <span>下一处未审</span>
+                  </Button>
+                ) : null}
+                <Button variant="ghost" size="sm" type="button" disabled={busy} onClick={onDismiss}>
+                  放弃
+                </Button>
+                <Button variant="primary" size="sm" type="button" disabled={applyDisabled} onClick={onApply}>
+                  {applyLabel}
+                </Button>
+              </>
+            )}
+          </div>
+        </footer>
+      ) : null}
     </section>
   )
 }

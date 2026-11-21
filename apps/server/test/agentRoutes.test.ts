@@ -1100,18 +1100,30 @@ describe('agent REST & SSE routes', () => {
       await fetch(`${appUrl}/api/books/${book.id}/agent/threads/${thread.id}`, { headers: { cookie: cookieA } })
     ).json()) as {
       messages: Array<{
+        id: string
         role: string
         content: string
         toolCalls: Array<{ name: string }>
-        proposal: unknown
+        proposal: { files: Array<{ path: string; afterText?: string }> } | null
+        proposalStatus: string | null
       }>
     }
     expect(afterDisconnect.messages).toHaveLength(2)
     expect(afterDisconnect.messages[1]?.content).toBe('已停止生成。')
     expect(afterDisconnect.messages[1]?.toolCalls).toHaveLength(1)
-    expect(afterDisconnect.messages[1]?.proposal).toBeNull()
+    // Review-mode abort preserves completed step-1 edit as a persisted pending proposal.
+    expect(afterDisconnect.messages[1]?.proposalStatus).toBe('pending')
+    expect(afterDisconnect.messages[1]?.proposal?.files[0]?.afterText).toContain('中途被中断的修改。')
+
+    // Dismiss the preserved proposal so the next test starts from the clean baseline.
+    await fetch(`${appUrl}/api/books/${book.id}/agent/proposals/${afterDisconnect.messages[1]!.id}`, {
+      method: 'PATCH',
+      headers: { 'content-type': 'application/json', cookie: cookieA },
+      body: JSON.stringify({ status: 'dismissed' }),
+    })
 
     // 2) Explicit POST .../abort must halt an active turn even if the SSE socket stays open (e.g. behind a proxy)
+    // and stream back the preserved partial proposal + persisted messageId before closing.
     slowToolStep = 0
     slowStep2Aborted = false
     slowStep2Completed = false
@@ -1135,7 +1147,7 @@ describe('agent REST & SSE routes', () => {
       const { value, done } = await explicitReader.read()
       if (done) break
       explicitRaw += decoder.decode(value, { stream: true })
-      if (!triggeredAbort && explicitRaw.includes('"type":"tool_end"')) {
+      if (!triggeredAbort && explicitRaw.includes('"type":"proposal_update"')) {
         triggeredAbort = true
         await new Promise((r) => setTimeout(r, 40))
         const abortRes = await fetch(`${appUrl}/api/books/${book.id}/agent/threads/${thread.id}/abort`, {
@@ -1155,7 +1167,8 @@ describe('agent REST & SSE routes', () => {
     const explicitDone = explicitEvents.find((e) => e.type === 'done') as { stopped?: boolean; messageId?: string }
     expect(explicitDone?.stopped).toBe(true)
     expect(explicitDone?.messageId).toBeTruthy()
-    expect(explicitEvents.some((e) => e.type === 'proposal')).toBe(false)
+    expect(explicitEvents.some((e) => e.type === 'proposal_update')).toBe(true)
+    expect(explicitEvents.some((e) => e.type === 'proposal')).toBe(true)
 
     await new Promise((r) => setTimeout(r, 500))
     expect(slowStep2Aborted).toBe(true)

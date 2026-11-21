@@ -1250,20 +1250,20 @@ export function registerAgentRoutes(app: FastifyInstance, deps: AgentDeps): void
       })
 
       const hasPartialOutput = Boolean(
-        result.content.trim() || result.reasoning.trim() || result.toolCalls.length > 0,
+        result.content.trim() || result.reasoning.trim() || result.toolCalls.length > 0 || result.proposal,
       )
       const shouldPersistAssistant = !result.stopped || hasPartialOutput
 
       let savedMessageId: string | undefined
-      const supersededMessageId = !result.stopped ? result.supersededProposalMessageId : null
+      const supersededMessageId = result.supersededProposalMessageId
       if (shouldPersistAssistant) {
         const persistedFields = {
           content: result.stopped ? result.content || '已停止生成。' : result.content,
           reasoning: result.reasoning.trim() ? result.reasoning : null,
           stepsJson: result.steps.length > 0 ? JSON.stringify(result.steps) : null,
           toolCallsJson: result.toolCalls.length > 0 ? JSON.stringify(result.toolCalls) : null,
-          proposalJson: !result.stopped && result.proposal ? JSON.stringify(result.proposal) : null,
-          proposalStatus: !result.stopped && result.proposal ? 'pending' : null,
+          proposalJson: result.proposal ? JSON.stringify(result.proposal) : null,
+          proposalStatus: result.proposal ? 'pending' : null,
           proposalResolutionJson: null,
           compactionNoticeJson: result.compaction ? JSON.stringify(result.compaction.notice) : null,
           error: result.error ? result.error.message : null,
