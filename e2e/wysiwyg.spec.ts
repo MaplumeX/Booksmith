@@ -207,3 +207,52 @@ test('preserves WYSIWYG iframe, undo stack, and global theme without reloading o
   await undoBtn.click()
   await expect(frame.locator('body')).not.toContainText('【保存不闪烁】')
 })
+
+test('adapts hardcoded quote colors in WYSIWYG dark mode without polluting XHTML on save', async ({
+  page,
+}) => {
+  await openChapter(page, 'ch003.xhtml')
+  await page.locator('.cm-content').click()
+  await page.keyboard.press('Control+End')
+  await page.keyboard.press('ArrowUp')
+  await page.keyboard.press('ArrowUp')
+  await page.keyboard.insertText(
+    '<blockquote id="wysiwyg-quote" style="color: #555; background: #f5f5f5;"><p>可视化引用</p></blockquote>',
+  )
+
+  await page.getByRole('button', { name: '设置', exact: true }).click()
+  const dialog = page.getByRole('dialog', { name: '应用设置' })
+  await dialog.getByRole('radio', { name: /深色/ }).click()
+  await dialog.getByRole('button', { name: '完成', exact: true }).click()
+
+  await page.getByRole('button', { name: '可视化', exact: true }).click()
+  const frame = page.frameLocator('.wysiwyg-frame')
+  const quote = frame.locator('#wysiwyg-quote')
+  await expect(quote).toBeVisible()
+
+  const darkQuoteStyles = await quote.evaluate((el) => {
+    const s = getComputedStyle(el)
+    return { color: s.color, bg: s.backgroundColor }
+  })
+  expect(darkQuoteStyles.color).toBe('rgb(180, 181, 199)')
+  expect(darkQuoteStyles.bg).toBe('rgb(34, 36, 48)')
+
+  await quote.locator('p').click()
+  await page.keyboard.type('·修订')
+
+  await page.getByRole('button', { name: '代码', exact: true }).click()
+  await page.getByRole('button', { name: '保存', exact: true }).click()
+  await expect(page.locator('.statusbar')).toContainText('未修改')
+
+  await page.getByRole('button', { name: '查找', exact: true }).click()
+  const searchInput = page.getByLabel('全书查找')
+  await searchInput.fill('style="color: #555; background: #f5f5f5;"')
+  await expect(page.locator('.search-group').filter({ hasText: 'ch003.xhtml' })).toBeVisible({
+    timeout: 15_000,
+  })
+
+  for (const forbidden of ['data-booksmith-', '#b4b5c7', '#222430']) {
+    await searchInput.fill(forbidden)
+    await expect(page.getByText(/没有匹配/)).toBeVisible({ timeout: 15_000 })
+  }
+})

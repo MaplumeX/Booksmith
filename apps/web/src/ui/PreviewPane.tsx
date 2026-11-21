@@ -4,7 +4,6 @@ import type { EpubArchive, EpubPackage } from '@booksmith/core'
 import { patchDocument } from '../preview/patchDocument'
 import {
   buildPreviewDocument,
-  buildPreviewThemeCss,
   EMPTY_IFRAME_DOC,
   PreviewBlobCache,
   previewResourcesChanged,
@@ -67,6 +66,7 @@ export function PreviewPane({
   const applied = useRef<{
     path: string
     content: string
+    theme: 'light' | 'dark'
     deps: Map<string, PreviewResourceSnapshot>
   } | null>(null)
   const liveContent = useRef(content)
@@ -103,11 +103,13 @@ export function PreviewPane({
       const win = iframe?.contentWindow
       if (!iframe || !doc || !win || !isDocReady()) return
 
+      const nextTheme = themeRef.current
       const prev = applied.current
       if (
         prev &&
         prev.path === nextPath &&
         prev.content === nextContent &&
+        prev.theme === nextTheme &&
         !previewResourcesChanged(prev.deps, nextArchive, nextPkg, nextResolveAsset)
       ) {
         return
@@ -119,7 +121,7 @@ export function PreviewPane({
           path: nextPath,
           archive: nextArchive,
           pkg: nextPkg,
-          theme: themeRef.current,
+          theme: nextTheme,
           blobCache: blobCache.current,
           resolveAsset: nextResolveAsset,
         })
@@ -134,7 +136,7 @@ export function PreviewPane({
         } else if (pathChanged) {
           win.scrollTo(0, 0)
         }
-        applied.current = { path: nextPath, content: nextContent, deps: built.dependencies }
+        applied.current = { path: nextPath, content: nextContent, theme: nextTheme, deps: built.dependencies }
         setFailure(null)
       } catch (error) {
         setFailure(error instanceof Error ? error.message : '预览渲染失败')
@@ -156,16 +158,16 @@ export function PreviewPane({
   }, [renderNow])
 
   useEffect(() => {
-    const doc = frame.current?.contentDocument
-    if (!doc?.head || !isDocReady()) return
-    let style = doc.head.querySelector('style[data-booksmith-preview-theme="true"]')
-    if (!style) {
-      style = doc.createElement('style')
-      style.setAttribute('data-booksmith-preview-theme', 'true')
-      doc.head.appendChild(style)
-    }
-    style.textContent = buildPreviewThemeCss(theme)
-  }, [theme, isDocReady])
+    themeRef.current = theme
+    if (!isDocReady() || !applied.current) return
+    renderNow(
+      latest.current.path,
+      liveContent.current,
+      latest.current.archive,
+      latest.current.pkg,
+      latest.current.resolveAsset,
+    )
+  }, [theme, isDocReady, renderNow])
 
   useEffect(() => {
     liveContent.current = content
@@ -175,7 +177,7 @@ export function PreviewPane({
     if (!isDocReady()) return
 
     const prev = applied.current
-    if (!prev || prev.path !== path) {
+    if (!prev || prev.path !== path || prev.theme !== themeRef.current) {
       renderNow(path, content, archive, pkg, resolveAsset)
       return
     }

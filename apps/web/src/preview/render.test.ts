@@ -1,8 +1,10 @@
 import { describe, expect, it, vi } from 'vitest'
 import type { EpubArchive, EpubPackage } from '@booksmith/core'
 import {
+  adaptDocumentBodyInlineStyles,
   buildEditorStyleCss,
   buildPreviewThemeCss,
+  buildReaderBaseCss,
   PreviewBlobCache,
   previewResourcesChanged,
   type PreviewResourceSnapshot,
@@ -197,5 +199,61 @@ describe('preview & editor theme CSS', () => {
     expect(dark).toContain('color: #ececf2')
     expect(dark).toContain('hr.sigil_split_marker')
     expect(light).toContain('hr.sigil_split_marker')
+  })
+
+  it('builds zero-specificity reader baseline CSS for typography, blockquote, code, and tables', () => {
+    const previewLight = buildReaderBaseCss('light', { mode: 'preview' })
+    expect(previewLight).toContain(':where(blockquote)')
+    expect(previewLight).toContain(':where(pre)')
+    expect(previewLight).toContain(':where(table)')
+    expect(previewLight).toContain('padding: 20px 24px')
+    expect(previewLight).toContain('color: #464655')
+    expect(previewLight).toContain('background-color: #f4f4f6')
+
+    const previewDark = buildReaderBaseCss('dark', { mode: 'preview' })
+    expect(previewDark).toContain('color: #b4b5c7')
+    expect(previewDark).toContain('background-color: #222430')
+
+    const editableDark = buildReaderBaseCss('dark', { mode: 'editable' })
+    expect(editableDark).not.toContain('padding: 20px 24px')
+  })
+
+  it('adapts and restores inline styles while preserving original values for WYSIWYG round-trip', () => {
+    function mockElement(attrs: Record<string, string>, tagName = 'BLOCKQUOTE') {
+      const map = new Map(Object.entries(attrs))
+      return {
+        tagName,
+        closest: () => null,
+        hasAttribute: (k: string) => map.has(k),
+        getAttribute: (k: string) => map.get(k) ?? null,
+        setAttribute: (k: string, v: string) => map.set(k, v),
+        removeAttribute: (k: string) => map.delete(k),
+      }
+    }
+
+    const quote = mockElement({ style: 'color: #555; background: #f5f5f5;' })
+    const svgRect = {
+      tagName: 'RECT',
+      closest: (sel: string) => (sel.includes('svg') ? {} : null),
+      hasAttribute: () => true,
+      getAttribute: () => 'fill: #000;',
+      setAttribute: () => {
+        throw new Error('should not modify SVG descendants')
+      },
+      removeAttribute: () => {},
+    }
+    const body = {
+      ...mockElement({}, 'BODY'),
+      querySelectorAll: () => [quote, svgRect],
+    } as unknown as Element
+
+    adaptDocumentBodyInlineStyles(body, 'dark', true)
+    expect(quote.getAttribute('data-booksmith-orig-style')).toBe('color: #555; background: #f5f5f5;')
+    expect(quote.getAttribute('style')).toContain('color: #b4b5c7')
+    expect(quote.getAttribute('style')).toContain('background: #222430')
+
+    adaptDocumentBodyInlineStyles(body, 'light', true)
+    expect(quote.hasAttribute('data-booksmith-orig-style')).toBe(false)
+    expect(quote.getAttribute('style')).toBe('color: #555; background: #f5f5f5;')
   })
 })
