@@ -54,7 +54,7 @@
 | `MetadataPanel` | `src/ui/MetadataPanel.tsx` | 顶栏「元数据」触发的 `680px` 居中双栏书籍信息弹窗；default / dirty / error / meta 卡片行编辑 / edge（`<640px` 单列退化） |
 | `SearchPanel` | `src/ui/SearchPanel.tsx` | 顶栏「查找」或 `⌘⇧F` 触发的 `640px` 居中 Spotlight 弹窗；default（点击命中项跳行并关闭弹窗）/ empty / loading / 全书替换确认与撤销 |
 | `CheckPanel` | `src/ui/CheckPanel.tsx` | 顶栏「检查」动态健康度胶囊触发的 `380px` Radix Popover 诊断浮卡；empty（通过绿标）/ 错误与提醒分层卡片 / 点击跳行并收起浮卡 |
-| `AgentPanel` | `src/ui/AgentPanel.tsx` | 右侧独立悬浮对话白卡；default（`38px` 单行顶栏 + Radix Popover 历史会话 + IM 左右气泡与 Markdown + 中文工具步骤条 + 悬浮输入卡）/ empty / loading / error / edge（`<1024px` 互斥覆盖抽屉） |
+| `AgentPanel` | `src/ui/AgentPanel.tsx` | 右侧独立悬浮对话白卡；default（`38px` 单行顶栏 + Radix Popover 历史会话 + 右对齐用户胶囊 + 折叠单行过程抽屉与左轴时间线 + 通栏无框助手 Markdown 最终回复 + 悬浮输入卡）/ empty / loading / error / edge（逐块隔离思考态、`<1024px` 互斥覆盖抽屉） |
 | `AgentMarkdown` | `src/ui/AgentMarkdown.tsx` | default（零依赖安全 React Markdown）/ empty / loading / error / edge（宽表与长代码独立横向滚动） |
 | `AgentProposalCard` | `src/ui/AgentProposalCard.tsx` | 右侧栏瘦身导航摘要卡；default（文件列表、`+N/-M`、已选 Hunk 计数、「审阅中」高亮）/ applied（只读「查看改动」+ 撤销）/ dismissed / error / edge |
 | `ProposalReviewPane` | `src/ui/ProposalReviewPane.tsx` | 中央主画布原位三态审阅视图（`修订 / 终稿` `max-width: 760px`、`源码` `max-width: 900px`）；default（书页内联修订、逐处 Hunk 跳过、CSS 联动终稿预览、结构摘要）/ empty（无差异或全部跳过）/ loading / error（预检与 XML 不闭合阻断）/ edge（MathML 保护岛、`<head>` 变更提示、已应用只读回看、`<720px` 响应零溢出） |

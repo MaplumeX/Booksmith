@@ -72,3 +72,4 @@ Status: implemented
 - **弱模型自动压缩质量波动**：本地小模型可能生成偏长或超时的压缩结果；压缩调用设 45s 超时与输出上限，并具备失败即降级为完整回合对齐裁剪的安全底线。
 - **隐藏保活的 DOM 驻留**：打开书籍期间 `AgentPanel` 保持挂载；切书（`bookId` 变化）或退出编辑页时仍会触发清理并中止活跃流，避免跨书串流。
 - **纯增量数据库迁移**：迁移 `0009_sharp_ravenous.sql` 仅添加可空列（移除了 `drizzle-kit` 基于 `0008_snapshot.json` 自动生成的冗余 `DROP TABLE "book_files" CASCADE`，保持 `migrate.ts` 无损回填后再删旧表的不变量），完全兼容存量会话与消息记录。
+- **后续前端消息流演进（2026-11-22）**：本文档 §4 中消息流平铺交错渲染思考/工具/过渡文本的条款已由 [flat editorial Agent messages with unified collapsible process drawer](../design/2026-11-22-agent-chat-process-drawer-ui.md) 部分替代，改为统一折叠过程抽屉 + 逐块独立思考态 + 仅外显最终回复；服务端完整轨迹落库与回放、累计待审阅提案、80% 自动压缩、隐藏保活与提前起草契约均保持有效。

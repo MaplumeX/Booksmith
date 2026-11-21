@@ -70,3 +70,4 @@ Status: implemented
 - **无上限步数的停止依赖**：当用户将单轮最大工具步数留空（不限制）或设得极大时，若模型陷入重复调用循环，需要用户主动点击输入卡右下角的停止按钮中止生成。
 - **纯增量数据表演进**：迁移 `0007_uneven_doctor_octopus.sql` 为纯增量加列与新增 `agent_user_settings` 表，不破坏存量预设与历史会话。
 - **后续会话连续性演进（2026-11-21）**：本文档中历史回放仅保留纯文本、不带工具轨迹与提案处置状态的条款已由 [continuous multi-turn Agent sessions](2026-11-21-agent-session-continuity.md) 部分替代；三档审批模式、同供应商多模型、云端运行偏好、流式思考块与末条重试机制保持有效。
+- **后续消息流与思考展示演进（2026-11-22）**：本文档中独立 `ReasoningBlock` 流式自动展开展示形态已由 [flat editorial Agent messages with unified collapsible process drawer](../design/2026-11-22-agent-chat-process-drawer-ui.md) 部分替代，升级为统一过程折叠抽屉与逐块隔离思考态；三档审批模式、同供应商多模型、云端运行偏好与末条重试机制保持有效。

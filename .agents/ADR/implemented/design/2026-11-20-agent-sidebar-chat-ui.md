@@ -83,3 +83,4 @@ Status: implemented
 - 对话输入卡底栏已由 [Agent approval modes, multi-model providers, preferences, reasoning & retry](../feature/2026-11-20-agent-modes-and-multimodel.md) 扩展为审批模式与供应商分组多模型双紧凑胶囊，并在消息流中增量加入了默认折叠的 `ReasoningBlock` 思考过程卡、自动应用/降级状态提示与末条助手重试操作。
 - 侧栏 `AgentProposalCard` 的内嵌折叠 Diff 契约已由 [in-canvas EPUB Agent proposal review](../feature/2026-11-21-in-canvas-agent-proposal-review.md) 部分替代，瘦身为仅含文件清单、统计与跳转入口的导航摘要卡，完整书籍审阅迁移至中央主画布 `ProposalReviewPane`；独立右侧栏壳层、IM 气泡对话流与 `AgentMarkdown` 契约保持有效。
 - 关闭侧栏卸载面板与工具步骤统一置顶折叠条款已由 [continuous multi-turn Agent sessions](../feature/2026-11-21-agent-session-continuity.md) 部分替代，升级为 `hidden` 隐藏保活、流式期可提前起草、多步交错时间线、底栏紧凑上下文占用指示与可折叠自动压缩分隔条；既有语义 Token 与气泡规范保持有效。
+- 助手左对齐头像气泡与独立工具框条款已由 [flat editorial Agent messages with unified collapsible process drawer](2026-11-22-agent-chat-process-drawer-ui.md) 部分替代，升级为去气泡通栏助手正文与统一折叠过程抽屉；`38px` 顶栏、右对齐用户胶囊、`AgentMarkdown`、底部输入卡与语义 Token 体系保持有效。
