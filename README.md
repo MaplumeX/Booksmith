@@ -84,7 +84,7 @@ POSTGRES_PASSWORD=<openssl rand -base64 24>
 ALLOWED_EMAILS=you@example.com
 AGENT_SECRET_KEY=<openssl rand -hex 32>    # 不填则无法在设置里保存模型 API Key
 COOKIE_SECURE=true                         # 跟在 HTTPS 反代后面才开
-BOOKSMITH_IMAGE=ghcr.io/maplumex/booksmith:0.1.3
+BOOKSMITH_IMAGE=ghcr.io/maplumex/booksmith:0.1.4
 ```
 
 `POSTGRES_PASSWORD` 是必填的，缺了 compose 会直接报错退出。`ALLOWED_EMAILS` 为空则任何人都注册不了。
@@ -146,8 +146,8 @@ BOOKSMITH_IMAGE=ghcr.io/maplumex/booksmith:0.1.0 docker compose up -d --no-build
 推一个 `v*` tag，`.github/workflows/release.yml` 构建镜像并推到 GHCR：
 
 ```bash
-git tag v0.1.3
-git push origin v0.1.3            # → ghcr.io/maplumex/booksmith:0.1.3 / 0.1 / latest
+git tag v0.1.4
+git push origin v0.1.4            # → ghcr.io/maplumex/booksmith:0.1.4 / 0.1 / latest
 ```
 
 `workflow_dispatch` 手动跑一次则只打 `edge`（用于上线前验证流水线）。`linux/amd64` 单架构，
