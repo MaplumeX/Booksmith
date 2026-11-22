@@ -1,15 +1,12 @@
 import {
   browserXmlCodec,
   dirname,
-  indentTocEntries,
-  indentTocEntry,
+  indentTocEntriesWithPaths,
   insertTocEntry,
   isSameOrDescendantTocPath,
-  moveTocEntries,
-  moveTocEntry,
-  moveTocSubtree,
-  outdentTocEntries,
-  outdentTocEntry,
+  moveTocEntriesWithPaths,
+  moveTocSubtreeWithPath,
+  outdentTocEntriesWithPaths,
   refreshTocLabelsFromHeadings,
   removeBrokenTocEntries,
   removeTocEntries,
@@ -19,6 +16,7 @@ import {
   updateTocEntry,
   type BrokenAnchor,
   type EpubPackage,
+  type TocBatchMutationResult,
   type TocEntry,
   type TocInsertPosition,
   type TocPath,
@@ -222,6 +220,9 @@ export function TocPanel({
   const [dropIndicator, setDropIndicator] = useState<DropIndicator | null>(null)
 
   const feedbackTimer = useRef<number | null>(null)
+  const listRef = useRef<HTMLUListElement | null>(null)
+  const pendingFocusKeyRef = useRef<string | null>(null)
+  const renameSettledRef = useRef(false)
 
   const showFeedback = (message: string) => {
     setFeedback(message)
@@ -254,6 +255,22 @@ export function TocPanel({
       return next.size === prev.size ? prev : next
     })
   }, [flatKeySet])
+
+  // Restore keyboard focus to the moved/indented row after path keys change.
+  useEffect(() => {
+    const pending = pendingFocusKeyRef.current
+    if (!pending) return
+    pendingFocusKeyRef.current = null
+    const list = listRef.current
+    if (!list) return
+    const target = list.querySelector<HTMLElement>(`[data-toc-key="${pending}"] .toc-label`)
+    if (target) {
+      target.focus({ preventScroll: false })
+      target.scrollIntoView({ block: 'nearest' })
+    } else {
+      list.focus({ preventScroll: true })
+    }
+  }, [flat, focusedKey])
 
   // Automatically clear broken-only filter once every broken anchor is resolved.
   useEffect(() => {
@@ -302,6 +319,34 @@ export function TocPanel({
     return byChapter?.key ?? null
   }, [flat, tocPath, activeTocHref, activePath])
 
+  const showCheckboxes = multiSelectMode || selectedKeys.size > 0
+
+  const selectedHasChildren = useMemo(() => {
+    for (const item of flat) {
+      if (selectedKeys.has(item.key) && item.hasChildren) return true
+    }
+    return false
+  }, [flat, selectedKeys])
+
+  const batchCapabilities = useMemo(() => {
+    if (!showCheckboxes || selectedKeys.size === 0) {
+      return { canMoveUp: false, canMoveDown: false, canIndent: false, canOutdent: false }
+    }
+    const paths = [...selectedKeys].map(parseKeyToPath).filter((p) => p.length > 0)
+    if (paths.length === 0) {
+      return { canMoveUp: false, canMoveDown: false, canIndent: false, canOutdent: false }
+    }
+    return {
+      canMoveUp: moveTocEntriesWithPaths(entries, paths, -1).changed,
+      canMoveDown: moveTocEntriesWithPaths(entries, paths, 1).changed,
+      canIndent: indentTocEntriesWithPaths(entries, paths).changed,
+      canOutdent: outdentTocEntriesWithPaths(entries, paths).changed,
+    }
+  }, [showCheckboxes, selectedKeys, entries])
+
+  const allVisibleSelected =
+    visibleRows.length > 0 && visibleRows.every((row) => selectedKeys.has(row.key))
+
   if (!tocPath) {
     return (
       <div className="toc-panel toc-panel-missing">
@@ -320,11 +365,38 @@ export function TocPanel({
 
   const tocDirPath = tocPath
 
-  function commitRename(path: TocPath, nextLabel: string) {
+  function expandAncestorsOf(paths: TocPath[]) {
+    setCollapsed((prev) => {
+      if (prev.size === 0) return prev
+      let changed = false
+      const next = new Set(prev)
+      for (const path of paths) {
+        for (let len = 1; len < path.length; len += 1) {
+          const ancestorKey = path.slice(0, len).join('.')
+          if (next.delete(ancestorKey)) changed = true
+        }
+      }
+      return changed ? next : prev
+    })
+  }
+
+  function startRename(key: string) {
+    renameSettledRef.current = false
+    setEditingKey(key)
+  }
+
+  function commitRename(path: TocPath, currentLabel: string, nextLabel: string) {
+    if (renameSettledRef.current) return
+    renameSettledRef.current = true
     const trimmed = nextLabel.trim()
     setEditingKey(null)
-    if (!trimmed) return
+    if (!trimmed || trimmed === currentLabel) return
     onChange(updateTocEntry(entries, path, (entry) => ({ ...entry, label: trimmed, rawHtml: '' })))
+  }
+
+  function cancelRename() {
+    renameSettledRef.current = true
+    setEditingKey(null)
   }
 
   function toggleCollapse(key: string) {
@@ -373,35 +445,78 @@ export function TocPanel({
     setSelectionAnchor(key)
   }
 
+  function toggleSelectAllVisible() {
+    if (visibleRows.length === 0) return
+    if (allVisibleSelected) {
+      setSelectedKeys(new Set())
+      setSelectionAnchor(null)
+      return
+    }
+    setSelectedKeys(new Set(visibleRows.map((row) => row.key)))
+    const last = visibleRows[visibleRows.length - 1]
+    if (last) setSelectionAnchor(last.key)
+  }
+
   function clearSelection() {
     setSelectedKeys(new Set())
     setMultiSelectMode(false)
     setSelectionAnchor(null)
   }
 
+  function toggleMultiSelectMode() {
+    if (showCheckboxes) clearSelection()
+    else {
+      setEditingKey(null)
+      setMultiSelectMode(true)
+    }
+  }
+
   function selectedPaths(): TocPath[] {
     return [...selectedKeys].map(parseKeyToPath).filter((p) => p.length > 0)
   }
 
-  function handleBatchIndent() {
-    const paths = selectedPaths()
-    if (paths.length === 0) return
-    onChange(indentTocEntries(entries, paths))
-    setSelectedKeys(new Set())
+  function applyBatchResult(result: TocBatchMutationResult, restoreFocus = false) {
+    if (!result.changed) return
+    expandAncestorsOf(result.paths)
+    onChange(result.entries)
+    const nextKeys = result.paths.map((p) => p.join('.'))
+    setSelectedKeys(new Set(nextKeys))
+    const lastKey = nextKeys[nextKeys.length - 1] ?? null
+    setSelectionAnchor(lastKey)
+    if (lastKey) {
+      setFocusedKey(lastKey)
+      if (restoreFocus) pendingFocusKeyRef.current = lastKey
+    }
   }
 
-  function handleBatchOutdent() {
-    const paths = selectedPaths()
-    if (paths.length === 0) return
-    onChange(outdentTocEntries(entries, paths))
-    setSelectedKeys(new Set())
+  function applySingleResult(result: TocBatchMutationResult, restoreFocus = false) {
+    if (!result.changed) return
+    expandAncestorsOf(result.paths)
+    onChange(result.entries)
+    const nextKey = result.paths[0]?.join('.') ?? null
+    if (nextKey) {
+      setFocusedKey(nextKey)
+      setSelectionAnchor(nextKey)
+      if (restoreFocus) pendingFocusKeyRef.current = nextKey
+    }
   }
 
-  function handleBatchMove(delta: -1 | 1) {
+  function handleBatchIndent(restoreFocus = false) {
     const paths = selectedPaths()
     if (paths.length === 0) return
-    onChange(moveTocEntries(entries, paths, delta))
-    setSelectedKeys(new Set())
+    applyBatchResult(indentTocEntriesWithPaths(entries, paths), restoreFocus)
+  }
+
+  function handleBatchOutdent(restoreFocus = false) {
+    const paths = selectedPaths()
+    if (paths.length === 0) return
+    applyBatchResult(outdentTocEntriesWithPaths(entries, paths), restoreFocus)
+  }
+
+  function handleBatchMove(delta: -1 | 1, restoreFocus = false) {
+    const paths = selectedPaths()
+    if (paths.length === 0) return
+    applyBatchResult(moveTocEntriesWithPaths(entries, paths, delta), restoreFocus)
   }
 
   function handleBatchRemove(keepChildren: boolean) {
@@ -471,7 +586,7 @@ export function TocPanel({
         id: 'rename',
         label: '重命名 (F2)',
         icon: <Pencil size={14} strokeWidth={1.6} />,
-        onSelect: () => setEditingKey(key),
+        onSelect: () => startRename(key),
       },
       {
         id: 'edit-link',
@@ -501,28 +616,28 @@ export function TocPanel({
         icon: <ArrowUp size={14} strokeWidth={1.6} />,
         separatorBefore: true,
         disabled: !canMoveUp,
-        onSelect: () => onChange(moveTocEntry(entries, path, -1)),
+        onSelect: () => applySingleResult(moveTocEntriesWithPaths(entries, [path], -1)),
       },
       {
         id: 'move-down',
         label: '下移 (Alt+↓)',
         icon: <ArrowDown size={14} strokeWidth={1.6} />,
         disabled: !canMoveDown,
-        onSelect: () => onChange(moveTocEntry(entries, path, 1)),
+        onSelect: () => applySingleResult(moveTocEntriesWithPaths(entries, [path], 1)),
       },
       {
         id: 'indent',
         label: '缩进为上一项子项 (Tab)',
         icon: <IndentIncrease size={14} strokeWidth={1.6} />,
         disabled: !canIndent,
-        onSelect: () => onChange(indentTocEntry(entries, path)),
+        onSelect: () => applySingleResult(indentTocEntriesWithPaths(entries, [path])),
       },
       {
         id: 'outdent',
         label: '取消缩进升一级 (Shift+Tab)',
         icon: <IndentDecrease size={14} strokeWidth={1.6} />,
         disabled: !canOutdent,
-        onSelect: () => onChange(outdentTocEntry(entries, path)),
+        onSelect: () => applySingleResult(outdentTocEntriesWithPaths(entries, [path])),
       },
       {
         id: 'refresh-title',
@@ -561,9 +676,29 @@ export function TocPanel({
     ]
   }
 
+  function handlePanelKeyDown(event: React.KeyboardEvent<HTMLDivElement>) {
+    if (event.key !== 'Escape' || !showCheckboxes || editingKey || linkModal || generateOpen) return
+    const target = event.target as HTMLElement | null
+    if (
+      target &&
+      (target.tagName === 'TEXTAREA' ||
+        target.tagName === 'SELECT' ||
+        (target.tagName === 'INPUT' && (target as HTMLInputElement).type !== 'checkbox'))
+    ) {
+      return
+    }
+    event.preventDefault()
+    clearSelection()
+  }
+
   function handleListKeyDown(event: React.KeyboardEvent<HTMLUListElement>) {
     const target = event.target as HTMLElement | null
-    if (target && (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.tagName === 'SELECT')) {
+    if (
+      target &&
+      (target.tagName === 'TEXTAREA' ||
+        target.tagName === 'SELECT' ||
+        (target.tagName === 'INPUT' && (target as HTMLInputElement).type !== 'checkbox'))
+    ) {
       return
     }
 
@@ -587,13 +722,19 @@ export function TocPanel({
     if (event.key === 'ArrowDown' && !event.altKey) {
       event.preventDefault()
       const nextRow = visibleRows[Math.min(visibleRows.length - 1, currentIndex + 1)]
-      if (nextRow) setFocusedKey(nextRow.key)
+      if (nextRow) {
+        pendingFocusKeyRef.current = nextRow.key
+        setFocusedKey(nextRow.key)
+      }
       return
     }
     if (event.key === 'ArrowUp' && !event.altKey) {
       event.preventDefault()
       const prevRow = visibleRows[Math.max(0, currentIndex <= 0 ? 0 : currentIndex - 1)]
-      if (prevRow) setFocusedKey(prevRow.key)
+      if (prevRow) {
+        pendingFocusKeyRef.current = prevRow.key
+        setFocusedKey(prevRow.key)
+      }
       return
     }
 
@@ -609,28 +750,30 @@ export function TocPanel({
       toggleCollapse(activeRow.key)
       return
     }
-    if (event.key === 'F2') {
+    if (event.key === 'F2' && !showCheckboxes) {
       event.preventDefault()
-      setEditingKey(activeRow.key)
+      startRename(activeRow.key)
       return
     }
     if (event.key === 'Tab') {
       event.preventDefault()
       if (selectedKeys.size > 0) {
-        if (event.shiftKey) handleBatchOutdent()
-        else handleBatchIndent()
+        if (event.shiftKey) handleBatchOutdent(true)
+        else handleBatchIndent(true)
       } else if (event.shiftKey) {
-        if (activeRow.depth > 0) onChange(outdentTocEntry(entries, activeRow.path))
+        if (activeRow.depth > 0) {
+          applySingleResult(outdentTocEntriesWithPaths(entries, [activeRow.path]), true)
+        }
       } else if (activeRow.siblingIndex > 0) {
-        onChange(indentTocEntry(entries, activeRow.path))
+        applySingleResult(indentTocEntriesWithPaths(entries, [activeRow.path]), true)
       }
       return
     }
     if (event.altKey && (event.key === 'ArrowUp' || event.key === 'ArrowDown')) {
       event.preventDefault()
       const delta: -1 | 1 = event.key === 'ArrowUp' ? -1 : 1
-      if (selectedKeys.size > 0) handleBatchMove(delta)
-      else onChange(moveTocEntry(entries, activeRow.path, delta))
+      if (selectedKeys.size > 0) handleBatchMove(delta, true)
+      else applySingleResult(moveTocEntriesWithPaths(entries, [activeRow.path], delta), true)
       return
     }
     if (event.key === 'Delete') {
@@ -672,19 +815,19 @@ export function TocPanel({
     const fromPath = parseKeyToPath(sourceKey)
     if (fromPath.length === 0 || isSameOrDescendantTocPath(fromPath, item.path)) return
     const position = indicator && indicator.key === item.key ? indicator.position : 'after'
-    onChange(moveTocSubtree(entries, fromPath, item.path, position))
+    const result = moveTocSubtreeWithPath(entries, fromPath, item.path, position)
+    if (!result.changed) return
+    if (result.path) {
+      expandAncestorsOf([result.path])
+      const nextKey = result.path.join('.')
+      setFocusedKey(nextKey)
+      setSelectionAnchor(nextKey)
+    }
+    onChange(result.entries)
   }
 
-  const showCheckboxes = multiSelectMode || selectedKeys.size > 0
-  const selectedHasChildren = useMemo(() => {
-    for (const item of flat) {
-      if (selectedKeys.has(item.key) && item.hasChildren) return true
-    }
-    return false
-  }, [flat, selectedKeys])
-
   return (
-    <div className="toc-panel">
+    <div className={`toc-panel${showCheckboxes ? ' is-selecting' : ''}`} onKeyDown={handlePanelKeyDown}>
       <div className="toc-head">
         <div className="toc-toolbar" role="toolbar" aria-label="目录工具栏">
           <div className="toc-toolbar-main">
@@ -729,6 +872,17 @@ export function TocPanel({
             >
               <Redo2 size={13} strokeWidth={1.75} aria-hidden="true" />
             </button>
+            <button
+              type="button"
+              className={`toc-icon-btn${showCheckboxes ? ' is-active' : ''}`}
+              aria-label="多选目录项"
+              aria-pressed={showCheckboxes}
+              title={showCheckboxes ? '退出多选模式 (Esc)' : '多选批量调级'}
+              disabled={flat.length === 0}
+              onClick={toggleMultiSelectMode}
+            >
+              <CheckSquare size={13} strokeWidth={1.75} aria-hidden="true" />
+            </button>
             <DropdownMenu.Root>
               <DropdownMenu.Trigger asChild>
                 <button
@@ -755,10 +909,8 @@ export function TocPanel({
                   <DropdownMenu.Separator className="context-menu-sep" />
                   <DropdownMenu.Item
                     className="context-menu-item"
-                    onSelect={() => {
-                      if (showCheckboxes) clearSelection()
-                      else setMultiSelectMode(true)
-                    }}
+                    disabled={flat.length === 0}
+                    onSelect={toggleMultiSelectMode}
                   >
                     <span className="context-menu-icon" aria-hidden="true">
                       <CheckSquare size={14} strokeWidth={1.6} />
@@ -828,47 +980,6 @@ export function TocPanel({
             ) : null}
           </div>
         ) : null}
-
-        {selectedKeys.size > 0 ? (
-          <div className="toc-batch-bar" role="region" aria-label="批量操作">
-            <span className="toc-batch-count">已选 {selectedKeys.size} 项</span>
-            <div className="toc-batch-actions">
-              <button type="button" title="批量上移" aria-label="批量上移" onClick={() => handleBatchMove(-1)}>
-                <ArrowUp size={12} strokeWidth={1.75} aria-hidden="true" />
-              </button>
-              <button type="button" title="批量下移" aria-label="批量下移" onClick={() => handleBatchMove(1)}>
-                <ArrowDown size={12} strokeWidth={1.75} aria-hidden="true" />
-              </button>
-              <button type="button" title="批量缩进" aria-label="批量缩进" onClick={handleBatchIndent}>
-                <IndentIncrease size={12} strokeWidth={1.75} aria-hidden="true" />
-              </button>
-              <button type="button" title="批量取消缩进" aria-label="批量取消缩进" onClick={handleBatchOutdent}>
-                <IndentDecrease size={12} strokeWidth={1.75} aria-hidden="true" />
-              </button>
-              <button
-                type="button"
-                className="is-danger"
-                title={selectedHasChildren ? '批量删除（保留子项上提）' : '批量删除'}
-                aria-label="批量删除"
-                onClick={() => handleBatchRemove(selectedHasChildren)}
-              >
-                <Trash2 size={12} strokeWidth={1.75} aria-hidden="true" />
-              </button>
-              <button type="button" title="取消多选" aria-label="取消多选" onClick={clearSelection}>
-                <X size={12} strokeWidth={1.75} aria-hidden="true" />
-              </button>
-            </div>
-          </div>
-        ) : null}
-
-        {feedback ? (
-          <p className="toc-feedback" role="status">
-            <span>{feedback}</span>
-            <button type="button" aria-label="关闭提示" onClick={() => setFeedback(null)}>
-              <X size={11} strokeWidth={1.75} aria-hidden="true" />
-            </button>
-          </p>
-        ) : null}
       </div>
 
       {flat.length === 0 ? (
@@ -905,6 +1016,7 @@ export function TocPanel({
         </div>
       ) : (
         <ul
+          ref={listRef}
           className="toc-list"
           role="tree"
           aria-label="书籍目录"
@@ -944,7 +1056,7 @@ export function TocPanel({
                   data-toc-depth={depth}
                   className={`toc-item${isActive ? ' is-active' : ''}${isSelected ? ' is-selected' : ''}${isFocused ? ' is-focused' : ''}${isBroken ? ' broken' : ''}${dragKey === key ? ' is-dragging' : ''}${dropClass}`}
                   style={{ paddingLeft: `${8 + visualDepth * 14}px` }}
-                  draggable={!isEditing && !isFiltering}
+                  draggable={!isEditing && !isFiltering && !showCheckboxes}
                   onDragStart={(event) => {
                     setDragKey(key)
                     event.dataTransfer.effectAllowed = 'move'
@@ -960,17 +1072,6 @@ export function TocPanel({
                     setDropIndicator(null)
                   }}
                 >
-                  {showCheckboxes ? (
-                    <input
-                      type="checkbox"
-                      className="toc-select-box"
-                      checked={isSelected}
-                      aria-label={`选择 ${entry.label || '目录项'}`}
-                      onClick={(event) => event.stopPropagation()}
-                      onChange={(event) => toggleSelect(key, (event.nativeEvent as MouseEvent).shiftKey)}
-                    />
-                  ) : null}
-
                   {hasChildren ? (
                     <button
                       type="button"
@@ -997,15 +1098,16 @@ export function TocPanel({
                       aria-label="重命名目录项"
                       autoFocus
                       defaultValue={entry.label}
-                      onBlur={(event) => commitRename(path, event.target.value)}
+                      onFocus={(event) => event.currentTarget.select()}
+                      onBlur={(event) => commitRename(path, entry.label, event.target.value)}
                       onKeyDown={(event) => {
                         if (event.key === 'Enter') {
                           event.preventDefault()
-                          commitRename(path, event.currentTarget.value)
+                          commitRename(path, entry.label, event.currentTarget.value)
                         }
                         if (event.key === 'Escape') {
                           event.preventDefault()
-                          setEditingKey(null)
+                          cancelRename()
                         }
                       }}
                     />
@@ -1013,10 +1115,16 @@ export function TocPanel({
                     <button
                       type="button"
                       className="toc-label"
-                      title={entry.href ? `${entry.label}\n${entry.href}` : entry.label}
+                      title={
+                        showCheckboxes
+                          ? `点击选中或取消「${entry.label || '目录项'}」（支持 Shift 连选）`
+                          : entry.href
+                            ? `${entry.label}\n${entry.href}`
+                            : entry.label
+                      }
                       onClick={(event) => {
                         setFocusedKey(key)
-                        if (event.shiftKey || event.metaKey || event.ctrlKey) {
+                        if (showCheckboxes || event.shiftKey || event.metaKey || event.ctrlKey) {
                           event.preventDefault()
                           toggleSelect(key, event.shiftKey)
                           return
@@ -1025,8 +1133,9 @@ export function TocPanel({
                         if (entry.href) onNavigate(entry.href)
                       }}
                       onDoubleClick={(event) => {
+                        if (showCheckboxes) return
                         event.stopPropagation()
-                        setEditingKey(key)
+                        startRename(key)
                       }}
                     >
                       <span className="toc-label-text">{entry.label || '（空标题）'}</span>
@@ -1049,8 +1158,19 @@ export function TocPanel({
                   ) : null}
 
                   {!isEditing ? (
-                    <span className="toc-row-more">
-                      <RowMenuDropdown ariaLabel={`${entry.label || '目录项'} 的更多操作`} items={menuItems} />
+                    <span className={`toc-row-trail${showCheckboxes ? ' is-select' : ' toc-row-more'}`}>
+                      {showCheckboxes ? (
+                        <input
+                          type="checkbox"
+                          className="toc-select-box"
+                          checked={isSelected}
+                          aria-label={`选择 ${entry.label || '目录项'}`}
+                          onClick={(event) => event.stopPropagation()}
+                          onChange={(event) => toggleSelect(key, (event.nativeEvent as MouseEvent).shiftKey)}
+                        />
+                      ) : (
+                        <RowMenuDropdown ariaLabel={`${entry.label || '目录项'} 的更多操作`} items={menuItems} />
+                      )}
                     </span>
                   ) : null}
                 </li>
@@ -1059,6 +1179,98 @@ export function TocPanel({
           })}
         </ul>
       )}
+
+      <div className="toc-footer-anchor">
+        {feedback ? (
+          <p className="toc-feedback" role="status">
+            <span>{feedback}</span>
+            <button type="button" aria-label="关闭提示" onClick={() => setFeedback(null)}>
+              <X size={11} strokeWidth={1.75} aria-hidden="true" />
+            </button>
+          </p>
+        ) : null}
+
+        {showCheckboxes ? (
+          <div className="toc-batch-bar" role="region" aria-label="批量操作">
+            <div className="toc-batch-top">
+              <span className="toc-batch-count">已选 {selectedKeys.size} 项</span>
+              <div className="toc-batch-top-actions">
+                <button
+                  type="button"
+                  className="toc-batch-link"
+                  disabled={visibleRows.length === 0}
+                  onClick={toggleSelectAllVisible}
+                >
+                  {allVisibleSelected ? '取消全选' : '全选'}
+                </button>
+                <button
+                  type="button"
+                  className="toc-batch-done"
+                  aria-label="退出多选"
+                  title="退出多选模式 (Esc)"
+                  onClick={clearSelection}
+                >
+                  完成
+                </button>
+              </div>
+            </div>
+            <div className="toc-batch-actions">
+              <button
+                type="button"
+                title={batchCapabilities.canMoveUp ? '批量上移 (Alt+↑)' : '无法继续上移'}
+                aria-label="批量上移"
+                disabled={!batchCapabilities.canMoveUp}
+                onClick={() => handleBatchMove(-1)}
+              >
+                <ArrowUp size={13} strokeWidth={1.75} aria-hidden="true" />
+              </button>
+              <button
+                type="button"
+                title={batchCapabilities.canMoveDown ? '批量下移 (Alt+↓)' : '无法继续下移'}
+                aria-label="批量下移"
+                disabled={!batchCapabilities.canMoveDown}
+                onClick={() => handleBatchMove(1)}
+              >
+                <ArrowDown size={13} strokeWidth={1.75} aria-hidden="true" />
+              </button>
+              <button
+                type="button"
+                title={batchCapabilities.canIndent ? '批量缩进 (Tab)' : '选中的首项无法继续缩进'}
+                aria-label="批量缩进"
+                disabled={!batchCapabilities.canIndent}
+                onClick={() => handleBatchIndent()}
+              >
+                <IndentIncrease size={13} strokeWidth={1.75} aria-hidden="true" />
+              </button>
+              <button
+                type="button"
+                title={batchCapabilities.canOutdent ? '批量取消缩进 (Shift+Tab)' : '已处于顶层，无法继续升一级'}
+                aria-label="批量取消缩进"
+                disabled={!batchCapabilities.canOutdent}
+                onClick={() => handleBatchOutdent()}
+              >
+                <IndentDecrease size={13} strokeWidth={1.75} aria-hidden="true" />
+              </button>
+              <button
+                type="button"
+                className="is-danger"
+                title={
+                  selectedKeys.size === 0
+                    ? '先勾选要删除的目录项'
+                    : selectedHasChildren
+                      ? '批量删除（保留子项上提）'
+                      : '批量删除'
+                }
+                aria-label="批量删除"
+                disabled={selectedKeys.size === 0}
+                onClick={() => handleBatchRemove(selectedHasChildren)}
+              >
+                <Trash2 size={13} strokeWidth={1.75} aria-hidden="true" />
+              </button>
+            </div>
+          </div>
+        ) : null}
+      </div>
 
       <TocLinkDialog
         open={linkModal !== null}

@@ -274,21 +274,35 @@ export function insertTocEntry(
   })
 }
 
+export interface TocBatchMutationResult {
+  entries: TocEntry[]
+  paths: TocPath[]
+  changed: boolean
+}
+
+export interface TocSingleMutationResult {
+  entries: TocEntry[]
+  path: TocPath | null
+  changed: boolean
+}
+
 /**
- * Moves a node (with its subtree) to sit before, after, or inside `toPath`.
+ * Moves a node (with its subtree) to sit before, after, or inside `toPath`, returning both the
+ * updated tree and the moved node's resulting path.
  * Refuses drops onto the node itself or any of its descendants so cycles cannot form.
  */
-export function moveTocSubtree(
+export function moveTocSubtreeWithPath(
   entries: TocEntry[],
   fromPath: TocPath,
   toPath: TocPath,
   position: TocInsertPosition,
-): TocEntry[] {
-  if (fromPath.length === 0 || toPath.length === 0) return entries
-  if (isSameOrDescendantTocPath(fromPath, toPath)) return entries
-  const moved = getTocEntry(entries, fromPath)
-  const target = getTocEntry(entries, toPath)
-  if (!moved || !target) return entries
+): TocSingleMutationResult {
+  if (fromPath.length === 0 || toPath.length === 0) return { entries, path: null, changed: false }
+  if (isSameOrDescendantTocPath(fromPath, toPath)) return { entries, path: fromPath, changed: false }
+  const cloned = cloneToc(entries)
+  const moved = getTocEntry(cloned, fromPath)
+  const target = getTocEntry(cloned, toPath)
+  if (!moved || !target) return { entries, path: null, changed: false }
 
   // Adjust target path coordinates after removing `fromPath` when both share `fromPath`'s parent.
   const depth = fromPath.length - 1
@@ -301,8 +315,24 @@ export function moveTocSubtree(
     adjustedTo[depth] = (adjustedTo[depth] ?? 0) - 1
   }
 
-  const removed = removeTocEntry(entries, fromPath)
-  return insertTocEntry(removed, adjustedTo, moved, position)
+  const removed = removeTocEntry(cloned, fromPath)
+  const next = insertTocEntry(removed, adjustedTo, moved, position)
+  const nextPath = findTocPathByRef(next, moved)
+  const changed = nextPath !== null && compareTocPaths(fromPath, nextPath) !== 0
+  return { entries: changed ? next : entries, path: nextPath ?? fromPath, changed }
+}
+
+/**
+ * Moves a node (with its subtree) to sit before, after, or inside `toPath`.
+ * Refuses drops onto the node itself or any of its descendants so cycles cannot form.
+ */
+export function moveTocSubtree(
+  entries: TocEntry[],
+  fromPath: TocPath,
+  toPath: TocPath,
+  position: TocInsertPosition,
+): TocEntry[] {
+  return moveTocSubtreeWithPath(entries, fromPath, toPath, position).entries
 }
 
 /** Makes an entry (and its subtree) the last child of its previous sibling. */
@@ -345,15 +375,16 @@ export function outdentTocEntry(entries: TocEntry[], path: TocPath): TocEntry[] 
   })
 }
 
-/** Batch-indents normalized selections while keeping un-indentable leading blocks aligned. */
-export function indentTocEntries(entries: TocEntry[], paths: TocPath[]): TocEntry[] {
+/** Batch-indents normalized selections while keeping un-indentable leading blocks aligned and returning new paths. */
+export function indentTocEntriesWithPaths(entries: TocEntry[], paths: TocPath[]): TocBatchMutationResult {
   const normalized = normalizeTocPaths(paths)
-  if (normalized.length === 0) return entries
+  if (normalized.length === 0) return { entries, paths: [], changed: false }
   let current = cloneToc(entries)
   const targets = normalized
     .map((path) => getTocEntry(current, path))
     .filter((entry): entry is TocEntry => entry !== null)
   const skipped = new Set<TocEntry>()
+  let changed = false
 
   for (const target of targets) {
     const livePath = findTocPathByRef(current, target)
@@ -366,39 +397,72 @@ export function indentTocEntries(entries: TocEntry[], paths: TocPath[]): TocEntr
       continue
     }
     current = indentTocEntry(current, livePath)
+    changed = true
   }
-  return current
+
+  const nextPaths = targets
+    .map((target) => findTocPathByRef(current, target))
+    .filter((path): path is TocPath => path !== null)
+  return { entries: changed ? current : entries, paths: nextPaths, changed }
 }
 
-/** Batch-outdents normalized selections in reverse document order to keep order-preserving lifting stable. */
-export function outdentTocEntries(entries: TocEntry[], paths: TocPath[]): TocEntry[] {
+/** Batch-indents normalized selections while keeping un-indentable leading blocks aligned. */
+export function indentTocEntries(entries: TocEntry[], paths: TocPath[]): TocEntry[] {
+  return indentTocEntriesWithPaths(entries, paths).entries
+}
+
+/** Batch-outdents normalized selections in reverse document order and returns their resulting paths. */
+export function outdentTocEntriesWithPaths(entries: TocEntry[], paths: TocPath[]): TocBatchMutationResult {
   const normalized = normalizeTocPaths(paths)
-  if (normalized.length === 0) return entries
+  if (normalized.length === 0) return { entries, paths: [], changed: false }
   let current = cloneToc(entries)
   const targets = normalized
     .map((path) => getTocEntry(current, path))
     .filter((entry): entry is TocEntry => entry !== null)
+  let changed = false
 
   for (let i = targets.length - 1; i >= 0; i -= 1) {
     const target = targets[i]
     if (!target) continue
     const livePath = findTocPathByRef(current, target)
     if (!livePath || livePath.length < 2) continue
+    const parentPath = livePath.slice(0, -1)
+    const parentIndex = parentPath[parentPath.length - 1]
+    if (parentIndex === undefined) continue
     current = outdentTocEntry(current, livePath)
+    changed = true
+    // `outdentTocEntry` clones the lifted node when absorbing trailing siblings, so rebind our tracked ref.
+    const liftedPath = [...parentPath.slice(0, -1), parentIndex + 1]
+    const liftedNode = getTocEntry(current, liftedPath)
+    if (liftedNode) targets[i] = liftedNode
   }
-  return current
+
+  const nextPaths = targets
+    .map((target) => findTocPathByRef(current, target))
+    .filter((path): path is TocPath => path !== null)
+  return { entries: changed ? current : entries, paths: nextPaths, changed }
 }
 
-/** Batch-moves normalized selections up or down among their respective siblings without collapsing blocks. */
-export function moveTocEntries(entries: TocEntry[], paths: TocPath[], delta: -1 | 1): TocEntry[] {
+/** Batch-outdents normalized selections in reverse document order to keep order-preserving lifting stable. */
+export function outdentTocEntries(entries: TocEntry[], paths: TocPath[]): TocEntry[] {
+  return outdentTocEntriesWithPaths(entries, paths).entries
+}
+
+/** Batch-moves normalized selections up or down among their respective siblings and returns their resulting paths. */
+export function moveTocEntriesWithPaths(
+  entries: TocEntry[],
+  paths: TocPath[],
+  delta: -1 | 1,
+): TocBatchMutationResult {
   const normalized = normalizeTocPaths(paths)
-  if (normalized.length === 0) return entries
+  if (normalized.length === 0) return { entries, paths: [], changed: false }
   let current = cloneToc(entries)
   const targets = normalized
     .map((path) => getTocEntry(current, path))
     .filter((entry): entry is TocEntry => entry !== null)
   const ordered = delta === -1 ? targets : [...targets].reverse()
   const blocked = new Set<TocEntry>()
+  let changed = false
 
   for (const target of ordered) {
     const livePath = findTocPathByRef(current, target)
@@ -417,8 +481,18 @@ export function moveTocEntries(entries: TocEntry[], paths: TocPath[], delta: -1 
       continue
     }
     current = moveTocEntry(current, livePath, delta)
+    changed = true
   }
-  return current
+
+  const nextPaths = targets
+    .map((target) => findTocPathByRef(current, target))
+    .filter((path): path is TocPath => path !== null)
+  return { entries: changed ? current : entries, paths: nextPaths, changed }
+}
+
+/** Batch-moves normalized selections up or down among their respective siblings without collapsing blocks. */
+export function moveTocEntries(entries: TocEntry[], paths: TocPath[], delta: -1 | 1): TocEntry[] {
+  return moveTocEntriesWithPaths(entries, paths, delta).entries
 }
 
 /** Batch-removes normalized selections in reverse order. */
