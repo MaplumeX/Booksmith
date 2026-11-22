@@ -71,6 +71,7 @@ export function createLanguageModel(config: ResolvedProviderConfig): LanguageMod
   const provider = createOpenAICompatible({
     name: 'booksmith-openai-compatible',
     baseURL: cleanUrl,
+    supportsMultiPartToolContent: true,
     ...(config.apiKey ? { apiKey: config.apiKey } : {}),
   })
   return provider.chatModel(modelId)

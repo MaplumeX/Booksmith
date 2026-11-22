@@ -138,6 +138,7 @@ export {
   AgentWorkspace,
   diffProposalSnapshots,
   isReadOnlyAgentTool,
+  probeImageDimensions,
 } from './agentTools'
 export type {
   AgentProposal,

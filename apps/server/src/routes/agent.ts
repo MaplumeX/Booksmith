@@ -1133,6 +1133,11 @@ export function registerAgentRoutes(app: FastifyInstance, deps: AgentDeps): void
           workspaceRows.map((row) => [row.path, row.bytes ? new Uint8Array(row.bytes) : emptyBinary]),
         ),
       }
+      const entrySizes = new Map(workspaceRows.map((row) => [row.path, row.byteSize]))
+      const loadBinary = async (entryPath: string): Promise<Uint8Array | null> => {
+        const entry = await fileStore.getEntry(book.id, entryPath)
+        return entry ? new Uint8Array(entry.bytes) : null
+      }
       const overlay = parseOverlay(body)
       const userSettings = await loadUserSettings(db, user.id)
       if (controller.signal.aborted || raw.destroyed || raw.closed) {
@@ -1224,6 +1229,8 @@ export function registerAgentRoutes(app: FastifyInstance, deps: AgentDeps): void
 
       const result = await runAgentTurn({
         archive,
+        entrySizes,
+        loadBinary,
         overlay,
         provider: {
           provider: isAgentProvider(profile.provider) ? profile.provider : 'openai-compatible',

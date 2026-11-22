@@ -22,6 +22,8 @@ export interface ScannedHeading {
   id: string
   /** 0-based order among all h1–h6 headings in `path`, or -1 for untitled fallback. */
   headingIndex: number
+  /** 1-based line number of the opening `<h1..h6>` tag in the chapter source, when located. */
+  line?: number
 }
 
 export interface ScanHeadingsOptions {
@@ -183,6 +185,60 @@ export function listDocumentAnchors(xhtml: string, codec: XmlCodec): DocumentAnc
   return anchors
 }
 
+function findHeadingSourceLines(xhtml: string): number[] {
+  const lines: number[] = []
+  let line = 1
+  let i = 0
+
+  const advance = (end: number) => {
+    while (i < end && i < xhtml.length) {
+      if (xhtml[i] === '\n') line += 1
+      i += 1
+    }
+  }
+
+  while (i < xhtml.length) {
+    if (xhtml.startsWith('<!--', i)) {
+      const end = xhtml.indexOf('-->', i + 4)
+      advance(end >= 0 ? end + 3 : xhtml.length)
+      continue
+    }
+    if (xhtml.startsWith('<![CDATA[', i)) {
+      const end = xhtml.indexOf(']]>', i + 9)
+      advance(end >= 0 ? end + 3 : xhtml.length)
+      continue
+    }
+    if (xhtml[i] === '<') {
+      const match = /^<(?:[A-Za-z_][\w.-]*:)?h([1-6])(?=[\s/>])/i.exec(xhtml.slice(i, i + 40))
+      if (match) {
+        lines.push(line)
+      }
+      // Skip to the closing `>` respecting quoted attribute values so `<` inside attributes can't confuse us.
+      let end = i + 1
+      while (end < xhtml.length) {
+        const ch = xhtml[end]
+        if (ch === '"' || ch === "'") {
+          end += 1
+          while (end < xhtml.length && xhtml[end] !== ch) end += 1
+          if (end < xhtml.length) end += 1
+          continue
+        }
+        if (ch === '>') {
+          end += 1
+          break
+        }
+        end += 1
+      }
+      advance(end)
+      continue
+    }
+    if (xhtml[i] === '\n') line += 1
+    i += 1
+  }
+
+  return lines
+}
+
 /** Scans spine chapters using `XmlCodec` and returns `h1`–`h6` headings in reading order. */
 export function scanBookHeadings(
   pkg: EpubPackage,
@@ -206,6 +262,7 @@ export function scanBookHeadings(
       continue
     }
 
+    const headingLines = findHeadingSourceLines(xhtml)
     let headingIndex = 0
     let matchedInChapter = 0
     walkElements(doc.documentElement, (el) => {
@@ -217,6 +274,7 @@ export function scanBookHeadings(
       const label = normalizeText(el.textContent)
       if (!label || !allowedLevels.has(level)) return
       matchedInChapter += 1
+      const line = headingLines[currentIndex]
       results.push({
         key: `${path}#${currentIndex}`,
         path,
@@ -224,6 +282,7 @@ export function scanBookHeadings(
         label,
         id: findAnchorIdInside(el),
         headingIndex: currentIndex,
+        ...(line !== undefined ? { line } : {}),
       })
     })
 

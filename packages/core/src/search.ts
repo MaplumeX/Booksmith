@@ -2,6 +2,7 @@ export interface SearchOptions {
   caseSensitive?: boolean
   regex?: boolean
   maxResults?: number
+  previewRadius?: number
 }
 
 export interface SearchMatch {
@@ -47,9 +48,9 @@ function positionOf(text: string, offset: number): { line: number; column: numbe
   return { line, column: offset - lineStart + 1 }
 }
 
-function previewOf(text: string, offset: number, length: number): string {
-  const start = Math.max(0, offset - PREVIEW_RADIUS)
-  const end = Math.min(text.length, offset + length + PREVIEW_RADIUS)
+function previewOf(text: string, offset: number, length: number, radius = PREVIEW_RADIUS): string {
+  const start = Math.max(0, offset - radius)
+  const end = Math.min(text.length, offset + length + radius)
   const snippet = text.slice(start, end).replace(/\s+/g, ' ').trim()
   return `${start > 0 ? '…' : ''}${snippet}${end < text.length ? '…' : ''}`
 }
@@ -63,6 +64,10 @@ export function searchBook(files: SearchFile[], query: string, options: SearchOp
   if (!pattern) return { matches: [], truncated: false }
 
   const maxResults = options.maxResults ?? 2000
+  const previewRadius =
+    typeof options.previewRadius === 'number' && Number.isFinite(options.previewRadius)
+      ? Math.max(10, Math.min(200, Math.floor(options.previewRadius)))
+      : PREVIEW_RADIUS
   const matches: SearchMatch[] = []
 
   for (const file of files) {
@@ -78,7 +83,7 @@ export function searchBook(files: SearchFile[], query: string, options: SearchOp
           offset: match.index,
           line,
           column,
-          preview: previewOf(file.text, match.index, match[0].length),
+          preview: previewOf(file.text, match.index, match[0].length, previewRadius),
         })
         if (matches.length >= maxResults) return { matches, truncated: true }
       }

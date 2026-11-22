@@ -8,6 +8,7 @@ import {
   diffProposalSnapshots,
   isReadOnlyAgentTool,
   openEpub,
+  probeImageDimensions,
 } from '../src'
 import type { XmlCodec } from '../src/xml'
 import { readFixture } from './helpers'
@@ -103,8 +104,11 @@ describe('AgentWorkspace read tools on real EPUB fixture', () => {
       'get_metadata',
       'get_toc',
       'scan_headings',
+      'list_anchors',
+      'find_references',
+      'inspect_image',
     ])
-    expect(AGENT_TOOL_NAMES).toHaveLength(21)
+    expect(AGENT_TOOL_NAMES).toHaveLength(27)
     for (const name of AGENT_READ_ONLY_TOOL_NAMES) {
       expect(AGENT_TOOL_NAMES).toContain(name)
       expect(isReadOnlyAgentTool(name)).toBe(true)
@@ -112,7 +116,9 @@ describe('AgentWorkspace read tools on real EPUB fixture', () => {
     const writeTools = AGENT_TOOL_NAMES.filter((name) => !isReadOnlyAgentTool(name))
     expect(writeTools).toEqual([
       'edit_file',
+      'replace_in_book',
       'write_file',
+      'format_file',
       'update_metadata',
       'update_toc',
       'generate_toc',
@@ -120,6 +126,7 @@ describe('AgentWorkspace read tools on real EPUB fixture', () => {
       'create_chapter',
       'rename_file',
       'delete_file',
+      'reorder_spine',
       'split_chapter',
       'merge_chapters',
       'link_stylesheets',
@@ -567,5 +574,341 @@ describe('AgentWorkspace structural tools (metadata, TOC, create, rename, delete
     expect(deltaFollow.focusPath).toBe(ch1)
     expect(deltaFollow.changedFiles.map((f) => f.path)).toContain(ch1)
     expect(deltaFollow.changedFiles.map((f) => f.path)).toContain('EPUB/text/ch002.xhtml')
+  })
+})
+
+// Minimal valid 2x3 PNG header (8-byte signature + IHDR chunk) for dimension probe tests.
+function makeSamplePng(width: number, height: number): Uint8Array {
+  const bytes = new Uint8Array(24)
+  bytes.set([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a], 0)
+  bytes.set([0x00, 0x00, 0x00, 0x0d, 0x49, 0x48, 0x44, 0x52], 8)
+  const view = new DataView(bytes.buffer)
+  view.setUint32(16, width, false)
+  view.setUint32(20, height, false)
+  return bytes
+}
+
+describe('AgentWorkspace enhanced book-editing toolkit (batch, structure, ergonomics, proofreading & vision)', () => {
+  it('supports atomic multi-edit in edit_file with changedRanges and full rollback on failure', () => {
+    const ws = openEmptyWorkspace()
+    const ch1 = 'EPUB/text/ch001.xhtml'
+    expect(
+      ws.executeTool('edit_file', {
+        path: ch1,
+        oldText: '<p>从这里开始写。</p>',
+        newText: '<p>第一句旧词。</p>\n<p>第二句旧词。</p>',
+      }).ok,
+    ).toBe(true)
+
+    // Atomic batch of 2 edits succeeds and returns changedRanges
+    const batchOk = ws.executeTool('edit_file', {
+      path: ch1,
+      edits: [
+        { oldText: '第一句旧词', newText: '第一句新词' },
+        { oldText: '第二句旧词', newText: '第二句新词' },
+      ],
+    })
+    expect(batchOk.ok).toBe(true)
+    const okData = batchOk.data as {
+      replacements: number
+      editCount: number
+      changedRanges: Array<{ editIndex: number; startLine: number; endLine: number }>
+    }
+    expect(okData.replacements).toBe(2)
+    expect(okData.editCount).toBe(2)
+    expect(okData.changedRanges).toHaveLength(2)
+    expect(okData.changedRanges[0]!.startLine).toBeGreaterThanOrEqual(1)
+    expect(ws.getText(ch1)).toContain('第一句新词')
+    expect(ws.getText(ch1)).toContain('第二句新词')
+
+    // If second edit fails, first edit must NOT be committed
+    const batchFail = ws.executeTool('edit_file', {
+      path: ch1,
+      edits: [
+        { oldText: '第一句新词', newText: '不该生效的词' },
+        { oldText: '不存在的句子', newText: 'x' },
+      ],
+    })
+    expect(batchFail.ok).toBe(false)
+    expect(batchFail.error).toContain('edits[1].oldText')
+    expect(ws.getText(ch1)).not.toContain('不该生效的词')
+  })
+
+  it('supports replace_in_book with dryRun, literal $ safety, regex lookarounds/captures, scope, and XML rollback', () => {
+    const ws = openEmptyWorkspace()
+    const ch1 = 'EPUB/text/ch001.xhtml'
+    expect(ws.executeTool('create_chapter', { filename: 'ch002.xhtml', title: '第二章' }).ok).toBe(true)
+    const ch2 = 'EPUB/text/ch002.xhtml'
+    expect(
+      ws.executeTool('edit_file', {
+        path: ch1,
+        oldText: '<p>从这里开始写。</p>',
+        newText: '<p>术语A 和 价格 100 元。</p>',
+      }).ok,
+    ).toBe(true)
+    expect(
+      ws.executeTool('edit_file', {
+        path: ch2,
+        oldText: '<p></p>',
+        newText: '<p>术语A 再次出现，价格 200 元。</p>',
+      }).ok,
+    ).toBe(true)
+
+    // Invalid regex fails fast
+    const badRe = ws.executeTool('replace_in_book', { query: '[unclosed', replacement: 'x', regex: true })
+    expect(badRe.ok).toBe(false)
+    expect(badRe.error).toContain('invalid regular expression')
+
+    // Dry run reports counts & samples without mutating
+    const dry = ws.executeTool('replace_in_book', {
+      query: '术语A',
+      replacement: '术语$1',
+      dryRun: true,
+    })
+    expect(dry.ok).toBe(true)
+    const dryData = dry.data as { dryRun: boolean; filesChanged: number; totalReplacements: number }
+    expect(dryData.dryRun).toBe(true)
+    expect(dryData.filesChanged).toBe(2)
+    expect(dryData.totalReplacements).toBe(2)
+    expect(ws.getText(ch1)).toContain('术语A')
+
+    // Literal replace preserves literal `$1` without regex expansion
+    const literalRes = ws.executeTool('replace_in_book', { query: '术语A', replacement: '术语$1' })
+    expect(literalRes.ok).toBe(true)
+    expect(ws.getText(ch1)).toContain('术语$1')
+    expect(ws.getText(ch2)).toContain('术语$1')
+
+    // Regex replace with lookbehind + capture group works accurately
+    const regexRes = ws.executeTool('replace_in_book', {
+      query: '(?<=价格 )(\\d+)(?= 元)',
+      replacement: '<em>$1</em>',
+      regex: true,
+    })
+    expect(regexRes.ok).toBe(true)
+    expect(ws.getText(ch1)).toContain('价格 <em>100</em> 元')
+    expect(ws.getText(ch2)).toContain('价格 <em>200</em> 元')
+
+    // XML-breaking replacement rolls back atomically across all files
+    const xmlBreak = ws.executeTool('replace_in_book', {
+      query: '<em>',
+      replacement: '<em><span>',
+    })
+    expect(xmlBreak.ok).toBe(false)
+    expect(xmlBreak.error).toContain('XML')
+    expect(ws.getText(ch1)).not.toContain('<span>')
+    expect(ws.getText(ch2)).not.toContain('<span>')
+  })
+
+  it('supports format_file, reorder_spine, list_anchors, find_references, and scan_headings line numbers', () => {
+    const ws = openEmptyWorkspace()
+    const ch1 = 'EPUB/text/ch001.xhtml'
+    expect(ws.executeTool('create_chapter', { filename: 'ch002.xhtml', title: '第二章' }).ok).toBe(true)
+    const ch2 = 'EPUB/text/ch002.xhtml'
+
+    // Write minified single-line XHTML into ch2 and format it via format_file
+    const minified =
+      '<?xml version="1.0" encoding="UTF-8"?><html xmlns="http://www.w3.org/1999/xhtml"><head><title>第二章</title></head><body><h1 id="sec2">第二章</h1><p><a name="fn1">注</a>见<a href="ch001.xhtml">第一章</a></p></body></html>'
+    expect(ws.executeTool('write_file', { path: ch2, content: minified }).ok).toBe(true)
+    expect(ws.getText(ch2)!.split('\n').length).toBe(1)
+
+    const formatted = ws.executeTool('format_file', { paths: [ch2, 'EPUB/styles/stylesheet1.css'] })
+    expect(formatted.ok).toBe(true)
+    expect((formatted.data as { formattedPaths: string[] }).formattedPaths).toContain(ch2)
+    expect(ws.getText(ch2)!.split('\n').length).toBeGreaterThan(5)
+
+    // scan_headings returns accurate 1-based line numbers
+    const headings = ws.executeTool('scan_headings')
+    expect(headings.ok).toBe(true)
+    const h2Entry = (headings.data as { headings: Array<{ path: string; label: string; line?: number }> }).headings.find(
+      (h) => h.path === ch2,
+    )!
+    expect(h2Entry.label).toBe('第二章')
+    expect(typeof h2Entry.line).toBe('number')
+    expect(ws.getText(ch2)!.split('\n')[h2Entry.line! - 1]).toContain('第二章')
+
+    // list_anchors returns ids and <a name> with line numbers
+    const anchors = ws.executeTool('list_anchors', { path: ch2 })
+    expect(anchors.ok).toBe(true)
+    const anchorItems = (anchors.data as { anchors: Array<{ id: string; tag: string; line?: number }> }).anchors
+    expect(anchorItems.map((a) => a.id)).toEqual(['sec2', 'fn1'])
+    expect(anchorItems[0]!.line).toBe(h2Entry.line)
+
+    // find_references supports reverse lookup & outgoing lookup
+    const incoming = ws.executeTool('find_references', { targetPath: ch1 })
+    expect(incoming.ok).toBe(true)
+    expect((incoming.data as { references: Array<{ from: string }> }).references.some((r) => r.from === ch2)).toBe(true)
+
+    const outgoing = ws.executeTool('find_references', { fromPath: ch2 })
+    expect(outgoing.ok).toBe(true)
+    expect(
+      (outgoing.data as { references: Array<{ targetPath: string }> }).references.some((r) => r.targetPath === ch1),
+    ).toBe(true)
+
+    // reorder_spine reorders spine and rejects unknown paths
+    const badReorder = ws.executeTool('reorder_spine', { orderedPaths: ['EPUB/text/missing.xhtml'] })
+    expect(badReorder.ok).toBe(false)
+
+    const reordered = ws.executeTool('reorder_spine', { orderedPaths: [ch2, ch1] })
+    expect(reordered.ok).toBe(true)
+    expect((reordered.data as { spine: string[] }).spine).toEqual([ch2, ch1])
+    expect(ws.buildProposal('p-reorder')?.validationIssues).toEqual([])
+  })
+
+  it('annotates get_toc with path indices, supports batch edit_toc actions, and aligns create_chapter insertAfter + stylesheets', () => {
+    const ws = openEmptyWorkspace()
+    const ch1 = 'EPUB/text/ch001.xhtml'
+
+    // Invalid insertAfter fails fast instead of silently appending
+    expect(ws.executeTool('create_chapter', { title: '失败章', insertAfter: 'EPUB/text/nope.xhtml' }).ok).toBe(false)
+
+    // Create ch003 at end, then insert ch002 after ch001 with addToToc: true -> inherits stylesheet & aligns TOC!
+    expect(ws.executeTool('create_chapter', { filename: 'ch003.xhtml', title: '第三章', addToToc: true }).ok).toBe(true)
+    const inserted = ws.executeTool('create_chapter', {
+      filename: 'ch002.xhtml',
+      title: '第二章',
+      insertAfter: ch1,
+      addToToc: true,
+    })
+    expect(inserted.ok).toBe(true)
+    expect((inserted.data as { linkedStylesheets: string[] }).linkedStylesheets).toEqual(['EPUB/styles/stylesheet1.css'])
+    expect(ws.getText('EPUB/text/ch002.xhtml')).toContain('../styles/stylesheet1.css')
+
+    const toc = ws.executeTool('get_toc')
+    expect(toc.ok).toBe(true)
+    const tocEntries = (toc.data as { entries: Array<{ path: number[]; label: string }> }).entries
+    expect(tocEntries.map((e) => [e.path, e.label])).toEqual([
+      [[0], '第一章'],
+      [[1], '第二章'],
+      [[2], '第三章'],
+    ])
+
+    // Batch edit_toc executes sequentially and returns updated annotated entries
+    const batchToc = ws.executeTool('edit_toc', {
+      actions: [
+        { action: 'update', path: [1], label: '第二章（修订）' },
+        { action: 'indent', path: [2] },
+      ],
+    })
+    expect(batchToc.ok).toBe(true)
+    const batchData = batchToc.data as {
+      action: string
+      actionCount: number
+      entries: Array<{ path: number[]; label: string; children: Array<{ path: number[]; label: string }> }>
+    }
+    expect(batchData.action).toBe('batch')
+    expect(batchData.actionCount).toBe(2)
+    expect(batchData.entries[1]!.label).toBe('第二章（修订）')
+    expect(batchData.entries[1]!.children[0]!.path).toEqual([1, 0])
+  })
+
+  it('supports search_book scope/regex errors, read_file text view & giant single-line pagination, real entrySizes, and inspect_image', () => {
+    const { archive } = openEpub(createEmptyEpub({ title: '图文测试书' }), codec.parse)
+    // Add an unreferenced binary image (omitted bytes simulating Postgres listWorkspaceEntries) and a referenced PNG + SVG
+    const pngBytes = makeSamplePng(320, 240)
+    const svgText = '<svg xmlns="http://www.w3.org/2000/svg" width="40" height="20"><rect width="40" height="20"/></svg>'
+    const encoder = new TextEncoder()
+    archive.entries.set('EPUB/images/fig1.png', pngBytes)
+    archive.order.push('EPUB/images/fig1.png')
+    archive.entries.set('EPUB/images/icon.svg', encoder.encode(svgText))
+    archive.order.push('EPUB/images/icon.svg')
+    archive.entries.set('EPUB/images/unused.jpg', new Uint8Array(0))
+    archive.order.push('EPUB/images/unused.jpg')
+
+    const opf = new TextDecoder().decode(archive.entries.get('EPUB/content.opf')!)
+    const nextOpf = opf.replace(
+      '</manifest>',
+      `  <item id="fig1" href="images/fig1.png" media-type="image/png"/>
+    <item id="icon" href="images/icon.svg" media-type="image/svg+xml"/>
+    <item id="unused" href="images/unused.jpg" media-type="image/jpeg"/>
+  </manifest>`,
+    )
+    archive.entries.set('EPUB/content.opf', encoder.encode(nextOpf))
+
+    const ws = AgentWorkspace.fromArchive(archive, {
+      codec,
+      checkXml: strictCheckXml,
+      now: FIXED_NOW,
+      entrySizes: new Map([['EPUB/images/unused.jpg', 98_765]]),
+    })
+
+    // list_files reports true binary entrySizes, stylesheets, and charCount
+    const listed = ws.executeTool('list_files').data as {
+      stylesheets: string[]
+      files: Array<{ path: string; byteSize: number; charCount?: number; stylesheets?: string[] }>
+    }
+    expect(listed.stylesheets).toEqual(['EPUB/styles/stylesheet1.css'])
+    expect(listed.files.find((f) => f.path === 'EPUB/images/unused.jpg')?.byteSize).toBe(98_765)
+    const ch1Meta = listed.files.find((f) => f.path === 'EPUB/text/ch001.xhtml')!
+    expect(ch1Meta.stylesheets).toEqual(['EPUB/styles/stylesheet1.css'])
+    expect(ch1Meta.charCount).toBeGreaterThan(0)
+
+    // cleanup_unused_resources dryRun uses real entrySizes
+    const dryUnused = ws.executeTool('cleanup_unused_resources', { dryRun: true }).data as {
+      unused: Array<{ path: string; byteSize: number }>
+    }
+    expect(dryUnused.unused.find((u) => u.path === 'EPUB/images/unused.jpg')?.byteSize).toBe(98_765)
+
+    // search_book fails cleanly on invalid regex and filters by scope
+    expect(ws.executeTool('search_book', { query: '(unclosed', regex: true }).ok).toBe(false)
+    const styleSearch = ws.executeTool('search_book', { query: 'line-height', scope: 'styles' })
+    expect(styleSearch.ok).toBe(true)
+    expect((styleSearch.data as { count: number }).count).toBe(1)
+    const spineSearch = ws.executeTool('search_book', { query: 'line-height', scope: 'spine' })
+    expect((spineSearch.data as { count: number }).count).toBe(0)
+
+    // Put math + img into ch001 and test read_file view: 'text' + inspect_image
+    expect(
+      ws.executeTool('edit_file', {
+        path: 'EPUB/text/ch001.xhtml',
+        oldText: '<p>从这里开始写。</p>',
+        newText:
+          '<p>公式 <math xmlns="http://www.w3.org/1998/Math/MathML"><mi>x</mi></math> 如图：</p>\n<p><img src="../images/fig1.png" alt="供需曲线图"/></p>',
+      }).ok,
+    ).toBe(true)
+
+    const textView = ws.executeTool('read_file', { path: 'EPUB/text/ch001.xhtml', view: 'text' })
+    expect(textView.ok).toBe(true)
+    const textContent = (textView.data as { content: string }).content
+    expect(textContent).toContain('[h1] 第一章')
+    expect(textContent).toContain('[公式]')
+    expect(textContent).toContain('[图片: 供需曲线图]')
+    expect(textContent).toMatch(/^L\d+\|/m)
+
+    // inspect_image probes PNG dimensions & referencedBy alt text, and returns SVG source
+    expect(probeImageDimensions(pngBytes)).toEqual({ width: 320, height: 240 })
+    const pngInfo = ws.executeTool('inspect_image', { path: 'EPUB/images/fig1.png' })
+    expect(pngInfo.ok).toBe(true)
+    expect(pngInfo.data).toMatchObject({
+      path: 'EPUB/images/fig1.png',
+      mediaType: 'image/png',
+      width: 320,
+      height: 240,
+      isSvg: false,
+      referencedBy: [expect.objectContaining({ from: 'EPUB/text/ch001.xhtml', alt: '供需曲线图' })],
+    })
+
+    const svgInfo = ws.executeTool('inspect_image', { path: 'EPUB/images/icon.svg' })
+    expect(svgInfo.ok).toBe(true)
+    expect((svgInfo.data as { isSvg: boolean; svgContent: string }).isSvg).toBe(true)
+    expect((svgInfo.data as { svgContent: string }).svgContent).toContain('<rect')
+
+    // Single-line giant minified chapter (> 24KB) is capped and paginated via charOffset
+    const giantLine = `<?xml version="1.0" encoding="UTF-8"?><html xmlns="http://www.w3.org/1999/xhtml"><head><title>长章</title></head><body><p>${'甲'.repeat(30_000)}</p></body></html>`
+    expect(ws.executeTool('write_file', { path: 'EPUB/text/ch001.xhtml', content: giantLine }).ok).toBe(true)
+    const chunk1 = ws.executeTool('read_file', { path: 'EPUB/text/ch001.xhtml', startLine: 1 })
+    expect(chunk1.ok).toBe(true)
+    const c1 = chunk1.data as { lineTruncated?: boolean; nextCharOffset?: number; content: string; hint?: string }
+    expect(c1.lineTruncated).toBe(true)
+    expect(c1.content.length).toBeLessThanOrEqual(24_000)
+    expect(c1.hint).toContain('format_file')
+
+    const chunk2 = ws.executeTool('read_file', {
+      path: 'EPUB/text/ch001.xhtml',
+      startLine: 1,
+      charOffset: c1.nextCharOffset!,
+    })
+    expect(chunk2.ok).toBe(true)
+    expect((chunk2.data as { lineTruncated?: boolean; content: string }).lineTruncated).toBe(false)
+    expect((chunk2.data as { content: string }).content).toContain('</html>')
   })
 })
