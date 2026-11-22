@@ -171,6 +171,7 @@ export function CodeToolbar({
             <select
               className="code-block-select"
               aria-label="包裹块级标签"
+              title={`包裹块级标签（${formatShortcut('Mod+Alt+0')} 正文 / ${formatShortcut('Mod+Alt+1')}–4 标题 1–4）`}
               value=""
               onChange={(event) => {
                 const value = event.target.value as CodeBlockTag | ''

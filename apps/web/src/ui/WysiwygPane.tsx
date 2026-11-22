@@ -44,7 +44,7 @@ import {
   type InlineTag,
 } from '../editor/wysiwygDom'
 import { checkXmlWellFormed, replaceBodyInXhtml, serializeEditableBody } from '../editor/wysiwygXhtml'
-import { formatShortcut } from '../editor/shortcuts'
+import { formatShortcut, matchHeadingShortcut } from '../editor/shortcuts'
 import { patchDocument, patchHead } from '../preview/patchDocument'
 import {
   adaptDocumentBodyInlineStyles,
@@ -71,6 +71,7 @@ export interface WysiwygPaneProps {
   externalVersion?: number
   revealFragment?: { path: string; fragment: string; key: number } | null
   flushRef?: React.MutableRefObject<(() => void) | null>
+  blockActionRef?: React.MutableRefObject<((tag: BlockTag) => void) | null>
   onChange: (value: string) => void
   onSwitchToCode: () => void
   onShortcut?: (action: WysiwygShortcut) => void
@@ -151,6 +152,7 @@ export function WysiwygPane({
   externalVersion = 0,
   revealFragment,
   flushRef,
+  blockActionRef,
   onChange,
   onSwitchToCode,
   onShortcut,
@@ -395,6 +397,14 @@ export function WysiwygPane({
     [commitDomMutation, restoreRange],
   )
 
+  useEffect(() => {
+    if (!blockActionRef) return
+    blockActionRef.current = applyBlock
+    return () => {
+      if (blockActionRef.current === applyBlock) blockActionRef.current = null
+    }
+  }, [blockActionRef, applyBlock])
+
   const handleClearFormatting = useCallback(() => {
     const doc = frame.current?.contentDocument
     if (!doc?.body) return
@@ -540,6 +550,12 @@ export function WysiwygPane({
       }
 
       const onKeyDown = (event: KeyboardEvent) => {
+        const headingTag = matchHeadingShortcut(event)
+        if (headingTag) {
+          event.preventDefault()
+          applyBlock(headingTag)
+          return
+        }
         const modifier = event.metaKey || event.ctrlKey
         if (event.ctrlKey && event.key === 'Tab') {
           event.preventDefault()
@@ -628,6 +644,7 @@ export function WysiwygPane({
       }
     },
     [
+      applyBlock,
       applyInline,
       commitDomMutation,
       emitNow,
@@ -1056,6 +1073,7 @@ export function WysiwygPane({
         <select
           className="wysiwyg-block-select"
           aria-label="段落格式"
+          title={`段落格式（${formatShortcut('Mod+Alt+0')} 正文 / ${formatShortcut('Mod+Alt+1')}–4 标题 1–4）`}
           value={toolbar.block}
           onChange={(event) => {
             const val = event.target.value

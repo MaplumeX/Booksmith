@@ -65,6 +65,7 @@ import {
   FilePenLine,
   FilePlus2,
   FolderTree,
+  Heading,
   History,
   ImagePlus,
   Italic,
@@ -104,7 +105,7 @@ import {
   wrapInlineTag,
   wrapList,
 } from '../editor/codeActions'
-import { formatShortcut } from '../editor/shortcuts'
+import { formatShortcut, HEADING_SHORTCUTS, matchHeadingShortcut, type HeadingShortcutTag } from '../editor/shortcuts'
 import { mediaTypeFromExtension, mediaTypeOf } from '../preview/render'
 import { spinePaths } from '../diff/document'
 import { navigate } from '../router'
@@ -419,6 +420,9 @@ export function Editor({ bookId }: { bookId: string }) {
   const [editorMode, setEditorMode] = useState<EditorViewMode>(() => getSettings().defaultEditorMode)
   const [externalResetVersion, setExternalResetVersion] = useState(0)
   const wysiwygFlushRef = useRef<(() => void) | null>(null)
+  const wysiwygBlockRef = useRef<((tag: HeadingShortcutTag) => void) | null>(null)
+  const applyHeadingLevelRef = useRef<(tag: HeadingShortcutTag) => void>(() => {})
+  const canApplyHeadingRef = useRef(false)
   const codePaneHandleRef = useRef<CodePaneHandle | null>(null)
   const structureHistoryRef = useRef<StructureHistoryEntry[]>([])
   const structureOpSeqRef = useRef(0)
@@ -2160,6 +2164,22 @@ export function Editor({ bookId }: { bookId: string }) {
           if (next) setTreeOpen(false)
           return next
         })
+        return
+      }
+      if (!event.defaultPrevented && canApplyHeadingRef.current) {
+        const headingTag = matchHeadingShortcut(event)
+        if (headingTag) {
+          const target = event.target as HTMLElement | null
+          const inTextInput =
+            target instanceof HTMLInputElement ||
+            target instanceof HTMLTextAreaElement ||
+            Boolean(target?.isContentEditable)
+          const inDialog = Boolean(target?.closest('[role="dialog"]'))
+          if (!inTextInput && !inDialog) {
+            event.preventDefault()
+            applyHeadingLevelRef.current(headingTag)
+          }
+        }
       }
     }
     window.addEventListener('keydown', handler)
@@ -2245,6 +2265,16 @@ export function Editor({ bookId }: { bookId: string }) {
   const previewable = isPreviewable(active)
   const canWysiwyg = editable && previewable
   const showWysiwyg = canWysiwyg && editorMode === 'wysiwyg'
+
+  const applyHeadingLevel = (tag: HeadingShortcutTag) => {
+    if (showWysiwyg) {
+      wysiwygBlockRef.current?.(tag)
+      return
+    }
+    codePaneHandleRef.current?.applyTransform((doc, from, to) => wrapBlockTag(doc, from, to, tag))
+  }
+  applyHeadingLevelRef.current = applyHeadingLevel
+  canApplyHeadingRef.current = Boolean(active && editable && previewable && !activeReview)
 
   const handleWysiwygShortcut = (action: WysiwygShortcut) => {
     if (action === 'save') {
@@ -2341,7 +2371,7 @@ export function Editor({ bookId }: { bookId: string }) {
                 },
                 {
                   id: 'ctx-wrap-p',
-                  label: '包裹为正文 <p>',
+                  label: `包裹为正文 <p> (${formatShortcut('Mod+Alt+0')})`,
                   icon: <Code2 size={14} strokeWidth={1.65} />,
                   separatorBefore: true,
                   onSelect: () =>
@@ -2349,7 +2379,7 @@ export function Editor({ bookId }: { bookId: string }) {
                 },
                 {
                   id: 'ctx-wrap-h2',
-                  label: '包裹为二级标题 <h2>',
+                  label: `包裹为二级标题 <h2> (${formatShortcut('Mod+Alt+2')})`,
                   icon: <Code2 size={14} strokeWidth={1.65} />,
                   onSelect: () =>
                     codePaneHandleRef.current?.applyTransform((doc, from, to) => wrapBlockTag(doc, from, to, 'h2')),
@@ -2505,6 +2535,19 @@ export function Editor({ bookId }: { bookId: string }) {
       onSelect: undoStructure,
     },
     // 代码编辑
+    ...HEADING_SHORTCUTS.map(
+      ({ tag, spec, label, codeLabel }): CommandItem => ({
+        id: `cmd-block-${tag}`,
+        group: '代码编辑',
+        label: showWysiwyg ? `设为${label}` : `包裹为${codeLabel}`,
+        keywords: `heading title block ${tag} ${label} 标题 段落 正文`,
+        shortcut: formatShortcut(spec),
+        icon: <Heading size={14} strokeWidth={1.7} />,
+        disabled: !active || !previewable || !editable,
+        disabledReason: '仅 XHTML 章节支持切换段落或标题级别',
+        onSelect: () => applyHeadingLevel(tag),
+      }),
+    ),
     {
       id: 'cmd-format',
       group: '代码编辑',
@@ -3162,6 +3205,11 @@ export function Editor({ bookId }: { bookId: string }) {
                     onSplitAtCursor={previewable ? (offset) => handleSplitAtCursor(offset) : undefined}
                     onInsertSplitMarker={previewable ? handleInsertSplitMarker : undefined}
                     onFormatDocument={activeFileKind !== 'other' ? handleFormatDocument : undefined}
+                    onWrapBlock={
+                      previewable
+                        ? (tag) => codePaneHandleRef.current?.applyTransform((doc, from, to) => wrapBlockTag(doc, from, to, tag))
+                        : undefined
+                    }
                     onChange={(value) => handleChange(active, value)}
                   />
                   {showWysiwyg ? (
@@ -3174,6 +3222,7 @@ export function Editor({ bookId }: { bookId: string }) {
                       externalVersion={externalResetVersion}
                       revealFragment={revealFragment}
                       flushRef={wysiwygFlushRef}
+                      blockActionRef={wysiwygBlockRef}
                       onChange={(value) => handleChange(active, value, { rerender: true })}
                       onSwitchToCode={() => switchMode('code')}
                       onNavigateLink={navigateTo}

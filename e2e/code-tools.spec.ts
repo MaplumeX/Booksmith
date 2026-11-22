@@ -132,3 +132,47 @@ test('opens CodePane context menu, Cmd+K CommandPalette across modes, and toggle
   await settingsDialog.getByRole('button', { name: '完成', exact: true }).click()
   await expect(page.locator('.code-toolbar')).toBeVisible()
 })
+
+test('switches heading levels (h1-h4 and p) via Mod+Alt+0..4 and CommandPalette in Code and WYSIWYG modes', async ({
+  page,
+}) => {
+  await openWorkbench(page)
+  await page.getByRole('button', { name: 'ch003.xhtml', exact: true }).click()
+
+  // Code mode: Mod+Alt+2 converts current <p> line to <h2>, Mod+Alt+0 reverts to <p>, Cmd/Ctrl+Z undoes in one step.
+  const paraLine = page.locator('.cm-line', { hasText: '<p' }).first()
+  const paraText = ((await paraLine.textContent()) ?? '').replace(/<\/?p[^>]*>/g, '').trim()
+  await paraLine.click()
+
+  await page.keyboard.press(`${MOD}+Alt+2`)
+  await expect(page.locator('.cm-content')).toContainText(`<h2>${paraText}</h2>`)
+
+  await page.keyboard.press(`${MOD}+Alt+0`)
+  await expect(page.locator('.cm-content')).toContainText(`<p>${paraText}</p>`)
+
+  await page.keyboard.press(`${MOD}+z`)
+  await expect(page.locator('.cm-content')).toContainText(`<h2>${paraText}</h2>`)
+
+  // WYSIWYG mode: Mod+Alt+1 converts current block to <h1>, Mod+Alt+0 reverts to <p>, CommandPalette sets <h3>.
+  await page.getByRole('button', { name: '可视化', exact: true }).click()
+  const frame = page.frameLocator('iframe.wysiwyg-frame')
+  const heading2 = frame.locator('h2', { hasText: paraText }).first()
+  await expect(heading2).toBeVisible()
+  await heading2.click()
+
+  await page.keyboard.press(`${MOD}+Alt+1`)
+  await expect(frame.locator('h1', { hasText: paraText })).toBeVisible()
+  await expect(page.locator('.wysiwyg-block-select')).toHaveValue('h1')
+
+  await page.keyboard.press(`${MOD}+Alt+0`)
+  await expect(frame.locator('p', { hasText: paraText })).toBeVisible()
+  await expect(page.locator('.wysiwyg-block-select')).toHaveValue('p')
+
+  await page.keyboard.press(`${MOD}+k`)
+  const palette = page.getByRole('dialog', { name: '命令面板' })
+  await expect(palette).toBeVisible()
+  await palette.getByLabel('搜索命令').fill('三级标题')
+  await palette.getByRole('option', { name: /设为三级标题/ }).click()
+  await expect(frame.locator('h3', { hasText: paraText })).toBeVisible()
+  await expect(page.locator('.wysiwyg-block-select')).toHaveValue('h3')
+})
