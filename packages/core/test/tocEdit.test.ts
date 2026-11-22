@@ -1,13 +1,18 @@
 import { describe, expect, it } from 'vitest'
 import {
+  getTocEntry,
   indentTocEntries,
+  indentTocEntriesWithPaths,
   indentTocEntry,
   insertTocEntry,
   moveTocEntries,
+  moveTocEntriesWithPaths,
   moveTocEntry,
   moveTocSubtree,
+  moveTocSubtreeWithPath,
   normalizeTocPaths,
   outdentTocEntries,
+  outdentTocEntriesWithPaths,
   outdentTocEntry,
   rebaseTocHrefs,
   removeBrokenTocEntries,
@@ -208,6 +213,36 @@ describe('multi-select batch operations', () => {
   it('batch-removes entries and respects keepChildren', () => {
     const next = removeTocEntries(tree(), [[0], [1]], { keepChildren: true })
     expect(next.map((item) => item.label)).toEqual(['二.1', '二.2', '三'])
+  })
+
+  it('tracks updated paths across batch indent, outdent, move, and subtree drop', () => {
+    const flat = [entry('A'), entry('B'), entry('C'), entry('D')]
+    const indented = indentTocEntriesWithPaths(flat, [[1], [2]])
+    expect(indented.changed).toBe(true)
+    expect(indented.paths).toEqual([[0, 0], [0, 1]])
+    expect(indented.paths.map((p) => getTocEntry(indented.entries, p)?.label)).toEqual(['B', 'C'])
+
+    const outdented = outdentTocEntriesWithPaths(
+      [entry('P', [entry('A'), entry('B'), entry('C'), entry('D')])],
+      [[0, 1], [0, 2]],
+    )
+    expect(outdented.changed).toBe(true)
+    expect(outdented.paths).toEqual([[1], [2]])
+    expect(outdented.paths.map((p) => getTocEntry(outdented.entries, p)?.label)).toEqual(['B', 'C'])
+
+    const moved = moveTocEntriesWithPaths(flat, [[1], [2]], 1)
+    expect(moved.changed).toBe(true)
+    expect(moved.paths).toEqual([[2], [3]])
+    expect(moved.paths.map((p) => getTocEntry(moved.entries, p)?.label)).toEqual(['B', 'C'])
+
+    const noop = moveTocEntriesWithPaths(flat, [[0], [1]], -1)
+    expect(noop.changed).toBe(false)
+    expect(noop.entries).toBe(flat)
+
+    const dropped = moveTocSubtreeWithPath(tree(), [1], [0], 'inside')
+    expect(dropped.changed).toBe(true)
+    expect(dropped.path).toEqual([0, 0])
+    expect(getTocEntry(dropped.entries, dropped.path ?? [])?.label).toBe('二')
   })
 })
 

@@ -95,14 +95,18 @@ export {
   flattenToc,
   getTocEntry,
   indentTocEntries,
+  indentTocEntriesWithPaths,
   indentTocEntry,
   insertTocEntry,
   isSameOrDescendantTocPath,
   moveTocEntries,
+  moveTocEntriesWithPaths,
   moveTocEntry,
   moveTocSubtree,
+  moveTocSubtreeWithPath,
   normalizeTocPaths,
   outdentTocEntries,
+  outdentTocEntriesWithPaths,
   outdentTocEntry,
   rebaseTocHrefs,
   removeBrokenTocEntries,
@@ -110,7 +114,14 @@ export {
   removeTocEntry,
   updateTocEntry,
 } from './toc'
-export type { BrokenAnchor, TocEntry, TocInsertPosition, TocPath } from './toc'
+export type {
+  BrokenAnchor,
+  TocBatchMutationResult,
+  TocEntry,
+  TocInsertPosition,
+  TocPath,
+  TocSingleMutationResult,
+} from './toc'
 export { initializeBookToc } from './tocInit'
 export type { InitializeBookTocResult } from './tocInit'
 export {

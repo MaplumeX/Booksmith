@@ -137,8 +137,40 @@ test('collapses by depth, filters by keyword, and fixes a broken anchor in-place
   await expect(page.locator('.toc-item').first().locator('.toc-warn-pill')).toHaveCount(0)
 })
 
-test('supports multi-select batch indent and keep-children delete', async ({ page }) => {
+test('supports multi-select batch indent without layout shift and keeps selection across batch ops', async ({ page }) => {
   await openToc(page)
+
+  // Verify entering multi-select and selecting items does not shift TOC items horizontally or vertically.
+  const firstLabel = page.locator('.toc-item').first().locator('.toc-label')
+  const secondLabel = page.locator('.toc-item').nth(1).locator('.toc-label')
+  const beforeFirst = await firstLabel.boundingBox()
+  const beforeSecond = await secondLabel.boundingBox()
+  expect(beforeFirst).not.toBeNull()
+  expect(beforeSecond).not.toBeNull()
+
+  await page.getByRole('button', { name: '多选目录项' }).click()
+  await expect(page.getByText('已选 0 项')).toBeVisible()
+
+  const afterEnterFirst = await firstLabel.boundingBox()
+  const afterEnterSecond = await secondLabel.boundingBox()
+  expect(Math.abs((afterEnterFirst?.x ?? 0) - (beforeFirst?.x ?? 0))).toBeLessThanOrEqual(0.5)
+  expect(Math.abs((afterEnterFirst?.y ?? 0) - (beforeFirst?.y ?? 0))).toBeLessThanOrEqual(0.5)
+  expect(Math.abs((afterEnterSecond?.x ?? 0) - (beforeSecond?.x ?? 0))).toBeLessThanOrEqual(0.5)
+  expect(Math.abs((afterEnterSecond?.y ?? 0) - (beforeSecond?.y ?? 0))).toBeLessThanOrEqual(0.5)
+
+  // Clicking the row label in multi-select mode toggles selection without shifting rows.
+  await secondLabel.click()
+  await expect(page.getByText('已选 1 项')).toBeVisible()
+  const afterSelectFirst = await firstLabel.boundingBox()
+  const afterSelectSecond = await secondLabel.boundingBox()
+  expect(Math.abs((afterSelectFirst?.x ?? 0) - (beforeFirst?.x ?? 0))).toBeLessThanOrEqual(0.5)
+  expect(Math.abs((afterSelectFirst?.y ?? 0) - (beforeFirst?.y ?? 0))).toBeLessThanOrEqual(0.5)
+  expect(Math.abs((afterSelectSecond?.x ?? 0) - (beforeSecond?.x ?? 0))).toBeLessThanOrEqual(0.5)
+  expect(Math.abs((afterSelectSecond?.y ?? 0) - (beforeSecond?.y ?? 0))).toBeLessThanOrEqual(0.5)
+
+  // Exit multi-select cleanly via button.
+  await page.getByRole('button', { name: '退出多选' }).click()
+  await expect(page.locator('.toc-batch-bar')).toHaveCount(0)
 
   // Add two fresh top-level entries at the end so we have a clean test pair.
   for (const title of ['批量甲', '批量乙']) {
@@ -149,7 +181,7 @@ test('supports multi-select batch indent and keep-children delete', async ({ pag
     await dialog.getByRole('button', { name: '添加' }).click()
   }
 
-  // Enter multi-select mode and select both.
+  // Enter multi-select mode via more menu and select both.
   await page.getByRole('button', { name: '更多目录操作' }).click()
   await page.getByRole('menuitem', { name: '多选批量调级' }).click()
 
@@ -160,8 +192,11 @@ test('supports multi-select batch indent and keep-children delete', async ({ pag
   await page.getByRole('button', { name: '批量缩进' }).click()
   await expect(page.locator('.toc-item').filter({ hasText: '批量甲' })).toHaveAttribute('data-toc-depth', '1')
   await expect(page.locator('.toc-item').filter({ hasText: '批量乙' })).toHaveAttribute('data-toc-depth', '1')
+  // Selection is preserved across batch operations so users can adjust repeatedly.
+  await expect(page.getByText('已选 2 项')).toBeVisible()
 
   // Exit multi-select, indent 批量乙 under 批量甲, then delete 批量甲 keeping children.
+  await page.getByRole('button', { name: '退出多选' }).click()
   await openRowMenu(page, page.locator('.toc-item').filter({ hasText: '批量乙' }))
   await page.getByRole('menuitem', { name: /缩进为上一项子项/ }).click()
   await expect(page.locator('.toc-item').filter({ hasText: '批量乙' })).toHaveAttribute('data-toc-depth', '2')
@@ -218,6 +253,11 @@ test('renders TocPanel and dialogs cleanly without horizontal overflow in light 
     await page.evaluate((t) => document.documentElement.setAttribute('data-theme', t), theme)
     const sidebarOverflow = await page.locator('.toc-panel').evaluate((el) => el.scrollWidth > el.clientWidth + 1)
     expect(sidebarOverflow).toBe(false)
+
+    await page.getByRole('button', { name: '多选目录项' }).click()
+    const multiSelectOverflow = await page.locator('.toc-panel').evaluate((el) => el.scrollWidth > el.clientWidth + 1)
+    expect(multiSelectOverflow).toBe(false)
+    await page.getByRole('button', { name: '退出多选' }).click()
 
     await page.getByRole('button', { name: '生成', exact: true }).click()
     const genDialog = page.getByRole('dialog')
