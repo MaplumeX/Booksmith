@@ -8,6 +8,7 @@ import { useCallback, useEffect, useRef } from 'react'
 import type { CodeEditResult } from '../editor/codeActions'
 import { mapLfOffsetToSource, normalizeEol, restoreEol } from '../editor/eol'
 import { languageFor } from '../editor/languages'
+import { HEADING_SHORTCUTS, type HeadingShortcutTag } from '../editor/shortcuts'
 import { editorTheme } from '../editor/theme'
 import { ContextMenu, type ContextMenuEntry } from './ContextMenu'
 
@@ -43,6 +44,7 @@ interface CodePaneProps {
   onSplitAtCursor?: (offset: number) => void
   onInsertSplitMarker?: () => void
   onFormatDocument?: () => void
+  onWrapBlock?: (tag: HeadingShortcutTag) => void
   contextMenuItems?: ContextMenuEntry[]
   handleRef?: React.MutableRefObject<CodePaneHandle | null>
   visible?: boolean
@@ -88,6 +90,7 @@ export function CodePane({
   onSplitAtCursor,
   onInsertSplitMarker,
   onFormatDocument,
+  onWrapBlock,
   contextMenuItems,
   handleRef,
   visible = true,
@@ -113,6 +116,7 @@ export function CodePane({
   const onSplitAtCursorRef = useRef(onSplitAtCursor)
   const onInsertSplitMarkerRef = useRef(onInsertSplitMarker)
   const onFormatDocumentRef = useRef(onFormatDocument)
+  const onWrapBlockRef = useRef(onWrapBlock)
   const latest = useRef({ path, content })
   onChangeRef.current = onChange
   onNavigateRef.current = onNavigate
@@ -120,6 +124,7 @@ export function CodePane({
   onSplitAtCursorRef.current = onSplitAtCursor
   onInsertSplitMarkerRef.current = onInsertSplitMarker
   onFormatDocumentRef.current = onFormatDocument
+  onWrapBlockRef.current = onWrapBlock
   latest.current = { path, content }
 
   const computeSourceOffset = useCallback((instance: EditorView): number => {
@@ -247,6 +252,14 @@ export function CodePane({
                   return true
                 },
               },
+              ...HEADING_SHORTCUTS.map(({ tag, spec }) => ({
+                key: spec.replace(/\+/g, '-'),
+                run: () => {
+                  if (!onWrapBlockRef.current) return false
+                  onWrapBlockRef.current(tag)
+                  return true
+                },
+              })),
             ]),
           ),
           EditorView.updateListener.of((update) => {
