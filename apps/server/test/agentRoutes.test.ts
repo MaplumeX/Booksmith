@@ -861,7 +861,7 @@ describe('agent REST & SSE routes', () => {
       .map((b) => JSON.parse(b.slice(6)) as Record<string, unknown>)
 
     expect(lastSeenModel).toBe('mock-reasoner')
-    expect(lastSeenToolCount).toBe(7)
+    expect(lastSeenToolCount).toBe(10)
     expect(lastSeenSystem).toContain('始终保留原文公式与学术引文。')
     expect(events1.some((e) => e.type === 'reasoning_delta')).toBe(true)
     const done1 = events1.find((e) => e.type === 'done') as { messageId: string }
@@ -901,7 +901,7 @@ describe('agent REST & SSE routes', () => {
     expect(retryDone.model).toBe('mock-retry-ok')
     expect(retryDone.approvalMode).toBe('auto')
     expect(lastSeenModel).toBe('mock-retry-ok')
-    expect(lastSeenToolCount).toBe(21)
+    expect(lastSeenToolCount).toBe(27)
 
     // Still only 2 messages (no duplicate user bubble) and thread remembers new model + approvalMode
     const afterRetry = (await (

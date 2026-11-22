@@ -3,6 +3,7 @@ import {
   AgentWorkspace,
   diffProposalSnapshots,
   isReadOnlyAgentTool,
+  probeImageDimensions,
   type AgentProposal,
   type AgentProposalDelta,
   type AgentToolName,
@@ -37,6 +38,7 @@ const HISTORY_CHAR_BUDGET = 24_000
 const RECENT_FULL_TOOL_TURNS = 3
 const FOLD_TOOL_OUTPUT_MIN_CHARS = 600
 const MAX_STORED_TOOL_RESULT_CHARS = 32_000
+const MAX_INSPECT_IMAGE_BYTES = 4 * 1024 * 1024
 const COMPACTION_TARGET_TAIL_RATIO = 0.28
 const COMPACTION_TIMEOUT_MS = 45_000
 
@@ -171,6 +173,10 @@ export type AgentStreamEvent =
 
 export interface RunAgentTurnOptions {
   archive: EpubArchive
+  /** Optional true byte sizes for entries whose binary bytes were omitted to avoid DB detoasting. */
+  entrySizes?: ReadonlyMap<string, number>
+  /** Optional on-demand binary loader used by `inspect_image` for raster images stored in DB. */
+  loadBinary?: (path: string) => Promise<Uint8Array | null>
   overlay?: AgentWorkspaceOverlay
   provider: ResolvedProviderConfig
   history: HistoryTurn[]
@@ -638,7 +644,8 @@ function summarizeArgs(name: AgentToolName, args: Record<string, unknown>): stri
       return '列出全书文件'
     case 'read_file': {
       const range = args.startLine || args.endLine ? `:${args.startLine ?? 1}-${args.endLine ?? ''}` : ''
-      return `${String(args.path ?? '')}${range}`
+      const viewTag = args.view === 'text' ? '（纯文本）' : ''
+      return `${String(args.path ?? '')}${range}${viewTag}`
     }
     case 'search_book':
       return `「${String(args.query ?? '').slice(0, 40)}」`
@@ -652,10 +659,31 @@ function summarizeArgs(name: AgentToolName, args: Record<string, unknown>): stri
       const levels = Array.isArray(args.levels) ? `h${args.levels.join('/h')}` : 'h1–h6'
       return `扫描正文标题（${levels}）`
     }
-    case 'edit_file':
+    case 'list_anchors':
       return String(args.path ?? '')
+    case 'find_references': {
+      if (typeof args.targetPath === 'string' && args.targetPath.trim()) return `→ ${args.targetPath.trim()}`
+      if (typeof args.fromPath === 'string' && args.fromPath.trim()) return `${args.fromPath.trim()} →`
+      return '全书引用'
+    }
+    case 'inspect_image':
+      return String(args.path ?? '')
+    case 'edit_file': {
+      const count = Array.isArray(args.edits) && args.edits.length > 0 ? `（${args.edits.length} 处）` : ''
+      return `${String(args.path ?? '')}${count}`
+    }
+    case 'replace_in_book': {
+      const prefix = args.dryRun === true ? '预览替换 ' : ''
+      return `${prefix}「${String(args.query ?? '').slice(0, 28)}」`
+    }
     case 'write_file':
       return String(args.path ?? '')
+    case 'format_file': {
+      if (Array.isArray(args.paths) && args.paths.length > 0) {
+        return args.paths.length === 1 ? String(args.paths[0]) : `${args.paths.length} 个文件`
+      }
+      return String(args.path ?? '')
+    }
     case 'update_metadata':
       return '更新元数据'
     case 'update_toc':
@@ -665,13 +693,17 @@ function summarizeArgs(name: AgentToolName, args: Record<string, unknown>): stri
       return `从标题生成目录（${mode}）`
     }
     case 'edit_toc':
-      return `目录操作：${String(args.action ?? '')}`
+      return Array.isArray(args.actions) && args.actions.length > 0
+        ? `批量目录操作（${args.actions.length} 项）`
+        : `目录操作：${String(args.action ?? '')}`
     case 'create_chapter':
       return String(args.filename ?? args.title ?? '新建章节')
     case 'rename_file':
       return `${String(args.path ?? '')} → ${String(args.newFilename ?? '')}`
     case 'delete_file':
       return String(args.path ?? '')
+    case 'reorder_spine':
+      return `重排 ${Array.isArray(args.orderedPaths) ? args.orderedPaths.length : 0} 个章节`
     case 'split_chapter': {
       const mode =
         args.byMarkers === true
@@ -701,7 +733,9 @@ function summarizeResult(name: AgentToolName, ok: boolean, data: unknown, error?
     case 'list_files':
       return `共 ${Array.isArray(record.files) ? record.files.length : 0} 个文件`
     case 'read_file':
-      return `第 ${record.startLine ?? 1}–${record.endLine ?? 0} / ${record.totalLines ?? 0} 行`
+      return record.view === 'text'
+        ? `纯文本 L${record.startLine ?? 1}–${record.endLine ?? 0}（共 ${record.totalBlocks ?? 0} 段）`
+        : `第 ${record.startLine ?? 1}–${record.endLine ?? 0} / ${record.totalLines ?? 0} 行`
     case 'search_book':
       return `命中 ${record.count ?? 0} 处${record.truncated ? '（已截断）' : ''}`
     case 'lint_book':
@@ -709,13 +743,38 @@ function summarizeResult(name: AgentToolName, ok: boolean, data: unknown, error?
     case 'get_metadata':
       return '已读取元数据'
     case 'get_toc':
-      return `已读取目录（${Array.isArray(record.entries) ? record.entries.length : 0} 顶层项）`
+      return `已读取目录（共 ${record.totalCount ?? (Array.isArray(record.entries) ? record.entries.length : 0)} 项）`
     case 'scan_headings':
       return `扫描到 ${record.count ?? 0} 个标题${record.truncated ? '（已截断）' : ''}`
+    case 'list_anchors':
+      return `共 ${record.count ?? 0} 个锚点${record.truncated ? '（已截断）' : ''}`
+    case 'find_references':
+      return `找到 ${record.count ?? 0} 处引用${record.truncated ? '（已截断）' : ''}`
+    case 'inspect_image': {
+      const dims =
+        typeof record.width === 'number' && typeof record.height === 'number'
+          ? `${record.width}×${record.height}`
+          : record.isSvg === true
+            ? 'SVG'
+            : String(record.mediaType ?? '图片')
+      const refs = Array.isArray(record.referencedBy) ? record.referencedBy.length : 0
+      return `${dims}，被引用 ${refs} 处`
+    }
     case 'edit_file':
       return `已替换 ${record.replacements ?? 1} 处`
+    case 'replace_in_book': {
+      const filesChanged = Number(record.filesChanged ?? 0)
+      const total = Number(record.totalReplacements ?? 0)
+      return record.dryRun === true
+        ? `预览命中 ${filesChanged} 个文件、${total} 处`
+        : `已替换 ${filesChanged} 个文件、共 ${total} 处`
+    }
     case 'write_file':
       return `已写入 ${record.lineCount ?? 0} 行`
+    case 'format_file': {
+      const count = Array.isArray(record.formattedPaths) ? record.formattedPaths.length : 0
+      return count > 0 ? `已格式化 ${count} 个文件` : '无需格式化（已规范）'
+    }
     case 'update_metadata':
       return '元数据已暂存'
     case 'update_toc':
@@ -730,6 +789,8 @@ function summarizeResult(name: AgentToolName, ok: boolean, data: unknown, error?
       return `已暂存重命名（更新 ${record.referencesRewritten ?? 0} 处引用）`
     case 'delete_file':
       return `已暂存删除 ${String(record.deletedPath ?? '')}`
+    case 'reorder_spine':
+      return `阅读顺序已更新（共 ${Array.isArray(record.spine) ? record.spine.length : 0} 章）`
     case 'split_chapter': {
       const created = Array.isArray(record.createdPaths) ? record.createdPaths.length : 0
       return `已拆出 ${created} 个新章（更新 ${record.referencesRewritten ?? 0} 处引用）`
@@ -794,13 +855,55 @@ function extractToolHintPaths(
     pushStr(rec.primaryPath)
     pushArr(rec.createdPaths)
     pushArr(rec.changedPaths)
+    pushArr(rec.formattedPaths)
     pushStr(rec.deletedPath)
+    pushStr(rec.opfPath)
+    if (Array.isArray(rec.files)) {
+      for (const item of rec.files) {
+        if (item && typeof item === 'object') pushStr((item as Record<string, unknown>).path)
+      }
+    }
   }
   pushStr(args.path)
   pushArr(args.chapterPaths)
   pushArr(args.paths)
   return hints
 }
+
+interface InspectImageExecutionResult extends AgentToolResult {
+  _image?: {
+    mediaType: string
+    base64: string
+  }
+}
+
+const editTocActionSchema = z.object({
+  action: z
+    .enum([
+      'insert',
+      'update',
+      'move',
+      'move_subtree',
+      'indent',
+      'outdent',
+      'remove',
+      'refresh_labels',
+      'clean_broken',
+    ])
+    .describe('要执行的增量目录动作'),
+  path: z.array(z.number().int().min(0)).optional().describe('目标节点路径，如 [1, 0]'),
+  paths: z
+    .array(z.array(z.number().int().min(0)))
+    .optional()
+    .describe('批量操作目标路径数组，支持 move/indent/outdent/remove/refresh_labels'),
+  toPath: z.array(z.number().int().min(0)).optional().describe('move_subtree 的目标位置路径'),
+  position: z.enum(['before', 'after', 'inside']).optional().describe('insert 或 move_subtree 的相对位置'),
+  delta: z.union([z.literal(-1), z.literal(1)]).optional().describe('move 方向：-1 上移，1 下移'),
+  label: z.string().optional().describe('insert 或 update 的标题'),
+  href: z.string().optional().describe('insert 或 update 的相对链接'),
+  keepChildren: z.boolean().optional().describe('remove 时是否保留子项并上提一级'),
+  overwriteRichHtml: z.boolean().optional().describe('refresh_labels 时是否覆盖含内联 MathML 的条目，默认 false'),
+})
 
 function buildSdkTools(
   workspace: AgentWorkspace,
@@ -810,6 +913,10 @@ function buildSdkTools(
   approvalMode: AgentApprovalMode,
   abortSignal?: AbortSignal,
   onWriteSuccess?: (name: AgentToolName, args: Record<string, unknown>, result: AgentToolResult) => void,
+  binaryContext?: {
+    archive: EpubArchive
+    loadBinary?: (path: string) => Promise<Uint8Array | null>
+  },
 ) {
   function run(name: AgentToolName, args: Record<string, unknown>, toolCallId?: string) {
     if (abortSignal?.aborted) throw createAbortError()
@@ -838,29 +945,132 @@ function buildSdkTools(
     return result
   }
 
+  async function runInspectImage(
+    args: Record<string, unknown>,
+    toolCallId?: string,
+  ): Promise<InspectImageExecutionResult> {
+    if (abortSignal?.aborted) throw createAbortError()
+    const id = randomUUID()
+    const callId = normalizeToolCallId(toolCallId || id, records.length + 1)
+    const argsSummary = summarizeArgs('inspect_image', args)
+    emit({ type: 'tool_start', id, name: 'inspect_image', argsSummary })
+
+    const baseResult = workspace.executeTool('inspect_image', args)
+    let storedResult: AgentToolResult = baseResult
+    let imagePayload: { mediaType: string; base64: string } | undefined
+
+    if (baseResult.ok && baseResult.data && typeof baseResult.data === 'object') {
+      const data = { ...(baseResult.data as Record<string, unknown>) }
+      const path = typeof data.path === 'string' ? data.path : ''
+      const mediaType = typeof data.mediaType === 'string' ? data.mediaType : ''
+      const isSvg = data.isSvg === true
+
+      if (!isSvg && path && mediaType) {
+        const originPath = workspace.getOriginPath(path)
+        let bytes = binaryContext?.archive.entries.get(originPath) ?? binaryContext?.archive.entries.get(path)
+        if ((!bytes || bytes.byteLength === 0) && binaryContext?.loadBinary) {
+          try {
+            const loaded = await binaryContext.loadBinary(originPath)
+            if (loaded && loaded.byteLength > 0) bytes = loaded
+          } catch {
+            // Fall back to metadata-only output when binary retrieval fails.
+          }
+        }
+
+        if (abortSignal?.aborted) throw createAbortError()
+
+        if (bytes && bytes.byteLength > 0) {
+          data.byteSize = bytes.byteLength
+          if (data.width === undefined || data.height === undefined) {
+            const dims = probeImageDimensions(bytes, mediaType)
+            if (dims) {
+              data.width = dims.width
+              data.height = dims.height
+            }
+          }
+          if (bytes.byteLength <= MAX_INSPECT_IMAGE_BYTES) {
+            imagePayload = {
+              mediaType,
+              base64: Buffer.from(bytes.buffer, bytes.byteOffset, bytes.byteLength).toString('base64'),
+            }
+            data.imageAttached = true
+          } else {
+            data.imageAttached = false
+            data.note = `图片体积为 ${bytes.byteLength} 字节，超过 ${MAX_INSPECT_IMAGE_BYTES} 字节内联视觉上限，仅返回元数据与引用信息。`
+          }
+        } else {
+          data.imageAttached = false
+          data.note = '当前无法读取该图片的二进制像素数据，仅返回元数据与引用信息。'
+        }
+        storedResult = { ok: true, data }
+      }
+    }
+
+    const summary = summarizeResult('inspect_image', storedResult.ok, storedResult.data, storedResult.error)
+    records.push({ id, name: 'inspect_image', argsSummary, ok: storedResult.ok, summary })
+    // Never persist raw base64 image payloads into `stepsJson`; keep history lightweight and provider-neutral.
+    steps.push({
+      type: 'tool',
+      id,
+      callId,
+      name: 'inspect_image',
+      args: (toJsonValue(args) ?? {}) as Record<string, unknown>,
+      argsSummary,
+      ok: storedResult.ok,
+      summary,
+      result: capToolResultForStorage(storedResult),
+    })
+    emit({ type: 'tool_end', id, name: 'inspect_image', ok: storedResult.ok, summary })
+    return imagePayload ? { ...storedResult, _image: imagePayload } : storedResult
+  }
+
   const allTools = {
     list_files: tool({
-      description: '列出当前 EPUB 的元数据概要、spine 阅读顺序和全部文件路径、类型与行数。',
+      description:
+        '列出当前 EPUB 的元数据概要、样式表清单、spine 阅读顺序和全部文件路径、类型、行数、正文字数、关联样式表与真实字节大小。',
       inputSchema: z.object({}),
       execute: async (_input, options) => run('list_files', {}, options?.toolCallId),
     }),
     read_file: tool({
-      description: '按行分页读取指定文本文件（默认 200 行，最多 400 行 / 24KB）。大章节请分段读取。',
+      description:
+        '按行分页读取指定文本文件（默认 200 行，最多 400 行 / 24KB）。支持 view: "text" 提取带原文行号的纯文本段落以便高效校对长章；遇单行超长压缩文件支持 charOffset 分片读取。',
       inputSchema: z.object({
         path: z.string().describe('EPUB 内文件路径，如 OEBPS/Text/ch001.xhtml'),
         startLine: z.number().int().min(1).optional().describe('起始行号（1-based）'),
         endLine: z.number().int().min(1).optional().describe('结束行号（1-based，含）'),
+        view: z
+          .enum(['raw', 'text'])
+          .optional()
+          .describe('raw 返回带行号的原始源码（默认）；text 返回带 L行号 前缀的正文纯文本与 [h1]/[公式]/[图片] 占位'),
+        charOffset: z
+          .number()
+          .int()
+          .min(0)
+          .optional()
+          .describe('仅 raw 模式下用于超长单行文件的字符偏移（0-based）'),
+        maxChars: z
+          .number()
+          .int()
+          .min(500)
+          .max(24_000)
+          .optional()
+          .describe('本次最大返回字符数，默认 24000'),
       }),
       execute: async (input, options) => run('read_file', input, options?.toolCallId),
     }),
     search_book: tool({
-      description: '在全书文本文件中检索字符串或正则表达式，返回路径、行号与前后文预览。',
+      description: '在全书文本文件中检索字符串或正则表达式，返回路径、行号与前后文预览。无效正则会直接报错。',
       inputSchema: z.object({
         query: z.string().min(1).describe('搜索关键词或正则表达式'),
         regex: z.boolean().optional().describe('是否启用正则表达式'),
         caseSensitive: z.boolean().optional().describe('是否区分大小写'),
+        scope: z
+          .enum(['all', 'spine', 'styles', 'metadata'])
+          .optional()
+          .describe('搜索范围：all 全部文本（默认）、spine 仅正文章节、styles 仅 CSS、metadata 仅 OPF/目录'),
         pathFilter: z.string().optional().describe('仅搜索路径包含该子串的文件'),
         maxResults: z.number().int().min(1).max(100).optional().describe('最大返回条数，默认 40'),
+        contextChars: z.number().int().min(10).max(200).optional().describe('前后文预览字符半径，默认 40'),
       }),
       execute: async (input, options) => run('search_book', input, options?.toolCallId),
     }),
@@ -875,12 +1085,12 @@ function buildSdkTools(
       execute: async (_input, options) => run('get_metadata', {}, options?.toolCallId),
     }),
     get_toc: tool({
-      description: '读取书籍目录树（nav.xhtml 或 toc.ncx）以及失效锚点列表。',
+      description: '读取书籍目录树（每个节点自带 path 下标，可直接传给 edit_toc）以及失效锚点列表。',
       inputSchema: z.object({}),
       execute: async (_input, options) => run('get_toc', {}, options?.toolCallId),
     }),
     scan_headings: tool({
-      description: '按阅读顺序扫描 spine 各章的 h1–h6 正文标题与现有 id 锚点，便于生成或核对目录。',
+      description: '按阅读顺序扫描 spine 各章的 h1–h6 正文标题、所在行号与现有 id 锚点，便于定位、拆章或核对目录。',
       inputSchema: z.object({
         levels: z
           .array(z.number().int().min(1).max(6))
@@ -890,15 +1100,89 @@ function buildSdkTools(
       }),
       execute: async (input, options) => run('scan_headings', input, options?.toolCallId),
     }),
+    list_anchors: tool({
+      description: '按文档顺序列出指定 XHTML/XML 文件中所有可跳转的 id / a[name] 锚点、标签名、文本与行号。',
+      inputSchema: z.object({
+        path: z.string().describe('EPUB 内文本文件路径'),
+        limit: z.number().int().min(1).max(500).optional().describe('最大返回锚点数，默认 200'),
+      }),
+      execute: async (input, options) => run('list_anchors', input, options?.toolCallId),
+    }),
+    find_references: tool({
+      description: '反查指定文件被全书哪些位置引用（targetPath），或查看指定文件引用了哪些内部资源/链接（fromPath）。',
+      inputSchema: z.object({
+        targetPath: z.string().optional().describe('被引用目标路径（反查谁引用了它），如 OEBPS/Images/fig01.png'),
+        fromPath: z.string().optional().describe('来源文件路径（查看它引用了哪些文件）'),
+        includeOpf: z.boolean().optional().describe('是否包含 OPF manifest 声明，默认 false'),
+        maxResults: z.number().int().min(1).max(300).optional().describe('最大返回条数，默认 100'),
+      }),
+      execute: async (input, options) => run('find_references', input, options?.toolCallId),
+    }),
+    inspect_image: tool({
+      description:
+        '查看书内图片元数据、尺寸、引用位置（含 img alt 属性）及图像画面（支持 PNG/JPEG/GIF/WebP 视觉读取与 SVG 源码读取），便于核对图注、补写 alt 或识别图表公式。',
+      inputSchema: z.object({
+        path: z.string().describe('图片在 EPUB 内的路径，如 OEBPS/Images/fig01.png'),
+      }),
+      execute: async (input, options) => runInspectImage(input, options?.toolCallId),
+      toModelOutput: ({ output }) => {
+        if (output._image) {
+          const { _image, ...clean } = output
+          return {
+            type: 'content',
+            value: [
+              { type: 'text', text: JSON.stringify(clean) },
+              {
+                type: 'file',
+                mediaType: _image.mediaType,
+                data: { type: 'data', data: _image.base64 },
+              },
+            ],
+          }
+        }
+        return { type: 'json', value: toJsonValue(output) as any }
+      },
+    }),
     edit_file: tool({
-      description: '对已有文本文件执行精确片段替换并即时校验 XML 良构性。优先使用此工具以保真。',
+      description:
+        '对已有文本文件执行精确片段替换并即时校验 XML 良构性，返回改动行号。支持单次传入 edits 数组原子执行多处编辑。',
       inputSchema: z.object({
         path: z.string().describe('要修改的文件路径'),
-        oldText: z.string().min(1).describe('待替换的精确原文片段'),
-        newText: z.string().describe('替换后的新文本'),
-        replaceAll: z.boolean().optional().describe('是否替换该文件内全部匹配项，默认 false'),
+        oldText: z.string().min(1).optional().describe('单处编辑时的待替换精确原文片段'),
+        newText: z.string().optional().describe('单处编辑时的替换后新文本'),
+        replaceAll: z.boolean().optional().describe('单处编辑时是否替换该文件内全部匹配项，默认 false'),
+        edits: z
+          .array(
+            z.object({
+              oldText: z.string().min(1).describe('待替换精确原文片段'),
+              newText: z.string().describe('替换后新文本'),
+              replaceAll: z.boolean().optional().describe('是否替换全部匹配项，默认 false'),
+            }),
+          )
+          .min(1)
+          .optional()
+          .describe('单文件多处原子替换列表（任一失败或 XML 无效将整批回滚）'),
       }),
       execute: async (input, options) => run('edit_file', input, options?.toolCallId),
+    }),
+    replace_in_book: tool({
+      description:
+        '在全书多个文件中批量执行字面量或正则表达式替换，逐文件严格校验 XML（任一文件非法则整批中止回滚）。建议大范围替换前先 dryRun: true 预览。',
+      inputSchema: z.object({
+        query: z.string().min(1).describe('待查找的字符串或正则表达式'),
+        replacement: z.string().describe('替换为的新文本（regex: true 时支持 $1/$& 等捕获组）'),
+        regex: z.boolean().optional().describe('是否启用正则表达式，默认 false'),
+        caseSensitive: z.boolean().optional().describe('是否区分大小写，默认 true'),
+        scope: z
+          .enum(['spine', 'styles', 'all'])
+          .optional()
+          .describe('作用范围：spine 仅正文章节（默认）、styles 仅 CSS、all 全部非受保护文本'),
+        paths: z.array(z.string().min(1)).optional().describe('显式指定目标文件列表（传入后覆盖 scope）'),
+        pathFilter: z.string().optional().describe('仅处理路径包含该子串的文件'),
+        dryRun: z.boolean().optional().describe('true 时仅预览命中统计与样本前后文，不写入修改'),
+        maxFiles: z.number().int().min(1).max(500).optional().describe('单次最多修改文件数，默认 200'),
+      }),
+      execute: async (input, options) => run('replace_in_book', input, options?.toolCallId),
     }),
     write_file: tool({
       description: '整文件覆写已有文本文件并校验 XML 良构性（不可用于新建文件，新建章节请用 create_chapter）。',
@@ -907,6 +1191,15 @@ function buildSdkTools(
         content: z.string().describe('完整的新文件内容'),
       }),
       execute: async (input, options) => run('write_file', input, options?.toolCallId),
+    }),
+    format_file: tool({
+      description:
+        '使用保真格式化器规范缩进 XHTML/XML/OPF/NCX 或 CSS 文件（原样保留 <math>/<svg>/<pre>/<style>/<script> 与行内空白），特别适合先展开单行压缩章节再编辑。',
+      inputSchema: z.object({
+        path: z.string().optional().describe('单个待格式化文件路径'),
+        paths: z.array(z.string().min(1)).optional().describe('批量待格式化文件路径数组'),
+      }),
+      execute: async (input, options) => run('format_file', input, options?.toolCallId),
     }),
     update_metadata: tool({
       description: '更新 OPF 的 dc:* 元数据字段和/或 <meta> 行，并同步 dcterms:modified。',
@@ -962,44 +1255,40 @@ function buildSdkTools(
     }),
     edit_toc: tool({
       description:
-        '按节点路径增量调整目录结构（保留未修改条目的内联 MathML），支持插入、改名/改链接、上下移、子树移动、大纲保序缩进/取消缩进、删除（可选保留子项）、刷新标题与清理失效锚点。',
+        '按节点路径增量调整目录结构（保留未修改条目的内联 MathML），支持单个动作或 actions 批量原子执行，并在条目数 <= 150 时直接返回更新后的带 path 目录树。',
       inputSchema: z.object({
-        action: z
-          .enum([
-            'insert',
-            'update',
-            'move',
-            'move_subtree',
-            'indent',
-            'outdent',
-            'remove',
-            'refresh_labels',
-            'clean_broken',
-          ])
-          .describe('要执行的增量目录动作'),
-        path: z.array(z.number().int().min(0)).optional().describe('目标节点路径，如 [1, 0]'),
-        paths: z
-          .array(z.array(z.number().int().min(0)))
+        action: editTocActionSchema.shape.action.optional().describe('单动作模式下的增量目录动作'),
+        path: editTocActionSchema.shape.path,
+        paths: editTocActionSchema.shape.paths,
+        toPath: editTocActionSchema.shape.toPath,
+        position: editTocActionSchema.shape.position,
+        delta: editTocActionSchema.shape.delta,
+        label: editTocActionSchema.shape.label,
+        href: editTocActionSchema.shape.href,
+        keepChildren: editTocActionSchema.shape.keepChildren,
+        overwriteRichHtml: editTocActionSchema.shape.overwriteRichHtml,
+        actions: z
+          .array(editTocActionSchema)
+          .min(1)
+          .max(50)
           .optional()
-          .describe('批量操作目标路径数组，支持 move/indent/outdent/remove/refresh_labels'),
-        toPath: z.array(z.number().int().min(0)).optional().describe('move_subtree 的目标位置路径'),
-        position: z.enum(['before', 'after', 'inside']).optional().describe('insert 或 move_subtree 的相对位置'),
-        delta: z.union([z.literal(-1), z.literal(1)]).optional().describe('move 方向：-1 上移，1 下移'),
-        label: z.string().optional().describe('insert 或 update 的标题'),
-        href: z.string().optional().describe('insert 或 update 的相对链接'),
-        keepChildren: z.boolean().optional().describe('remove 时是否保留子项并上提一级'),
-        overwriteRichHtml: z.boolean().optional().describe('refresh_labels 时是否覆盖含内联 MathML 的条目，默认 false'),
+          .describe('批量顺序执行的目录动作列表（任一步失败整批回滚）'),
       }),
       execute: async (input, options) => run('edit_toc', input, options?.toolCallId),
     }),
     create_chapter: tool({
-      description: '新建一个 XHTML 章节文件，注册到 OPF manifest 与 spine，可选加入目录。',
+      description:
+        '新建一个 XHTML 章节文件，注册到 OPF manifest 与 spine，默认自动继承相邻/首章样式表，可选紧插到 insertAfter 之后并同步插入对应目录位置。',
       inputSchema: z.object({
         title: z.string().min(1).describe('章节标题'),
         filename: z.string().optional().describe('可选文件名（如 ch026.xhtml），留空自动编号'),
         content: z.string().optional().describe('可选完整 XHTML 内容，留空使用标准章节骨架'),
-        insertAfter: z.string().optional().describe('可选：插入到指定已有章节路径之后'),
-        addToToc: z.boolean().optional().describe('是否同时追加到目录末尾'),
+        insertAfter: z.string().optional().describe('可选：插入到指定已有 spine 章节路径之后（不存在将报错）'),
+        addToToc: z.boolean().optional().describe('是否同时加入目录（若指定 insertAfter 则紧插其后，否则追加末尾）'),
+        stylesheets: z
+          .array(z.string().min(1))
+          .optional()
+          .describe('可选：显式指定要挂载的 CSS 路径（不传且未自定义 content 时自动继承主样式表）'),
       }),
       execute: async (input, options) => run('create_chapter', input, options?.toolCallId),
     }),
@@ -1017,6 +1306,16 @@ function buildSdkTools(
         path: z.string().describe('待删除的文件路径'),
       }),
       execute: async (input, options) => run('delete_file', input, options?.toolCallId),
+    }),
+    reorder_spine: tool({
+      description: '调整 OPF <spine> 中正文章节的阅读顺序，并同步更新 dcterms:modified。未列出的章节保持相对顺序排在末尾。',
+      inputSchema: z.object({
+        orderedPaths: z
+          .array(z.string().min(1))
+          .min(1)
+          .describe('按目标阅读顺序排列的 spine 章节路径数组'),
+      }),
+      execute: async (input, options) => run('reorder_spine', input, options?.toolCallId),
     }),
     split_chapter: tool({
       description:
@@ -1058,7 +1357,7 @@ function buildSdkTools(
     }),
     cleanup_unused_resources: tool({
       description:
-        '扫描或清理未被引用且非封面的图片、字体与未关联样式表；传入 dryRun: true 可仅预览清单不删除。',
+        '扫描或清理未被引用且非封面的图片、字体与未关联样式表；传入 dryRun: true 可仅预览清单与体积不删除。',
       inputSchema: z.object({
         paths: z.array(z.string()).optional().describe('仅删除指定的未引用资源路径'),
         categories: z
@@ -1104,6 +1403,7 @@ export async function runAgentTurn(options: RunAgentTurnOptions): Promise<RunAge
     codec: nodeXmlCodec,
     checkXml: nodeCheckXml,
     overlay: options.overlay,
+    entrySizes: options.entrySizes,
   })
 
   // Seed unapplied pending proposal onto the working copy (unless ask-mode or user drifted files).
@@ -1377,7 +1677,10 @@ export async function runAgentTurn(options: RunAgentTurnOptions): Promise<RunAge
       model,
       system: systemPrompt,
       messages,
-      tools: buildSdkTools(workspace, toolCalls, steps, emit, approvalMode, options.abortSignal, handleWriteSuccess),
+      tools: buildSdkTools(workspace, toolCalls, steps, emit, approvalMode, options.abortSignal, handleWriteSuccess, {
+        archive: options.archive,
+        loadBinary: options.loadBinary,
+      }),
       stopWhen: maxSteps > 0 ? stepCountIs(maxSteps) : () => false,
       prepareStep: ({ messages: stepMessages, stepNumber }) => {
         if (stepNumber < 2) return undefined

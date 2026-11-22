@@ -43,6 +43,10 @@ describe('agent providers & runner with local mock LLM servers', () => {
   let lastAskRequest: Record<string, unknown> | null = null
   let askRequests: Array<Record<string, unknown>> = []
   let anthropicCapturedBodies: Array<Record<string, unknown>> = []
+  let oaiImageStep = 0
+  let oaiImageBodies: Array<Record<string, unknown>> = []
+  let anthImageStep = 0
+  let anthImageBodies: Array<Record<string, unknown>> = []
   let compactCalls = 0
   let compactFailMode = false
 
@@ -214,6 +218,153 @@ describe('agent providers & runner with local mock LLM servers', () => {
             model: 'mock-ask',
             choices: [{ index: 0, delta: { role: 'assistant', content: '仅给出只读校对建议。' }, finish_reason: 'stop' }],
             usage: { prompt_tokens: 320, completion_tokens: 16, total_tokens: 336 },
+          },
+        ])
+        return
+      }
+
+      // Anthropic multimodal inspect_image endpoint
+      if (url.pathname === '/anthropic-image/v1/messages') {
+        anthImageBodies.push(body)
+        anthImageStep += 1
+        if (anthImageStep === 1) {
+          writeAnthropicSse(res, [
+            {
+              event: 'message_start',
+              data: {
+                type: 'message_start',
+                message: {
+                  id: 'msg_img_1',
+                  type: 'message',
+                  role: 'assistant',
+                  model: 'claude-sonnet-4-20250514',
+                  content: [],
+                  stop_reason: null,
+                  stop_sequence: null,
+                  usage: { input_tokens: 100, output_tokens: 1 },
+                },
+              },
+            },
+            {
+              event: 'content_block_start',
+              data: {
+                type: 'content_block_start',
+                index: 0,
+                content_block: { type: 'tool_use', id: 'toolu_img_1', name: 'inspect_image', input: {} },
+              },
+            },
+            {
+              event: 'content_block_delta',
+              data: {
+                type: 'content_block_delta',
+                index: 0,
+                delta: {
+                  type: 'input_json_delta',
+                  partial_json: JSON.stringify({ path: 'EPUB/images/chart.png' }),
+                },
+              },
+            },
+            { event: 'content_block_stop', data: { type: 'content_block_stop', index: 0 } },
+            {
+              event: 'message_delta',
+              data: {
+                type: 'message_delta',
+                delta: { stop_reason: 'tool_use', stop_sequence: null },
+                usage: { output_tokens: 10 },
+              },
+            },
+            { event: 'message_stop', data: { type: 'message_stop' } },
+          ])
+          return
+        }
+        writeAnthropicSse(res, [
+          {
+            event: 'message_start',
+            data: {
+              type: 'message_start',
+              message: {
+                id: 'msg_img_2',
+                type: 'message',
+                role: 'assistant',
+                model: 'claude-sonnet-4-20250514',
+                content: [],
+                stop_reason: null,
+                stop_sequence: null,
+                usage: { input_tokens: 300, output_tokens: 1 },
+              },
+            },
+          },
+          {
+            event: 'content_block_start',
+            data: { type: 'content_block_start', index: 0, content_block: { type: 'text', text: '' } },
+          },
+          {
+            event: 'content_block_delta',
+            data: { type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: '已识别图表内容。' } },
+          },
+          { event: 'content_block_stop', data: { type: 'content_block_stop', index: 0 } },
+          {
+            event: 'message_delta',
+            data: {
+              type: 'message_delta',
+              delta: { stop_reason: 'end_turn', stop_sequence: null },
+              usage: { output_tokens: 8 },
+            },
+          },
+          { event: 'message_stop', data: { type: 'message_stop' } },
+        ])
+        return
+      }
+
+      // OpenAI-compatible multimodal inspect_image endpoint
+      if (url.pathname === '/openai-image/v1/chat/completions') {
+        oaiImageBodies.push(body)
+        oaiImageStep += 1
+        if (oaiImageStep === 1) {
+          writeOpenAiSse(res, [
+            {
+              id: 'img1',
+              object: 'chat.completion.chunk',
+              created: 1,
+              model: 'gpt-4o',
+              choices: [
+                {
+                  index: 0,
+                  delta: {
+                    role: 'assistant',
+                    tool_calls: [
+                      {
+                        index: 0,
+                        id: 'call_img_1',
+                        type: 'function',
+                        function: {
+                          name: 'inspect_image',
+                          arguments: JSON.stringify({ path: 'EPUB/images/chart.png' }),
+                        },
+                      },
+                    ],
+                  },
+                  finish_reason: null,
+                },
+              ],
+            },
+            {
+              id: 'img1',
+              object: 'chat.completion.chunk',
+              created: 1,
+              model: 'gpt-4o',
+              choices: [{ index: 0, delta: {}, finish_reason: 'tool_calls' }],
+            },
+          ])
+          return
+        }
+        writeOpenAiSse(res, [
+          {
+            id: 'img2',
+            object: 'chat.completion.chunk',
+            created: 1,
+            model: 'gpt-4o',
+            choices: [{ index: 0, delta: { role: 'assistant', content: '图表为 120×80 PNG。' }, finish_reason: 'stop' }],
           },
         ])
         return
@@ -893,9 +1044,12 @@ describe('agent providers & runner with local mock LLM servers', () => {
     const tools = (captured?.tools as Array<{ function?: { name?: string } }>) ?? []
     const toolNames = tools.map((t) => t.function?.name).sort()
     expect(toolNames).toEqual([
+      'find_references',
       'get_metadata',
       'get_toc',
+      'inspect_image',
       'lint_book',
+      'list_anchors',
       'list_files',
       'read_file',
       'scan_headings',
@@ -1273,5 +1427,90 @@ describe('agent providers & runner with local mock LLM servers', () => {
     expect(autoRes.stopped).toBe(true)
     expect(autoRes.proposal).toBeNull()
     expect(autoEvents.some((e) => e.type === 'proposal')).toBe(false)
+  })
+
+  it('lazy-loads raster images for inspect_image across OpenAI-compatible & Anthropic while omitting base64 from persisted steps', async () => {
+    const { archive } = openEpub(createEmptyEpub({ title: '读图测试书' }), nodeXmlCodec.parse)
+    const pngBytes = new Uint8Array(24)
+    pngBytes.set([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a], 0)
+    pngBytes.set([0x00, 0x00, 0x00, 0x0d, 0x49, 0x48, 0x44, 0x52], 8)
+    const view = new DataView(pngBytes.buffer)
+    view.setUint32(16, 120, false)
+    view.setUint32(20, 80, false)
+    const expectedBase64 = Buffer.from(pngBytes).toString('base64')
+
+    // Simulate listWorkspaceEntries omitting binary bytes while supplying real entrySizes
+    archive.entries.set('EPUB/images/chart.png', new Uint8Array(0))
+    archive.order.push('EPUB/images/chart.png')
+    const opf = new TextDecoder().decode(archive.entries.get('EPUB/content.opf')!)
+    archive.entries.set(
+      'EPUB/content.opf',
+      new TextEncoder().encode(
+        opf.replace('</manifest>', '  <item id="chart" href="images/chart.png" media-type="image/png"/>\n  </manifest>'),
+      ),
+    )
+
+    let loadCalls = 0
+    const loadBinary = async (path: string) => {
+      loadCalls += 1
+      return path === 'EPUB/images/chart.png' ? pngBytes : null
+    }
+    const entrySizes = new Map([['EPUB/images/chart.png', pngBytes.byteLength]])
+
+    // 1. OpenAI-compatible vision tool result
+    oaiImageStep = 0
+    oaiImageBodies = []
+    const oaiRes = await runAgentTurn({
+      archive,
+      entrySizes,
+      loadBinary,
+      provider: {
+        provider: 'openai-compatible',
+        baseUrl: `${mockUrl}/openai-image/v1`,
+        model: 'gpt-4o',
+        apiKey: 'sk-test',
+      },
+      history: [],
+      userMessage: '看看 EPUB/images/chart.png 是什么图',
+      approvalMode: 'ask',
+    })
+    expect(oaiRes.error).toBeNull()
+    expect(oaiRes.content).toBe('图表为 120×80 PNG。')
+    expect(loadCalls).toBe(1)
+    expect(oaiImageBodies).toHaveLength(2)
+    const oaiStep2Messages = oaiImageBodies[1]!.messages as Array<{ role: string; content: unknown }>
+    const oaiToolMsg = oaiStep2Messages.find((m) => m.role === 'tool')!
+    expect(Array.isArray(oaiToolMsg.content)).toBe(true)
+    const oaiParts = oaiToolMsg.content as Array<{ type: string; image_url?: { url: string } }>
+    expect(oaiParts.some((p) => p.type === 'image_url' && p.image_url?.url === `data:image/png;base64,${expectedBase64}`)).toBe(true)
+    // Persisted step JSON must NEVER contain base64 image data
+    expect(JSON.stringify(oaiRes.steps)).not.toContain(expectedBase64)
+    expect(JSON.stringify(oaiRes.steps)).toContain('"width":120')
+
+    // 2. Anthropic vision tool result
+    anthImageStep = 0
+    anthImageBodies = []
+    const anthRes = await runAgentTurn({
+      archive,
+      entrySizes,
+      loadBinary,
+      provider: {
+        provider: 'anthropic',
+        baseUrl: `${mockUrl}/anthropic-image/v1`,
+        model: 'claude-sonnet-4-20250514',
+        apiKey: 'sk-ant-mock',
+      },
+      history: [],
+      userMessage: '帮我写 chart.png 的 alt',
+      approvalMode: 'ask',
+    })
+    expect(anthRes.error).toBeNull()
+    expect(anthRes.content).toBe('已识别图表内容。')
+    expect(loadCalls).toBe(2)
+    expect(anthImageBodies).toHaveLength(2)
+    const anthSerialized = JSON.stringify(anthImageBodies[1]!.messages)
+    expect(anthSerialized).toContain('"type":"image"')
+    expect(anthSerialized).toContain(expectedBase64)
+    expect(JSON.stringify(anthRes.steps)).not.toContain(expectedBase64)
   })
 })
