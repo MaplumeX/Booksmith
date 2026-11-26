@@ -1127,9 +1127,62 @@ input {
   width: 100%;
   flex: 1;
   min-height: 0;
+  display: flex;
+  flex-direction: column;
   background: transparent;
+  overflow: hidden;
+}
+
+.filetree:focus {
+  outline: none;
+}
+
+.tree-sticky-header {
+  flex: 0 0 auto;
+}
+
+.tree-scroll {
+  flex: 1;
+  min-height: 0;
   overflow-y: auto;
-  padding: var(--space-2);
+  padding: var(--space-1) var(--space-2) var(--space-2);
+}
+
+.tree-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-2);
+  padding: 6px var(--space-2);
+  border-bottom: 1px solid var(--border);
+}
+
+.tree-toolbar-meta {
+  font-size: 11px;
+  color: var(--text-muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.tree-toolbar-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  height: 24px;
+  padding: 0 8px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--surface);
+  color: var(--text-secondary);
+  font-size: 11px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: background-color 120ms, color 120ms, border-color 120ms;
+}
+
+.tree-toolbar-btn:hover {
+  border-color: var(--border-strong);
+  background: var(--hover-bg);
+  color: var(--text);
 }
 
 .tree-group {
@@ -6948,71 +7001,125 @@ input {
 
 .tree-batch-bar {
   display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--border);
+  background: var(--surface-raised);
+}
+
+.tree-batch-top {
+  display: flex;
   align-items: center;
   justify-content: space-between;
   gap: var(--space-1);
-  margin-bottom: var(--space-2);
-  padding: 5px 8px;
-  border-radius: var(--radius-sm);
-  background: var(--accent-subtle);
-  color: var(--accent);
 }
 
 .tree-batch-count {
   font-size: 12px;
   font-weight: 600;
+  color: var(--accent);
   font-variant-numeric: tabular-nums;
 }
 
-.tree-batch-actions {
+.tree-batch-top-actions {
   display: inline-flex;
   align-items: center;
   gap: 4px;
 }
 
-.tree-batch-btn {
-  display: inline-flex;
-  align-items: center;
-  gap: 4px;
-  height: 24px;
-  padding: 0 7px;
-  border: 1px solid var(--border);
-  border-radius: 5px;
-  background: var(--surface);
-  color: var(--text);
+.tree-batch-link {
+  height: 22px;
+  padding: 0 6px;
+  border: none;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--text-secondary);
   font-size: 11px;
   font-weight: 500;
+  cursor: pointer;
+  transition: background-color 120ms, color 120ms;
+}
+
+.tree-batch-link:hover:not(:disabled) {
+  background: var(--hover-bg);
+  color: var(--text);
+}
+
+.tree-batch-link:disabled {
+  color: var(--disabled-fg);
+  cursor: default;
+}
+
+.tree-batch-done {
+  height: 22px;
+  padding: 0 8px;
+  border: none;
+  border-radius: var(--radius-sm);
+  background: var(--accent-subtle);
+  color: var(--accent);
+  font-size: 11px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background-color 120ms, color 120ms;
+}
+
+.tree-batch-done:hover {
+  background: var(--accent);
+  color: var(--accent-fg);
+}
+
+.tree-batch-actions {
+  display: grid;
+  grid-template-columns: repeat(6, minmax(0, 1fr));
+  gap: 4px;
+}
+
+.tree-batch-icon-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  height: 28px;
+  padding: 0;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--surface);
+  color: var(--text-secondary);
   cursor: pointer;
   transition: background-color 120ms, color 120ms, border-color 120ms;
 }
 
-.tree-batch-btn:hover:not(:disabled) {
+.tree-batch-icon-btn:hover:not(:disabled) {
   border-color: var(--accent);
+  background: var(--accent-subtle);
   color: var(--accent);
 }
 
-.tree-batch-btn:disabled {
+.tree-batch-icon-btn.is-danger:hover:not(:disabled) {
+  border-color: var(--danger);
+  background: var(--danger-subtle);
+  color: var(--danger);
+}
+
+.tree-batch-icon-btn:disabled {
   color: var(--disabled-fg);
   background: var(--disabled-bg);
   border-color: transparent;
   cursor: not-allowed;
 }
 
-.tree-batch-close {
+.tree-protected-lock {
+  flex: 0 0 auto;
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: 22px;
-  height: 22px;
-  border: none;
-  border-radius: 5px;
-  background: transparent;
-  color: var(--accent);
-  cursor: pointer;
+  width: 16px;
+  margin-left: 4px;
+  color: var(--text-muted);
 }
 
-.tree-batch-close:hover {
-  background: var(--hover-bg);
+.tree-row.is-protected .tree-item {
+  color: var(--text-muted);
 }
 
 .tree-row {
@@ -8550,5 +8657,322 @@ input {
   }
   .review-src-row {
     grid-template-columns: 34px 34px 16px minmax(0, 1fr);
+  }
+}
+
+/* ---------- Batch rename & delete dialogs (ADR 2026-11-26-filetree-batch-operations) ---------- */
+
+.dialog.batch-rename-dialog {
+  width: min(560px, calc(100vw - 32px));
+}
+
+.dialog.batch-delete-dialog {
+  width: min(480px, calc(100vw - 32px));
+}
+
+.batch-rename-dialog .dialog-footer {
+  justify-content: space-between;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+.batch-rename-footer-summary {
+  font-size: 12px;
+  color: var(--text-muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.batch-rename-footer-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  margin-left: auto;
+}
+
+.batch-rename-body,
+.batch-delete-body {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+
+.batch-rename-modes {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 2px;
+  padding: 2px;
+  border-radius: var(--radius-sm);
+  background: var(--surface-raised);
+}
+
+.batch-rename-mode-btn {
+  height: 28px;
+  border: none;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--text-secondary);
+  font-size: 12px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: background-color 120ms, color 120ms;
+}
+
+.batch-rename-mode-btn:hover {
+  color: var(--text);
+}
+
+.batch-rename-mode-btn.on {
+  background: var(--surface);
+  color: var(--text);
+  font-weight: 600;
+  box-shadow: var(--shadow-sm);
+}
+
+.batch-rename-fields {
+  display: grid;
+  gap: var(--space-2);
+}
+
+.batch-rename-fields-seq {
+  grid-template-columns: minmax(0, 1.5fr) minmax(0, 1fr) minmax(0, 1fr);
+}
+
+.batch-rename-fields-pair {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.batch-rename-options {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-3);
+}
+
+.batch-rename-check {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  color: var(--text-secondary);
+  cursor: pointer;
+}
+
+.batch-rename-check input[type='checkbox'] {
+  accent-color: var(--accent);
+}
+
+.batch-rename-preview {
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--surface-sunken);
+  overflow: hidden;
+}
+
+.batch-rename-preview-head {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 16px minmax(0, 1fr) 58px;
+  align-items: center;
+  gap: var(--space-2);
+  padding: 6px 10px;
+  border-bottom: 1px solid var(--border);
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text-muted);
+}
+
+.batch-rename-list {
+  list-style: none;
+  margin: 0;
+  padding: 4px;
+  max-height: 240px;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.batch-rename-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 16px minmax(0, 1fr) 58px;
+  align-items: center;
+  gap: var(--space-2);
+  padding: 5px 6px;
+  border-radius: 5px;
+  font-size: 12px;
+}
+
+.batch-rename-row.is-changed {
+  background: var(--surface);
+}
+
+.batch-rename-row.is-conflict,
+.batch-rename-row.is-invalid {
+  background: var(--status-error-bg);
+}
+
+.batch-rename-name,
+.batch-rename-target {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: var(--font-mono);
+  font-size: 12px;
+}
+
+.batch-rename-name {
+  color: var(--text-secondary);
+}
+
+.batch-rename-target {
+  color: var(--text);
+  font-weight: 500;
+}
+
+.batch-rename-row.is-unchanged .batch-rename-target {
+  color: var(--text-muted);
+  font-weight: 400;
+}
+
+.batch-rename-arrow {
+  color: var(--text-muted);
+}
+
+.batch-rename-status {
+  display: inline-flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 3px;
+  font-size: 11px;
+  font-weight: 500;
+  white-space: nowrap;
+}
+
+.batch-rename-status.is-changed {
+  color: var(--status-ok-fg);
+}
+
+.batch-rename-status.is-unchanged {
+  color: var(--text-muted);
+}
+
+.batch-rename-status.is-conflict,
+.batch-rename-status.is-invalid {
+  color: var(--status-error-fg);
+}
+
+.batch-rename-empty {
+  margin: 0;
+  padding: var(--space-4);
+  font-size: 12px;
+  color: var(--text-muted);
+  text-align: center;
+}
+
+.batch-delete-risks {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+}
+
+.batch-delete-risk {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-2);
+  margin: 0;
+  padding: 8px 10px;
+  border-radius: var(--radius-sm);
+  background: var(--status-warn-bg);
+  color: var(--status-warn-fg);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.batch-delete-risk svg {
+  flex: 0 0 auto;
+  margin-top: 2px;
+}
+
+.batch-delete-targets {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.batch-delete-section-label {
+  margin: 0;
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--text-secondary);
+}
+
+.batch-delete-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  list-style: none;
+  margin: 0;
+  padding: 8px;
+  max-height: 112px;
+  overflow-y: auto;
+  border-radius: var(--radius-sm);
+  background: var(--surface-sunken);
+}
+
+.batch-delete-chip {
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  padding: 2px 8px;
+  border-radius: 5px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  color: var(--text);
+  font-family: var(--font-mono);
+  font-size: 11px;
+}
+
+.batch-delete-ref-groups {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  max-height: 240px;
+  overflow-y: auto;
+}
+
+.batch-delete-ref-group {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.batch-delete-ref-heading {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--space-2);
+  margin: 0;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text);
+}
+
+.batch-delete-ref-count {
+  font-size: 11px;
+  font-weight: 500;
+  color: var(--text-muted);
+  font-variant-numeric: tabular-nums;
+}
+
+@media (max-width: 560px) {
+  .batch-rename-fields-seq,
+  .batch-rename-fields-pair {
+    grid-template-columns: 1fr;
+  }
+
+  .batch-rename-dialog .dialog-footer {
+    flex-direction: column;
+    align-items: stretch;
   }
 }

@@ -36,7 +36,9 @@ export type { ManifestItemDraft, MetadataDraft, OpfMetaRow } from './opfWrite'
 export {
   addSpineDocument,
   insertSpineDocumentsAfter,
+  removeManifestEntries,
   removeManifestEntry,
+  renameManifestEntries,
   renameManifestEntry,
   reorderSpine,
   setManifestMediaType,
@@ -49,7 +51,7 @@ export {
   rewriteAnchorReferences,
   rewriteReferences,
 } from './references'
-export type { AnchorRewriteOptions, BookReference, WholeFileMove } from './references'
+export type { AnchorRewriteOptions, BookReference, RewriteReferencesOptions, WholeFileMove } from './references'
 export {
   SPLIT_MARKER_CLASS,
   SPLIT_MARKER_HTML,
@@ -71,12 +73,34 @@ export type { DuplicateChapterResult, MergeChaptersResult } from './chapterMerge
 export {
   createBlankStylesheet,
   deleteUnusedResourcesInBook,
+  findCoverPaths,
   findUnusedResources,
   getLinkedStylesheets,
   listBookStylesheets,
   setChapterStylesheets,
   updateChaptersStylesheets,
 } from './stylesheets'
+export {
+  computeBatchSpineMove,
+  deleteFilesInBook,
+  getBatchSpineMoveCapability,
+  inspectBatchDelete,
+  isProtectedArchivePath,
+  planBatchRename,
+  renameFilesInBook,
+} from './batchFiles'
+export type {
+  BatchDeleteInspection,
+  BatchDeleteReference,
+  BatchDeleteReferenceGroup,
+  BatchRenameItemStatus,
+  BatchRenamePlan,
+  BatchRenamePreviewItem,
+  BatchRenameRule,
+  BatchSpineMoveCapability,
+  DeleteFilesInBookResult,
+  RenameFilesInBookResult,
+} from './batchFiles'
 export type {
   CreateStylesheetResult,
   DeleteUnusedResourcesResult,

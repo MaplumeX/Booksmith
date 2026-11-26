@@ -109,7 +109,7 @@ test('duplicates chapters, merges with previous, and merges multi-selected chapt
   await expect(page.locator('.structure-toast')).toContainText('已合并 2 章至 ch003.xhtml')
 
   // Multi-select merge ch002 + ch003, then undo via toast.
-  await page.getByRole('button', { name: '多选章节', exact: true }).click()
+  await page.getByRole('button', { name: '多选文件', exact: true }).click()
   await page.getByLabel('选择 ch002.xhtml').check()
   await page.getByLabel('选择 ch003.xhtml').check()
   await page.getByRole('button', { name: '合并选中章节', exact: true }).click()

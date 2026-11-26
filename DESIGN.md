@@ -39,7 +39,9 @@
 | `ContextMenu` | `src/ui/ContextMenu.tsx` | Radix ContextMenu；图标 + 分组 + danger / disabled / edge（视口回拉）/ 键盘导航 |
 | `Dialog` | `src/ui/Dialog.tsx` | Radix Dialog；default / wide / 自定义 `onCloseAutoFocus` / 右上角关闭 / 右下角动作 / Escape 与遮罩关闭 |
 | `FileTypeIcon` | `src/ui/FileTypeIcon.tsx` | 文本 / 样式代码 / 图片 / 容器四类统一线宽图标 |
-| `FileTree` | `src/ui/FileTree.tsx` | 左悬浮结构岛「文件」视图；default / empty（无图片组）/ loading / error / edge（长名截断、待拆分徽标、待审阅变更徽标）/ Text 组多选批量栏（合并 / 样式表）/ Styles 新建样式表 / 接入 `ContextMenu` |
+| `FileTree` | `src/ui/FileTree.tsx` | 左悬浮结构岛「文件」视图；default / empty（无图片组）/ loading / error / edge（长名截断、待拆分徽标、待审阅变更徽标、容器核心文件受保护锁标）/ 全分组跨组多选 + 两行吸顶批量栏（上移·下移·合并·样式表·重命名·删除）+ 分组全选 + 局部快捷键 + 右键批量 `ContextMenu` / Styles 新建样式表 |
+| `BatchRenameDialog` | `src/ui/BatchRenameDialog.tsx` | `560px` 居中批量重命名弹窗；default（按序编号·查找替换·添加前后缀三模式、默认锁扩展名、实时「原名→新名」对照表）/ empty / error（重名与非法路径实时标红阻断）/ edge（同批链式与互换命名、长名截断、滚动列表） |
+| `BatchDeleteDialog` | `src/ui/BatchDeleteDialog.tsx` | `480px` 居中单/批量删除确认弹窗；default（待删文件列表 + 分组外部引用跳行定位）/ error·warn（目录文件、封面图、清空全部章节风险警示）/ edge（自动过滤同批内部互引、长列表滚动） |
 | `LinkStylesheetsDialog` | `src/ui/LinkStylesheetsDialog.tsx` | `480px` 居中章节样式表关联弹窗；default（单/多章三态半选勾选、内嵌新建样式表）/ empty（无 CSS 引导创建）/ error（重名与非法路径提示）/ edge（长路径截断与滚动） |
 | `UnusedResourcesDialog` | `src/ui/UnusedResourcesDialog.tsx` | `560px` 居中未引用资源清理弹窗；default（图片/字体/未关联样式表分组勾选、缩略图与体积汇总）/ empty（零未引用绿标）/ edge（自动排除封面图、长列表滚动、缺图回退图标） |
 | `TocPanel` | `src/ui/TocPanel.tsx` | 左悬浮结构岛「目录」视图；default（单击跳转与高亮、折叠/按级展开、过滤、拖拽、多选批量栏、右键与 `···` 菜单、50 步撤销重做）/ empty（缺失目录初始化、空目录、过滤无命中）/ error（断链徽标点击直达修复、仅看断链）/ edge（177+ 项滚动、深层缩进钳制、长标题截断） |

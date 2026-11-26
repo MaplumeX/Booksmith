@@ -1,4 +1,4 @@
-import { resolvePath } from './path'
+import { relativePath, resolvePath } from './path'
 import { addManifestItem, OPF_NS, type ManifestItemDraft } from './opfWrite'
 import type { XmlCodec } from './xml'
 
@@ -116,6 +116,40 @@ export function renameManifestEntry(
   return codec.serialize(doc)
 }
 
+/**
+ * Rewrites multiple manifest item hrefs in a single DOM pass so chained or swapped paths
+ * (`a -> b`, `b -> c` or `a <-> b`) never collide mid-batch.
+ */
+export function renameManifestEntries(
+  xml: string,
+  renames: ReadonlyMap<string, string>,
+  baseDir: string,
+  codec: XmlCodec,
+): string {
+  if (renames.size === 0) return xml
+  const doc = codec.parse(xml)
+  // Snapshot matched items against original paths first so chained renames cannot overwrite each other.
+  // See ADR 2026-11-26-filetree-batch-operations.
+  const matchedSources = new Set<string>()
+  const updates: Array<{ item: Element; href: string }> = []
+  for (const item of manifestItems(doc)) {
+    const currentPath = pathOf(item, baseDir)
+    const nextPath = renames.get(currentPath)
+    if (nextPath === undefined) continue
+    matchedSources.add(currentPath)
+    updates.push({ item, href: relativePath(baseDir, nextPath) })
+  }
+  for (const source of renames.keys()) {
+    if (!matchedSources.has(source)) {
+      throw new Error(`manifest has no entry for ${source}`)
+    }
+  }
+  for (const { item, href } of updates) {
+    item.setAttribute('href', href)
+  }
+  return codec.serialize(doc)
+}
+
 /** Removes a manifest entry and every spine reference to it, plus a `spine@toc` pointing at it. */
 export function removeManifestEntry(xml: string, path: string, baseDir: string, codec: XmlCodec): string {
   const doc = codec.parse(xml)
@@ -125,6 +159,35 @@ export function removeManifestEntry(xml: string, path: string, baseDir: string, 
     item.parentNode?.removeChild(item)
   }
   if (removedIds.size === 0) throw new Error(`manifest has no entry for ${path}`)
+
+  for (const ref of itemrefs(doc)) {
+    if (removedIds.has(ref.getAttribute('idref') ?? '')) ref.parentNode?.removeChild(ref)
+  }
+  const spine = spineElement(doc)
+  if (removedIds.has(spine.getAttribute('toc') ?? '')) spine.removeAttribute('toc')
+  return codec.serialize(doc)
+}
+
+/**
+ * Removes multiple manifest entries, their spine `<itemref>`s, and any matching `spine@toc`
+ * in a single DOM pass. Paths absent from the manifest are skipped without throwing.
+ */
+export function removeManifestEntries(
+  xml: string,
+  paths: ReadonlySet<string> | readonly string[],
+  baseDir: string,
+  codec: XmlCodec,
+): string {
+  const targetSet = paths instanceof Set ? paths : new Set(paths)
+  if (targetSet.size === 0) return xml
+  const doc = codec.parse(xml)
+  const removedIds = new Set<string>()
+  for (const item of manifestItems(doc)) {
+    if (!targetSet.has(pathOf(item, baseDir))) continue
+    removedIds.add(item.getAttribute('id') ?? '')
+    item.parentNode?.removeChild(item)
+  }
+  if (removedIds.size === 0) return xml
 
   for (const ref of itemrefs(doc)) {
     if (removedIds.has(ref.getAttribute('idref') ?? '')) ref.parentNode?.removeChild(ref)

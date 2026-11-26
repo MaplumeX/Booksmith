@@ -93,19 +93,27 @@ export function collectReferences(files: Map<string, string>): BookReference[] {
   return out
 }
 
+export interface RewriteReferencesOptions {
+  /** Archive paths to skip (e.g. `content.opf`, whose manifest hrefs are updated via DOM). */
+  skipPaths?: ReadonlySet<string>
+}
+
 /**
  * Rewrites references whose target was renamed. Only values that resolve to a renamed path are
  * touched; every other byte of the chapter stays as it was.
  */
 export function rewriteReferences(
   files: Map<string, string>,
-  renames: Map<string, string>,
+  renames: ReadonlyMap<string, string>,
+  options?: RewriteReferencesOptions,
 ): { files: Map<string, string>; touched: BookReference[] } {
   const next = new Map(files)
   const touched: BookReference[] = []
   if (renames.size === 0) return { files: next, touched }
+  const skipPaths = options?.skipPaths
 
   for (const [path, text] of files) {
+    if (skipPaths?.has(path)) continue
     const edits: Array<{ start: number; end: number; value: string }> = []
     for (const match of rawMatches(path, text)) {
       const targetPath = targetOf(path, match.raw)

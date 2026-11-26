@@ -280,6 +280,18 @@ function epub2CoverItemIds(opfXml: string): Set<string> {
   return ids
 }
 
+/** Returns archive paths declared as cover images via EPUB 3 `cover-image` or EPUB 2 `<meta name="cover">`. */
+export function findCoverPaths(files: ReadonlyMap<string, string>, pkg: EpubPackage): Set<string> {
+  const coverIds = epub2CoverItemIds(files.get(pkg.opfPath) ?? '')
+  const out = new Set<string>()
+  for (const item of pkg.manifest) {
+    if (item.properties?.includes('cover-image') || coverIds.has(item.id)) {
+      out.add(item.path)
+    }
+  }
+  return out
+}
+
 /**
  * Lists unreferenced images, fonts, and unlinked CSS stylesheets.
  * Excludes OPF self-declarations, spine documents, EPUB 3 `cover-image`, and EPUB 2 `<meta name="cover">`
@@ -303,14 +315,14 @@ export function findUnusedResources(
       .map((id) => pkg.manifest.find((item) => item.id === id)?.path)
       .filter((path): path is string => typeof path === 'string'),
   )
-  const coverIds = epub2CoverItemIds(files.get(pkg.opfPath) ?? '')
+  const coverPaths = findCoverPaths(files, pkg)
 
   const out: UnusedResource[] = []
   for (const item of pkg.manifest) {
     if (!archive.entries.has(item.path)) continue
     if (inSpine.has(item.path) || referenced.has(item.path)) continue
     if (item.path === pkg.navPath || item.path === pkg.ncxPath) continue
-    if (item.properties?.includes('cover-image') || coverIds.has(item.id)) continue
+    if (coverPaths.has(item.path)) continue
 
     let category: UnusedResourceCategory | null = null
     if (IMAGE_TYPE.test(item.mediaType)) category = 'image'

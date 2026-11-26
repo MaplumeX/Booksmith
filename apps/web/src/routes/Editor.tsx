@@ -1,8 +1,11 @@
 import {
+  CONTAINER_PATH,
   addManifestItem,
   addSpineDocument,
+  computeBatchSpineMove,
   countSplitMarkers,
   createBlankStylesheet,
+  deleteFilesInBook,
   deleteUnusedResourcesInBook,
   duplicateChapterInBook,
   findUnusedResources,
@@ -10,9 +13,10 @@ import {
   formatXhtml,
   getLinkedStylesheets,
   hasPageHistory,
+  inspectBatchDelete,
+  isProtectedArchivePath,
   browserXmlCodec,
   browserXmlParser,
-  collectReferences,
   dirname,
   findBrokenAnchors,
   initializeBookToc,
@@ -25,12 +29,10 @@ import {
   readNcxToc,
   rebaseTocHrefs,
   relativePath,
-  removeManifestEntry,
-  renameManifestEntry,
+  renameFilesInBook,
   reorderSpine,
   setManifestMediaType,
   resolvePath,
-  rewriteReferences,
   SPLIT_MARKER_HTML,
   splitChapterAtMarkersInBook,
   splitChapterInBook,
@@ -43,6 +45,7 @@ import {
   writeOpfMetadata,
   type AgentProposal,
   type AgentProposalFile,
+  type BatchDeleteInspection,
   type EpubArchive,
   type EpubIssue,
   type EpubPackage,
@@ -154,6 +157,8 @@ import {
   type StructureHistoryEntry,
 } from '../state/structureHistory'
 import { AgentPanel, type ProposalStatusSyncEvent } from '../ui/AgentPanel'
+import { BatchDeleteDialog } from '../ui/BatchDeleteDialog'
+import { BatchRenameDialog } from '../ui/BatchRenameDialog'
 import { Button } from '../ui/Button'
 import { CheckPanel } from '../ui/CheckPanel'
 import { CodePane, type CodePaneHandle } from '../ui/CodePane'
@@ -162,7 +167,7 @@ import { CommandPalette, type CommandItem } from '../ui/CommandPalette'
 import type { ContextMenuEntry } from '../ui/ContextMenu'
 import { Dialog } from '../ui/Dialog'
 import { EmptyState } from '../ui/EmptyState'
-import { FileTree } from '../ui/FileTree'
+import { FileTree, type FileTreeSelectionRemap } from '../ui/FileTree'
 import { LinkStylesheetsDialog } from '../ui/LinkStylesheetsDialog'
 import { MediaPane } from '../ui/MediaPane'
 import { PreviewPane } from '../ui/PreviewPane'
@@ -307,6 +312,60 @@ function reconcileBookAfterStructure(
   }
 }
 
+/**
+ * Atomically migrates entry metadata, server origins, and local binary buffers into fresh Maps
+ * after single or batch renames so swaps (`a <-> b`) and chains never clobber origin tracking.
+ * See ADR 2026-11-26-filetree-batch-operations.
+ */
+function remapBookAfterRenames(
+  current: LoadedBook,
+  nextFiles: Map<string, string>,
+  nextArchive: EpubArchive,
+  nextPkg: EpubPackage,
+  renames: ReadonlyMap<string, string>,
+): LoadedBook {
+  const entryMeta = new Map(
+    Array.from(current.entryMeta.entries()).map(([path, meta]) => {
+      const dest = renames.get(path) ?? path
+      return [dest, dest === path ? meta : { ...meta, path: dest }]
+    }),
+  )
+  const entryOrigins = new Map(
+    Array.from(current.entryOrigins.entries()).map(([path, origin]) => [renames.get(path) ?? path, origin]),
+  )
+  const localBinaries = new Map(
+    Array.from(current.localBinaries.entries()).map(([path, bin]) => [renames.get(path) ?? path, bin]),
+  )
+
+  for (const [path, text] of nextFiles) {
+    if (!nextArchive.entries.has(path)) continue
+    const encoded = encoder.encode(text)
+    nextArchive.entries.set(path, encoded)
+    const prev = entryMeta.get(path)
+    entryMeta.set(path, {
+      path,
+      isText: isTextEntry(path),
+      mediaType:
+        nextPkg.manifest.find((item) => item.path === path)?.mediaType ??
+        prev?.mediaType ??
+        mediaTypeFromExtension(path),
+      byteSize: encoded.byteLength,
+      sha256: null,
+    })
+  }
+
+  return {
+    ...current,
+    archive: nextArchive,
+    pkg: nextPkg,
+    texts: nextFiles,
+    groups: groupFiles(nextPkg, nextArchive),
+    entryMeta,
+    entryOrigins,
+    localBinaries,
+  }
+}
+
 function chapterDirectory(book: LoadedBook): string {
   const first = spinePaths(book.pkg)[0]
   return first ? dirname(first) : dirname(book.pkg.opfPath)
@@ -336,23 +395,6 @@ function chapterSkeleton(name: string, language: string): string {
 </body>
 </html>
 `
-}
-
-/** Drops TOC entries pointing at a removed file; a dangling entry can never resolve again. */
-function pruneToc(entries: TocEntry[], tocPath: string, removed: string): { entries: TocEntry[]; changed: boolean } {
-  let changed = false
-  const kept: TocEntry[] = []
-  for (const entry of entries) {
-    const href = entry.href.split('#')[0] ?? ''
-    if (href && resolvePath(dirname(tocPath), href) === removed) {
-      changed = true
-      continue
-    }
-    const children = pruneToc(entry.children, tocPath, removed)
-    if (children.changed) changed = true
-    kept.push(children.changed ? { ...entry, children: children.entries } : entry)
-  }
-  return { entries: kept, changed }
 }
 
 export function Editor({ bookId }: { bookId: string }) {
@@ -401,10 +443,17 @@ export function Editor({ bookId }: { bookId: string }) {
   /** Bumped when a form writes into an already-dirty file: the dirty set cannot signal that. */
   const [, setRevision] = useState(0)
   const [renaming, setRenaming] = useState<{ path: string; value: string; error: string | null } | null>(null)
-  const [deleting, setDeleting] = useState<{
-    path: string
-    references: Array<{ from: string; line: number }>
-  } | null>(null)
+  const [batchRenamePaths, setBatchRenamePaths] = useState<string[] | null>(null)
+  const [deleting, setDeleting] = useState<BatchDeleteInspection | null>(null)
+  const [selectionRemap, setSelectionRemap] = useState<FileTreeSelectionRemap | null>(null)
+  const protectedPaths = useMemo(
+    () => new Set<string>(book ? [CONTAINER_PATH, 'mimetype', book.pkg.opfPath] : [CONTAINER_PATH, 'mimetype']),
+    [book],
+  )
+  const existingArchivePaths = useMemo(
+    () => new Set<string>(book ? book.archive.entries.keys() : []),
+    [book],
+  )
   const tabsRef = useRef<string[]>([])
   const texts = useRef<Map<string, string>>(new Map())
   const baselineRef = useRef<SavedBaseline>(createSavedBaseline(new Map(), new Map()))
@@ -1507,6 +1556,40 @@ export function Editor({ bookId }: { bookId: string }) {
     setRenaming({ path, value: basename(path), error: null })
   }, [])
 
+  const applyRenames = useCallback(
+    (renames: ReadonlyMap<string, string>): { ok: true } | { ok: false; error: string } => {
+      const current = bookRef.current
+      if (!current) return { ok: false, error: '当前没有打开的书籍' }
+      wysiwygFlushRef.current?.()
+      try {
+        const result = renameFilesInBook({
+          files: new Map(texts.current),
+          pkg: current.pkg,
+          archive: current.archive,
+          renames,
+          codec: browserXmlCodec,
+        })
+        if (result.renames.size === 0) return { ok: true }
+
+        const entries = Array.from(result.renames.entries())
+        const label =
+          entries.length === 1
+            ? `已重命名为 ${basename(entries[0]![1])}`
+            : `已批量重命名 ${entries.length} 个文件`
+        pushStructureUndo(label, current)
+        const nextBook = remapBookAfterRenames(current, result.files, result.archive, result.pkg, result.renames)
+        const nextTabs = Array.from(new Set(tabsRef.current.map((entry) => result.renames.get(entry) ?? entry)))
+        const nextActive = activeRef.current ? (result.renames.get(activeRef.current) ?? activeRef.current) : null
+        applyStructureMutation(label, nextBook, result.files, { nextTabs, nextActive })
+        setSelectionRemap((prev) => ({ seq: (prev?.seq ?? 0) + 1, map: result.renames }))
+        return { ok: true }
+      } catch (error) {
+        return { ok: false, error: error instanceof Error ? error.message : '重命名失败' }
+      }
+    },
+    [applyStructureMutation, pushStructureUndo],
+  )
+
   const confirmRename = useCallback(() => {
     const current = bookRef.current
     if (!current || !renaming) return
@@ -1517,7 +1600,12 @@ export function Editor({ bookId }: { bookId: string }) {
     }
 
     const path = renaming.path
-    const target = `${dirname(path)}/${name}`
+    if (isProtectedArchivePath(path, current.pkg)) {
+      setRenaming({ ...renaming, error: '受保护的容器文件无法重命名' })
+      return
+    }
+    const dir = dirname(path)
+    const target = dir ? `${dir}/${name}` : name
     if (target === path) {
       setRenaming(null)
       return
@@ -1526,162 +1614,91 @@ export function Editor({ bookId }: { bookId: string }) {
       setRenaming({ ...renaming, error: '这个路径已经有文件了' })
       return
     }
-
-    const opfPath = current.pkg.opfPath
-    const baseDir = dirname(opfPath)
-    const files = new Map(texts.current)
-    let nextOpf: string
-    try {
-      nextOpf = renameManifestEntry(
-        files.get(opfPath) ?? '',
-        path,
-        relativePath(baseDir, target),
-        baseDir,
-        browserXmlCodec,
-      )
-    } catch {
+    if (!current.pkg.manifest.some((item) => item.path === path)) {
       setRenaming({ ...renaming, error: '这个条目不在 manifest 里，无法重命名' })
       return
     }
-    files.set(opfPath, nextOpf)
-    // Renaming without rewriting href/src leaves every chapter pointing at a file that is gone.
-    // See ADR 2026-11-19-file-structure-editing.
-    const rewritten = rewriteReferences(files, new Map([[path, target]]))
 
-    const entries = new Map(current.archive.entries)
-    const bytes = entries.get(path)
-    if (bytes) {
-      entries.delete(path)
-      entries.set(target, bytes)
+    const outcome = applyRenames(new Map([[path, target]]))
+    if (!outcome.ok) {
+      setRenaming({ ...renaming, error: outcome.error })
+      return
     }
-
-    const entryMeta = new Map(current.entryMeta)
-    const prevMeta = entryMeta.get(path)
-    if (prevMeta) {
-      entryMeta.delete(path)
-      entryMeta.set(target, { ...prevMeta, path: target })
-    }
-
-    const entryOrigins = new Map(current.entryOrigins)
-    const prevOrigin = entryOrigins.get(path)
-    entryOrigins.delete(path)
-    if (prevOrigin) entryOrigins.set(target, prevOrigin)
-
-    const localBinaries = new Map(current.localBinaries)
-    const prevLocalBin = localBinaries.get(path)
-    if (prevLocalBin) {
-      localBinaries.delete(path)
-      localBinaries.set(target, prevLocalBin)
-    }
-
-    const nextTexts = new Map(rewritten.files)
-    const moved = nextTexts.get(path)
-    nextTexts.delete(path)
-    if (moved !== undefined) nextTexts.set(target, moved)
-
-    const refreshed = refreshPackage(current, nextTexts, entries)
-    const next = { ...refreshed, entryMeta, entryOrigins, localBinaries }
-    texts.current = nextTexts
-    bookRef.current = next
-    setBook(next)
-    setTabs((list) => list.map((entry) => (entry === path ? target : entry)))
-    setActive((activePath) => (activePath === path ? target : activePath))
-    setExternalResetVersion((v) => v + 1)
     setRenaming(null)
-    const summary = syncDirtyFromBaseline(next)
-    syncDurability(summary)
-  }, [renaming, syncDirtyFromBaseline, syncDurability])
+  }, [applyRenames, renaming])
 
-  const requestDelete = useCallback((path: string) => {
-    const files = texts.current
-    const references = collectReferences(files)
-      .filter((reference) => reference.targetPath === path)
-      .map((reference) => ({
-        from: reference.from,
-        line: lineOf(files.get(reference.from) ?? '', reference.offset),
-      }))
-    setDeleting({ path, references })
+  const handleBatchRenameConfirm = useCallback(
+    (renames: Map<string, string>) => {
+      const outcome = applyRenames(renames)
+      if (!outcome.ok) {
+        setSaveError(outcome.error)
+      }
+    },
+    [applyRenames],
+  )
+
+  const requestDeletePaths = useCallback((paths: string[]) => {
+    const current = bookRef.current
+    if (!current) return
+    wysiwygFlushRef.current?.()
+    const inspection = inspectBatchDelete({
+      files: texts.current,
+      pkg: current.pkg,
+      paths,
+    })
+    if (inspection.paths.length === 0) return
+    setDeleting(inspection)
   }, [])
+
+  const requestDelete = useCallback(
+    (path: string) => {
+      requestDeletePaths([path])
+    },
+    [requestDeletePaths],
+  )
 
   const confirmDelete = useCallback(() => {
     const current = bookRef.current
     if (!current || !deleting) return
-    const path = deleting.path
-    const opfPath = current.pkg.opfPath
-    const nextTexts = new Map(texts.current)
-
+    wysiwygFlushRef.current?.()
     try {
-      nextTexts.set(
-        opfPath,
-        removeManifestEntry(nextTexts.get(opfPath) ?? '', path, dirname(opfPath), browserXmlCodec),
-      )
-    } catch {
+      const result = deleteFilesInBook({
+        files: new Map(texts.current),
+        pkg: current.pkg,
+        archive: current.archive,
+        paths: deleting.paths,
+        codec: browserXmlCodec,
+      })
+      if (result.removedPaths.length === 0) {
+        setDeleting(null)
+        return
+      }
+      const label =
+        result.removedPaths.length === 1
+          ? `已删除 ${basename(result.removedPaths[0]!)}`
+          : `已批量删除 ${result.removedPaths.length} 个文件`
+      pushStructureUndo(label, current)
+      const nextBook = reconcileBookAfterStructure(current, result.files, result.archive, result.pkg)
+      const removedSet = new Set(result.removedPaths)
+      const nextTabs = tabsRef.current.filter((entry) => !removedSet.has(entry))
+      const fallback = nextTabs[0] ?? spinePaths(nextBook.pkg)[0] ?? nextBook.groups[0]?.paths[0] ?? null
+      const nextActive = activeRef.current && removedSet.has(activeRef.current) ? fallback : activeRef.current
+      applyStructureMutation(label, nextBook, result.files, { nextTabs, nextActive })
       setDeleting(null)
-      return
+    } catch (error) {
+      setSaveError(error instanceof Error ? error.message : '删除失败')
+      setDeleting(null)
     }
+  }, [applyStructureMutation, deleting, pushStructureUndo])
 
-    const { navPath, ncxPath } = current.pkg
-    if (navPath) {
-      const navXml = nextTexts.get(navPath)
-      if (navXml) {
-        try {
-          const pruned = pruneToc(readNavToc(navXml, browserXmlCodec), navPath, path)
-          if (pruned.changed) nextTexts.set(navPath, writeNavToc(navXml, pruned.entries, browserXmlCodec))
-        } catch {
-          // An unreadable nav is left as it is; the check panel reports it.
-        }
-      }
-    }
-    if (ncxPath) {
-      const ncxXml = nextTexts.get(ncxPath)
-      if (ncxXml) {
-        try {
-          const pruned = pruneToc(readNcxToc(ncxXml, browserXmlCodec), ncxPath, path)
-          if (pruned.changed) nextTexts.set(ncxPath, writeNcxToc(ncxXml, pruned.entries, browserXmlCodec))
-        } catch {
-          // Same as above.
-        }
-      }
-    }
-
-    const entries = new Map(current.archive.entries)
-    entries.delete(path)
-    nextTexts.delete(path)
-
-    const entryMeta = new Map(current.entryMeta)
-    entryMeta.delete(path)
-    const entryOrigins = new Map(current.entryOrigins)
-    entryOrigins.delete(path)
-    const localBinaries = new Map(current.localBinaries)
-    localBinaries.delete(path)
-
-    const next = { ...refreshPackage(current, nextTexts, entries), entryMeta, entryOrigins, localBinaries }
-    texts.current = nextTexts
-    bookRef.current = next
-    setBook(next)
-    const fallback = spinePaths(next.pkg)[0] ?? next.groups[0]?.paths[0] ?? null
-    setTabs((list) => list.filter((entry) => entry !== path))
-    setActive((activePath) => (activePath === path ? fallback : activePath))
-    setExternalResetVersion((v) => v + 1)
-    setDeleting(null)
-    const summary = syncDirtyFromBaseline(next)
-    syncDurability(summary)
-  }, [deleting, syncDirtyFromBaseline, syncDurability])
-
-  const moveSpine = useCallback(
-    (path: string, delta: -1 | 1) => {
+  const moveSpineBatch = useCallback(
+    (paths: string[], delta: -1 | 1) => {
       const current = bookRef.current
-      if (!current) return
+      if (!current || paths.length === 0) return
       const order = spinePaths(current.pkg)
-      const index = order.indexOf(path)
-      const to = index + delta
-      const moved = order[index]
-      const swapped = order[to]
-      if (index < 0 || !moved || !swapped) return
+      const nextOrder = computeBatchSpineMove(order, new Set(paths), delta)
+      if (!nextOrder) return
 
-      const nextOrder = [...order]
-      nextOrder[index] = swapped
-      nextOrder[to] = moved
       const opfPath = current.pkg.opfPath
       let nextOpf: string
       try {
@@ -1691,16 +1708,30 @@ export function Editor({ bookId }: { bookId: string }) {
         return
       }
 
+      const label =
+        paths.length === 1
+          ? delta < 0
+            ? `已上移 ${basename(paths[0]!)}`
+            : `已下移 ${basename(paths[0]!)}`
+          : delta < 0
+            ? `已批量上移 ${paths.length} 章`
+            : `已批量下移 ${paths.length} 章`
+      pushStructureUndo(label, current)
       const nextTexts = new Map(texts.current)
       nextTexts.set(opfPath, nextOpf)
-      const next = refreshPackage(current, nextTexts, current.archive.entries)
-      texts.current = nextTexts
-      bookRef.current = next
-      setBook(next)
-      const summary = syncDirtyFromBaseline(next)
-      syncDurability(summary)
+      const nextEntries = new Map(current.archive.entries)
+      nextEntries.set(opfPath, encoder.encode(nextOpf))
+      const nextBook = refreshPackage(current, nextTexts, nextEntries)
+      applyStructureMutation(label, nextBook, nextTexts)
     },
-    [syncDirtyFromBaseline, syncDurability],
+    [applyStructureMutation, pushStructureUndo],
+  )
+
+  const moveSpine = useCallback(
+    (path: string, delta: -1 | 1) => {
+      moveSpineBatch([path], delta)
+    },
+    [moveSpineBatch],
   )
 
   const navigateTo = useCallback(
@@ -2950,9 +2981,11 @@ export function Editor({ bookId }: { bookId: string }) {
                 groups={book.groups}
                 active={activeReview ? activeReview.selectedPath : active}
                 dirty={dirty}
-                spinePaths={spinePaths(book.pkg)}
+                spinePaths={spineOrder}
+                protectedPaths={protectedPaths}
                 markerCounts={markerCounts}
                 reviewMarks={reviewMarks}
+                selectionRemap={selectionRemap}
                 onOpen={(path) => {
                   if (activeReview) {
                     const matched = activeReview.proposal.files.find(
@@ -3014,11 +3047,20 @@ export function Editor({ bookId }: { bookId: string }) {
                   startRename(path)
                   setTreeOpen(false)
                 }}
+                onBatchRename={(paths) => {
+                  setBatchRenamePaths(paths)
+                  setTreeOpen(false)
+                }}
                 onDelete={(path) => {
                   requestDelete(path)
                   setTreeOpen(false)
                 }}
+                onBatchDelete={(paths) => {
+                  requestDeletePaths(paths)
+                  setTreeOpen(false)
+                }}
                 onMove={moveSpine}
+                onBatchMove={moveSpineBatch}
               />
             ) : (
               <TocPanel
@@ -3430,52 +3472,31 @@ export function Editor({ bookId }: { bookId: string }) {
         ) : null}
       </Dialog>
 
-      <Dialog
+      <BatchRenameDialog
+        open={Boolean(batchRenamePaths && batchRenamePaths.length > 0)}
+        onOpenChange={(openState) => {
+          if (!openState) setBatchRenamePaths(null)
+        }}
+        paths={batchRenamePaths ?? []}
+        existingPaths={existingArchivePaths}
+        protectedPaths={protectedPaths}
+        onConfirm={handleBatchRenameConfirm}
+      />
+
+      <BatchDeleteDialog
         open={Boolean(deleting)}
         onOpenChange={(openState) => {
           if (!openState) setDeleting(null)
         }}
-        ariaLabel="删除文件"
-        title={deleting ? `删除 ${basename(deleting.path)}` : ''}
-        description={
-          deleting
-            ? deleting.references.length === 0
-              ? '没有别的地方引用它。删除后这个文件从书里消失，目录里指向它的条目也会一并移除。'
-              : `还有 ${deleting.references.length} 处引用它。删除后这些引用会断开，需要你自己去改：`
-            : undefined
-        }
-        footer={
-          <>
-            <Button variant="ghost" type="button" onClick={() => setDeleting(null)}>
-              取消
-            </Button>
-            <Button variant="danger" type="button" onClick={confirmDelete}>
-              删除
-            </Button>
-          </>
-        }
-      >
-        {deleting && deleting.references.length > 0 ? (
-          <ul className="reference-list">
-            {deleting.references.map((reference, index) => (
-              <li key={`${reference.from}:${reference.line}:${index}`}>
-                <button
-                  type="button"
-                  className="reference-item"
-                  onClick={() => {
-                    setDeleting(null)
-                    open(reference.from)
-                    setEditorMode('code')
-                    setReveal({ line: reference.line, column: 1, key: Date.now() })
-                  }}
-                >
-                  {basename(reference.from)} 第 {reference.line} 行
-                </button>
-              </li>
-            ))}
-          </ul>
-        ) : null}
-      </Dialog>
+        inspection={deleting}
+        onConfirm={confirmDelete}
+        onRevealReference={(from, line) => {
+          setDeleting(null)
+          open(from)
+          setEditorMode('code')
+          setReveal({ line, column: 1, key: Date.now() })
+        }}
+      />
 
       {historyPath ? (
         <VersionHistory
